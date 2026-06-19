@@ -2,16 +2,32 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { UpdateState } from '../../shared/types';
 
-const api = (window as any).whimAPI;
+function getApi(): any {
+  return typeof window === 'undefined' ? undefined : (window as any).whimAPI;
+}
 
-function UpdateBanner() {
+interface UpdateBannerProps {
+  onVisibilityChange?: (visible: boolean) => void;
+}
+
+export function isUpdateBannerVisible(state: UpdateState | null, dismissed: boolean): boolean {
+  if (!state || dismissed) return false;
+  return state.status === 'available'
+    || state.status === 'downloading'
+    || state.status === 'downloaded'
+    || state.status === 'error';
+}
+
+function UpdateBanner({ onVisibilityChange }: UpdateBannerProps) {
+  const api = getApi();
   const [state, setState] = useState<UpdateState | null>(null);
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     // Seed from the current state in case an event (e.g. an early error or a
     // ready-to-install update) fired before this component mounted.
-    api?.getUpdateState?.().then((s: UpdateState) => {
+    const currentState = api?.getUpdateState?.();
+    currentState?.then((s: UpdateState) => {
       setState((prev) => prev ?? s);
     }).catch(() => {});
 
@@ -24,25 +40,35 @@ function UpdateBanner() {
       }
     });
     return unsub;
-  }, []);
+  }, [api]);
 
   const handleInstall = useCallback(() => {
     api?.installUpdate();
-  }, []);
+  }, [api]);
 
   const handleDownload = useCallback(() => {
     api?.downloadUpdate();
-  }, []);
+  }, [api]);
 
   const handleRetry = useCallback(() => {
     api?.checkForUpdate();
-  }, []);
+  }, [api]);
 
   const handleDismiss = useCallback(() => {
     setDismissed(true);
   }, []);
 
-  if (!state || dismissed) return null;
+  const visible = isUpdateBannerVisible(state, dismissed);
+
+  useEffect(() => {
+    onVisibilityChange?.(visible);
+  }, [onVisibilityChange, visible]);
+
+  useEffect(() => {
+    return () => onVisibilityChange?.(false);
+  }, [onVisibilityChange]);
+
+  if (!visible || !state) return null;
 
   const { status, version, progress, error } = state;
 
@@ -52,8 +78,8 @@ function UpdateBanner() {
         <span className="update-banner__text">
           A new version{version ? ` (v${version})` : ''} is available
         </span>
-        <button className="update-banner__btn" onClick={handleDownload}>Download</button>
-        <button className="update-banner__dismiss" onClick={handleDismiss} title="Dismiss">✕</button>
+        <button type="button" className="update-banner__btn" onClick={handleDownload}>Download</button>
+        <button type="button" className="update-banner__dismiss" onClick={handleDismiss} title="Dismiss">✕</button>
       </div>
     );
   }
@@ -77,8 +103,8 @@ function UpdateBanner() {
         <span className="update-banner__text">
           Update ready{version ? ` (v${version})` : ''} — restart to apply
         </span>
-        <button className="update-banner__btn" onClick={handleInstall}>Restart Now</button>
-        <button className="update-banner__btn update-banner__btn--ghost" onClick={handleDismiss}>Later</button>
+        <button type="button" className="update-banner__btn" onClick={handleInstall}>Restart Now</button>
+        <button type="button" className="update-banner__btn update-banner__btn--ghost" onClick={handleDismiss}>Later</button>
       </div>
     );
   }
@@ -89,8 +115,8 @@ function UpdateBanner() {
         <span className="update-banner__text">
           Update failed{error ? `: ${error}` : ''}
         </span>
-        <button className="update-banner__btn" onClick={handleRetry}>Retry</button>
-        <button className="update-banner__dismiss" onClick={handleDismiss} title="Dismiss">✕</button>
+        <button type="button" className="update-banner__btn" onClick={handleRetry}>Retry</button>
+        <button type="button" className="update-banner__dismiss" onClick={handleDismiss} title="Dismiss">✕</button>
       </div>
     );
   }
@@ -101,10 +127,10 @@ function UpdateBanner() {
 
 let root: Root | null = null;
 
-export function mountUpdateBanner(container: HTMLElement): void {
+export function mountUpdateBanner(container: HTMLElement, props: UpdateBannerProps = {}): void {
   if (root) root.unmount();
   root = createRoot(container);
-  root.render(<UpdateBanner />);
+  root.render(<UpdateBanner {...props} />);
 }
 
 export function unmountUpdateBanner(): void {

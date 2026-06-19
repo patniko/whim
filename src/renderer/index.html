@@ -8,7 +8,6 @@
 </head>
 <body>
   <div id="app">
-    <div id="update-banner-root"></div>
     <!-- Welcome / setup view (shown when no workspace) -->
     <div id="welcome-view" class="welcome-view hidden">
       <div class="welcome-content">
@@ -132,10 +131,13 @@
       <div id="query-result" class="query-result hidden"></div>
 
       <div id="git-sync-bar" class="git-sync-bar hidden">
-        <span id="git-sync-branch" class="git-sync-branch"></span>
-        <span id="git-sync-status" class="git-sync-status"></span>
-        <button id="git-sync-pull" class="git-sync-btn hidden" title="Pull changes from remote">↓ <span id="git-sync-behind-count">0</span></button>
-        <button id="git-sync-push" class="git-sync-btn hidden" title="Push changes to remote">↑ <span id="git-sync-ahead-count">0</span></button>
+        <div id="update-banner-root" class="update-banner-root hidden"></div>
+        <div id="git-sync-content" class="git-sync-content">
+          <span id="git-sync-branch" class="git-sync-branch"></span>
+          <span id="git-sync-status" class="git-sync-status"></span>
+          <button id="git-sync-pull" class="git-sync-btn hidden" title="Pull changes from remote">↓ <span id="git-sync-behind-count">0</span></button>
+          <button id="git-sync-push" class="git-sync-btn hidden" title="Push changes to remote">↑ <span id="git-sync-ahead-count">0</span></button>
+        </div>
       </div>
     </div>
 

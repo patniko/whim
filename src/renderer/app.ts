@@ -369,8 +369,6 @@ const mainView = document.getElementById('main-view') as HTMLDivElement;
 // ── Update banner ───────────────────────────────────────
 import { mountUpdateBanner } from './views/UpdateBanner.tsx';
 import { applyTheme, getResolvedTheme, normalizeChoice, type ThemeChoice } from './theme';
-const updateBannerRoot = document.getElementById('update-banner-root');
-if (updateBannerRoot) mountUpdateBanner(updateBannerRoot);
 
 // ── React migration: stores + IPC bridge + mount for the four main lists ──
 // These run alongside the legacy imperative DOM code during the migration.
@@ -461,9 +459,12 @@ const gitSyncPullBtn = document.getElementById('git-sync-pull') as HTMLButtonEle
 const gitSyncPushBtn = document.getElementById('git-sync-push') as HTMLButtonElement;
 const gitSyncBehindCount = document.getElementById('git-sync-behind-count') as HTMLSpanElement;
 const gitSyncAheadCount = document.getElementById('git-sync-ahead-count') as HTMLSpanElement;
+const updateBannerRoot = document.getElementById('update-banner-root') as HTMLDivElement | null;
 let lastGitSyncAhead = 0;
 let lastGitSyncBehind = 0;
 let gitSyncInitialized = false;
+let gitSyncAvailable = false;
+let updateBannerVisible = false;
 
 // ── Platform detection ──────────────────────────────────
 // Set platform class on body for platform-adaptive styling
@@ -577,13 +578,34 @@ function updateWorkersBadge(): void {
 
 // ── Git sync bar ────────────────────────────────────────
 
+function syncGitBarVisibility(): void {
+  gitSyncBar.classList.toggle('hidden', !gitSyncAvailable && !updateBannerVisible);
+  gitSyncBar.classList.toggle('git-sync-bar--git-unavailable', !gitSyncAvailable);
+}
+
+if (updateBannerRoot) {
+  mountUpdateBanner(updateBannerRoot, {
+    onVisibilityChange: (visible) => {
+      updateBannerVisible = visible;
+      updateBannerRoot.classList.toggle('hidden', !visible);
+      syncGitBarVisibility();
+    },
+  });
+}
+
 function updateGitSyncBar(status: { available: boolean; branch: string | null; ahead: number; behind: number; unavailableReason?: string }): void {
+  gitSyncAvailable = status.available;
+
   if (!status.available) {
-    gitSyncBar.classList.add('hidden');
+    gitSyncBranch.textContent = '';
+    gitSyncStatusEl.textContent = '';
+    gitSyncPullBtn.classList.add('hidden');
+    gitSyncPushBtn.classList.add('hidden');
+    syncGitBarVisibility();
     return;
   }
 
-  gitSyncBar.classList.remove('hidden');
+  syncGitBarVisibility();
   gitSyncBranch.textContent = status.branch ? `⎇ ${status.branch}` : '';
   gitSyncBehindCount.textContent = String(status.behind);
   gitSyncAheadCount.textContent = String(status.ahead);
@@ -620,7 +642,8 @@ async function refreshGitSync(): Promise<void> {
     const status = await whimAPI.gitSyncStatus();
     updateGitSyncBar(status);
   } catch {
-    gitSyncBar.classList.add('hidden');
+    gitSyncAvailable = false;
+    syncGitBarVisibility();
   }
 }
 
@@ -8295,7 +8318,8 @@ whimAPI.onWorkspaceChanged((path: string | null) => {
     personaStore.setPersonas([]);
     render();
     showWelcomeView();
-    gitSyncBar.classList.add('hidden');
+    gitSyncAvailable = false;
+    syncGitBarVisibility();
     gitSyncInitialized = false;
   }
 });

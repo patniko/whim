@@ -2110,9 +2110,35 @@ body.dark .waveform-canvas {
   bottom: 0;
   background: var(--bg, #fff);
   z-index: 5;
+  -webkit-app-region: no-drag;
 }
 
 .git-sync-bar.hidden {
+  display: none;
+}
+
+.update-banner-root {
+  flex: 1;
+  min-width: 0;
+}
+
+.update-banner-root.hidden {
+  display: none;
+}
+
+.git-sync-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.update-banner-root:not(.hidden) + .git-sync-content {
+  flex: 0 1 auto;
+}
+
+.git-sync-bar--git-unavailable .git-sync-content {
   display: none;
 }
 
@@ -10200,10 +10226,12 @@ body.dark .canvas-chat-pane {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  padding: 3px 8px;
   font-size: var(--fs-label);
   color: #fff;
+  border-radius: 10px;
   z-index: 9999;
+  -webkit-app-region: no-drag;
 }
 
 .update-banner--available { background: #1a6fb5; }
@@ -10228,6 +10256,7 @@ body.dark .canvas-chat-pane {
   color: #fff;
   font-size: var(--fs-label);
   cursor: pointer;
+  -webkit-app-region: no-drag;
 }
 .update-banner__btn:hover { background: rgba(255, 255, 255, 0.25); }
 
@@ -10246,6 +10275,7 @@ body.dark .canvas-chat-pane {
   cursor: pointer;
   padding: 0 2px;
   line-height: 1;
+  -webkit-app-region: no-drag;
 }
 .update-banner__dismiss:hover { color: #fff; }
 
