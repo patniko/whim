@@ -1030,19 +1030,19 @@ body.dark .hotkey-binding:focus-visible {
 }
 
 .hotkey-binding.recording {
-  border-color: #2d6cdf;
-  background: rgba(45, 108, 223, 0.08);
+  border-color: var(--set-accent, #7c66dc);
+  background: var(--set-accent-subtle, rgba(124, 102, 220, 0.08));
   animation: hotkeyPulse 1.2s ease-in-out infinite;
 }
 
 body.dark .hotkey-binding.recording {
-  border-color: #6ea0ff;
-  background: rgba(110, 160, 255, 0.12);
+  border-color: var(--set-accent, #a594e8);
+  background: var(--set-accent-subtle, rgba(165, 148, 232, 0.12));
 }
 
 @keyframes hotkeyPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(45, 108, 223, 0.2); }
-  50% { box-shadow: 0 0 0 3px rgba(45, 108, 223, 0.1); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 102, 220, 0.2); }
+  50% { box-shadow: 0 0 0 3px rgba(124, 102, 220, 0.1); }
 }
 
 body.dark .hotkey-binding.recording {
@@ -1050,8 +1050,8 @@ body.dark .hotkey-binding.recording {
 }
 
 @keyframes hotkeyPulseDark {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(110, 160, 255, 0.2); }
-  50% { box-shadow: 0 0 0 3px rgba(110, 160, 255, 0.1); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(165, 148, 232, 0.2); }
+  50% { box-shadow: 0 0 0 3px rgba(165, 148, 232, 0.1); }
 }
 
 .hotkey-binding .hotkey-kbd {
@@ -1610,10 +1610,13 @@ body.dark .sandbox-block-banner-btn:hover {
 }
 
 .web-remote-settings {
-  border: 1px solid rgba(124, 102, 220, 0.12);
-  border-radius: var(--card-inner-radius);
-  padding: 12px;
-  background: rgba(124, 102, 220, 0.04);
+  border: 1px solid var(--set-border-muted, rgba(124, 102, 220, 0.12));
+  border-radius: var(--set-radius, 10px);
+  padding: 14px;
+  background: var(--set-surface-muted, rgba(124, 102, 220, 0.04));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .web-remote-port-row label {
@@ -1628,9 +1631,10 @@ body.dark .sandbox-block-banner-btn:hover {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px;
-  border-radius: var(--card-inner-radius);
-  background: var(--card-inner-bg);
+  padding: 10px;
+  border-radius: var(--set-radius-sm, 8px);
+  background: var(--set-control-bg, var(--card-inner-bg));
+  border: 1px solid var(--set-border-muted, transparent);
 }
 
 .web-remote-interface-option {
@@ -1654,9 +1658,10 @@ body.dark .sandbox-block-banner-btn:hover {
 }
 
 .web-remote-url {
-  padding: 6px 8px;
-  border-radius: var(--btn-radius);
-  background: rgba(0, 0, 0, 0.04);
+  padding: 7px 10px;
+  border-radius: var(--set-radius-sm, 6px);
+  background: var(--set-control-bg, rgba(0, 0, 0, 0.04));
+  border: 1px solid var(--set-border-muted, transparent);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: var(--fs-label);
   user-select: text;
@@ -1681,18 +1686,51 @@ body.dark .sandbox-block-banner-btn:hover {
   color: #b91414;
 }
 
-/* Persona form checkbox labels (sandbox, yolo, etc.) */
+/* Persona form checkbox labels (sandbox, yolo, etc.) render as toggle switches */
 .persona-form-checkbox-label {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
   font-size: var(--fs-body);
-  color: rgba(0, 0, 0, 0.85);
+  color: var(--set-text, rgba(0, 0, 0, 0.85));
   cursor: pointer;
 }
 
 .persona-form-checkbox-label input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  order: 2;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--set-switch-off, rgba(0, 0, 0, 0.2));
   cursor: pointer;
+  transition: background var(--motion-base) ease;
+}
+
+.persona-form-checkbox-label input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform var(--motion-base) ease;
+}
+
+.persona-form-checkbox-label input[type="checkbox"]:checked {
+  background: var(--set-accent, #7c66dc);
+}
+
+.persona-form-checkbox-label input[type="checkbox"]:checked::after {
+  transform: translateX(14px);
 }
 
 body.dark .persona-form-checkbox-label {
@@ -3406,8 +3444,13 @@ body.dark .skill-action:hover {
 }
 
 .workspace-path {
-  font-size: var(--fs-body);
-  color: rgba(0, 0, 0, 0.7);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: var(--fs-label);
+  color: var(--set-text, rgba(0, 0, 0, 0.7));
+  background: var(--set-surface-muted, rgba(0, 0, 0, 0.03));
+  border: 1px solid var(--set-border-muted, rgba(0, 0, 0, 0.07));
+  border-radius: var(--set-radius-sm, 6px);
+  padding: 7px 10px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3419,8 +3462,7 @@ body.dark .skill-action:hover {
 }
 
 .workspace-path.clickable:hover {
-  color: rgba(0, 0, 0, 0.7);
-  text-decoration: underline;
+  border-color: var(--set-control-border, rgba(0, 0, 0, 0.16));
 }
 
 .workspace-btn {
@@ -3538,15 +3580,16 @@ body.dark .cli-runtime-status {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px 10px;
-  background: rgba(255, 255, 255, 0.6);
-  border: 1px solid rgba(140, 120, 180, 0.08);
-  border-radius: 2px;
-  transition: background 0.15s ease;
+  padding: 10px 12px;
+  background: var(--set-surface-muted, rgba(255, 255, 255, 0.6));
+  border: 1px solid var(--set-border-muted, rgba(0, 0, 0, 0.07));
+  border-radius: var(--set-radius, 10px);
+  transition: background var(--motion-base) ease, border-color var(--motion-base) ease;
 }
 
 .persona-card:hover {
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--set-surface-hover, rgba(255, 255, 255, 0.85));
+  border-color: var(--set-border, rgba(0, 0, 0, 0.1));
 }
 
 .persona-card-info {
@@ -3560,12 +3603,12 @@ body.dark .cli-runtime-status {
 .persona-card-handle {
   font-size: var(--fs-body);
   font-weight: 600;
-  color: #7c66dc;
+  color: var(--set-accent, #7c66dc);
 }
 
 .persona-card-instructions {
   font-size: var(--fs-label);
-  color: rgba(0, 0, 0, 0.75);
+  color: var(--set-text, rgba(0, 0, 0, 0.75));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3573,7 +3616,7 @@ body.dark .cli-runtime-status {
 
 .persona-card-meta {
   font-size: var(--fs-caption);
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--set-text-muted, rgba(0, 0, 0, 0.6));
 }
 
 .persona-card-meta.unavailable {
@@ -3591,15 +3634,15 @@ body.dark .cli-runtime-status {
   border: none;
   cursor: pointer;
   font-size: var(--fs-body);
-  color: rgba(0, 0, 0, 0.65);
-  padding: 2px 4px;
-  border-radius: 1px;
-  transition: all 0.15s ease;
+  color: var(--set-text-muted, rgba(0, 0, 0, 0.65));
+  padding: 4px 6px;
+  border-radius: var(--set-radius-sm, 6px);
+  transition: background var(--motion-base) ease, color var(--motion-base) ease;
 }
 
 .persona-action-btn:hover {
-  color: rgba(0, 0, 0, 0.85);
-  background: rgba(0, 0, 0, 0.06);
+  color: var(--set-text, rgba(0, 0, 0, 0.85));
+  background: var(--set-surface-hover, rgba(0, 0, 0, 0.06));
 }
 
 .persona-action-btn.danger:hover {
@@ -3632,17 +3675,17 @@ body.dark .cli-runtime-status {
 .persona-form {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  background: rgba(255, 255, 255, 0.6);
-  border: 1px solid rgba(124, 102, 220, 0.3);
-  border-radius: var(--btn-radius);
+  gap: 10px;
+  padding: 14px;
+  background: var(--set-surface-muted, rgba(255, 255, 255, 0.6));
+  border: 1px solid var(--set-border, rgba(124, 102, 220, 0.3));
+  border-radius: var(--set-radius, 10px);
 }
 
 .persona-form-row {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 
 .export-dest-path-row .persona-form-input {
@@ -3653,33 +3696,34 @@ body.dark .cli-runtime-status {
 .persona-handle-prefix {
   font-size: var(--fs-body);
   font-weight: 600;
-  color: #7c66dc;
+  color: var(--set-accent, #7c66dc);
   padding-left: 2px;
 }
 
 .persona-form-input {
   flex: 1;
-  background: #ffffff;
-  border: 1px solid rgba(140, 120, 180, 0.12);
-  border-radius: var(--btn-radius);
-  padding: 6px 8px;
+  background: var(--set-control-bg, #ffffff);
+  border: 1px solid var(--set-control-border, rgba(0, 0, 0, 0.16));
+  border-radius: var(--set-radius-sm, 6px);
+  padding: 7px 9px;
   font-size: var(--fs-body);
-  color: #2c2c3a;
+  color: var(--set-text, #2c2c3a);
   outline: none;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--motion-base) ease, box-shadow var(--motion-base) ease;
 }
 
 .persona-form-input:focus {
-  border-color: rgba(124, 102, 220, 0.5);
+  border-color: var(--set-accent, #7c66dc);
+  box-shadow: 0 0 0 3px var(--set-accent-subtle, rgba(124, 102, 220, 0.12));
 }
 
 .emoji-picker-btn {
   flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
-  border: 1px solid rgba(140, 120, 180, 0.12);
-  border-radius: 1.5px;
-  background: #ffffff;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--set-control-border, rgba(0, 0, 0, 0.16));
+  border-radius: var(--set-radius-sm, 6px);
+  background: var(--set-control-bg, #ffffff);
   font-size: var(--fs-section);
   line-height: 1;
   cursor: pointer;
@@ -3689,7 +3733,7 @@ body.dark .cli-runtime-status {
 }
 
 .emoji-picker-btn:hover {
-  border-color: rgba(124, 102, 220, 0.5);
+  border-color: var(--set-accent, rgba(124, 102, 220, 0.5));
 }
 
 .emoji-picker-popup {
@@ -3737,49 +3781,51 @@ body.dark .emoji-picker-popup {
 
 .persona-form-textarea {
   width: 100%;
-  background: #ffffff;
-  border: 1px solid rgba(140, 120, 180, 0.12);
-  border-radius: var(--btn-radius);
-  padding: 6px 8px;
+  background: var(--set-control-bg, #ffffff);
+  border: 1px solid var(--set-control-border, rgba(0, 0, 0, 0.16));
+  border-radius: var(--set-radius-sm, 6px);
+  padding: 7px 9px;
   font-size: var(--fs-body);
-  color: #2c2c3a;
+  color: var(--set-text, #2c2c3a);
   outline: none;
   resize: vertical;
   font-family: inherit;
-  transition: border-color 0.15s ease;
+  transition: border-color var(--motion-base) ease, box-shadow var(--motion-base) ease;
   box-sizing: border-box;
 }
 
 .persona-form-textarea:focus {
-  border-color: rgba(124, 102, 220, 0.5);
+  border-color: var(--set-accent, #7c66dc);
+  box-shadow: 0 0 0 3px var(--set-accent-subtle, rgba(124, 102, 220, 0.12));
 }
 
 .persona-form-label {
   font-size: var(--fs-body);
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--set-text-muted, rgba(0, 0, 0, 0.6));
   white-space: nowrap;
   min-width: 40px;
 }
 
 .persona-form-select {
   flex: 1;
-  background: #ffffff;
-  border: 1px solid rgba(140, 120, 180, 0.12);
-  border-radius: var(--btn-radius);
-  padding: 6px 8px;
+  background: var(--set-control-bg, #ffffff);
+  border: 1px solid var(--set-control-border, rgba(0, 0, 0, 0.16));
+  border-radius: var(--set-radius-sm, 6px);
+  padding: 7px 9px;
   font-size: var(--fs-body);
-  color: #2c2c3a;
+  color: var(--set-text, #2c2c3a);
   outline: none;
   cursor: pointer;
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='rgba(0,0,0,0.3)'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='rgba(0,0,0,0.4)'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 8px center;
-  padding-right: 22px;
+  background-position: right 10px center;
+  padding-right: 26px;
 }
 
 .persona-form-select:focus {
-  border-color: rgba(124, 102, 220, 0.5);
+  border-color: var(--set-accent, #7c66dc);
+  box-shadow: 0 0 0 3px var(--set-accent-subtle, rgba(124, 102, 220, 0.12));
 }
 
 .persona-form-error {
@@ -3809,8 +3855,8 @@ body.dark .emoji-picker-popup {
 
 .persona-sandbox-info {
   font-size: var(--fs-caption);
-  color: rgba(0, 0, 0, 0.45);
-  padding: 2px 0 0 22px;
+  color: var(--set-text-subtle, rgba(0, 0, 0, 0.45));
+  padding: 2px 0 0 0;
   line-height: 1.4;
 }
 
@@ -3821,34 +3867,36 @@ body.dark .emoji-picker-popup {
 }
 
 .persona-form-save {
-  background: #7c66dc;
-  color: #ffffff;
+  background: var(--set-accent, #7c66dc);
+  color: var(--set-accent-fg, #ffffff);
   border: none;
-  border-radius: 1.5px;
-  padding: 5px 12px;
+  border-radius: var(--set-radius-sm, 6px);
+  padding: 6px 14px;
   font-size: var(--fs-label);
+  font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: background var(--motion-base) ease, filter var(--motion-base) ease;
 }
 
 .persona-form-save:hover {
-  background: #6a52c9;
+  filter: brightness(1.06);
 }
 
 .persona-form-cancel {
   background: none;
-  color: rgba(0, 0, 0, 0.55);
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  border-radius: 1.5px;
-  padding: 5px 12px;
+  color: var(--set-text-muted, rgba(0, 0, 0, 0.55));
+  border: 1px solid var(--set-control-border, rgba(0, 0, 0, 0.12));
+  border-radius: var(--set-radius-sm, 6px);
+  padding: 6px 14px;
   font-size: var(--fs-label);
+  font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background var(--motion-base) ease, color var(--motion-base) ease;
 }
 
 .persona-form-cancel:hover {
-  background: rgba(0, 0, 0, 0.04);
-  color: rgba(0, 0, 0, 0.75);
+  background: var(--set-surface-hover, rgba(0, 0, 0, 0.04));
+  color: var(--set-text, rgba(0, 0, 0, 0.75));
 }
 
 /* ── MCP & CLI Tool Cards ─────────────────────────────── */
@@ -3864,15 +3912,16 @@ body.dark .emoji-picker-popup {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px 10px;
-  background: rgba(255, 255, 255, 0.6);
-  border: 1px solid rgba(140, 120, 180, 0.08);
-  border-radius: var(--btn-radius);
-  transition: background 0.15s ease;
+  padding: 10px 12px;
+  background: var(--set-surface-muted, rgba(255, 255, 255, 0.6));
+  border: 1px solid var(--set-border-muted, rgba(0, 0, 0, 0.07));
+  border-radius: var(--set-radius, 10px);
+  transition: background var(--motion-base) ease, border-color var(--motion-base) ease;
 }
 
 .mcp-card:hover {
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--set-surface-hover, rgba(255, 255, 255, 0.85));
+  border-color: var(--set-border, rgba(0, 0, 0, 0.1));
 }
 
 .mcp-card-info {
@@ -3892,14 +3941,14 @@ body.dark .emoji-picker-popup {
 
 .mcp-card-meta {
   font-size: var(--fs-caption);
-  color: rgba(0, 0, 0, 0.7);
+  color: var(--set-text-muted, rgba(0, 0, 0, 0.7));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .mcp-card-source {
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--set-text-subtle, rgba(0, 0, 0, 0.6));
   font-style: italic;
 }
 
@@ -10519,14 +10568,14 @@ body.dark .profile-mark { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2); 
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: var(--btn-radius);
-  background: rgba(0, 0, 0, 0.015);
+  padding: 8px 10px;
+  border: 1px solid var(--set-border-muted, rgba(0, 0, 0, 0.08));
+  border-radius: var(--set-radius, 10px);
+  background: var(--set-surface-muted, rgba(0, 0, 0, 0.015));
 }
 .profile-row.active {
-  border-color: color-mix(in srgb, #7c66dc 45%, rgba(0, 0, 0, 0.08));
-  background: rgba(124, 102, 220, 0.05);
+  border-color: var(--set-accent, color-mix(in srgb, #7c66dc 45%, rgba(0, 0, 0, 0.08)));
+  background: var(--set-accent-subtle, rgba(124, 102, 220, 0.05));
 }
 .profile-swatch {
   width: 22px;
@@ -10552,14 +10601,16 @@ body.dark .profile-mark { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2); 
 .profile-name-input {
   flex: 0 1 280px;
   min-width: 0;
-  background: #fff;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: var(--btn-radius);
-  padding: 4px 8px;
+  background: var(--set-control-bg, #fff);
+  border: 1px solid var(--set-control-border, rgba(0, 0, 0, 0.12));
+  border-radius: var(--set-radius-sm, 6px);
+  padding: 6px 9px;
   font-size: var(--fs-label);
-  color: rgba(0, 0, 0, 0.85);
+  color: var(--set-text, rgba(0, 0, 0, 0.85));
+  outline: none;
+  transition: border-color var(--motion-base) ease, box-shadow var(--motion-base) ease;
 }
-.profile-name-input:focus { outline: none; border-color: #7c66dc; }
+.profile-name-input:focus { border-color: var(--set-accent, #7c66dc); box-shadow: 0 0 0 3px var(--set-accent-subtle, rgba(124, 102, 220, 0.12)); }
 .profile-path {
   flex: none;
   margin-left: auto;
