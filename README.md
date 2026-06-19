@@ -234,24 +234,6 @@ npm run test:watch    # Watch mode
 
 Tests cover: database operations, validators, config, MCP servers, agent service, workspace, event log, session management, cloud agent parsing, the canvas editor, and integration tests.
 
-## Screenshots
-
-<!--
-  Drop real captures here (light + dark) for the best first impression. Suggested set:
-    docs/screenshots/spaces-light.png   — the Spaces list with a few intents + a working agent
-    docs/screenshots/canvas-dark.png    — the markdown canvas with an agent comment
-    docs/screenshots/workers.png        — the Workers tab with live steps
-    docs/screenshots/welcome.png        — the first-run welcome screen
-  Then reference them, e.g.:
-    <p align="center">
-      <img src="docs/screenshots/spaces-light.png" width="420" alt="Spaces">
-      <img src="docs/screenshots/canvas-dark.png" width="420" alt="Canvas">
-    </p>
--->
-
-> 📸 A picture gallery is on the way. In the meantime, the
-> **[interactive walkthrough](./walkthrough)** is the best way to see whim in motion.
-
 ## License
 
 [MIT](./LICENSE) © Patrick Nikoletich
