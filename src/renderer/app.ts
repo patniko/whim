@@ -5037,9 +5037,18 @@ bridgeApi.onUpdateStateChanged((state) => {
 
 // ── Settings tabs ───────────────────────────────────────
 const SETTINGS_TAB_KEY = 'whim.settingsTab';
+const SETTINGS_TAB_TITLES: Record<string, string> = {
+  general: 'General',
+  environment: 'Environment',
+  remote: 'Remote',
+  tools: 'Tools',
+  personas: 'Agents',
+  hotkeys: 'Hotkeys',
+};
 function initSettingsTabs(): void {
   const tabs = document.querySelectorAll<HTMLButtonElement>('.settings-tab-btn');
   const panels = document.querySelectorAll<HTMLElement>('.settings-tab-panel');
+  const titleEl = document.getElementById('settings-active-title');
   if (!tabs.length || !panels.length) return;
   const stored = localStorage.getItem(SETTINGS_TAB_KEY);
   const activate = (name: string) => {
@@ -5053,6 +5062,7 @@ function initSettingsTabs(): void {
       p.classList.toggle('active', p.dataset.tab === name);
     });
     if (matched) {
+      if (titleEl) titleEl.textContent = SETTINGS_TAB_TITLES[name] ?? 'Settings';
       try { localStorage.setItem(SETTINGS_TAB_KEY, name); } catch { /* ignore */ }
     }
   };
