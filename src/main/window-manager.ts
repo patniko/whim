@@ -24,8 +24,8 @@ const CANVAS_WIDTH = 780;
 const CANVAS_HEIGHT = 700;
 
 // ── Geometry constants (settings window) ─────────────────
-const SETTINGS_WIDTH = 720;
-const SETTINGS_HEIGHT = 700;
+const SETTINGS_WIDTH = 900;
+const SETTINGS_HEIGHT = 680;
 
 // ── Module state ─────────────────────────────────────────
 let mainWindow: BrowserWindow | null = null;
