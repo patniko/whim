@@ -57,13 +57,21 @@ export function registerAgentHandlers(): void {
         id: agentId, session_id: result.sessionId, space_id: target.launchSpaceId,
         prompt: commentBody, status: 'running', summary,
         working_dir: workspace, source: 'cca' as any, persona_handle: persona.handle,
-        quoted_text: quotedText || null, run_location: 'cloud',
+        quoted_text: quotedText || null, comment_thread_id: threadId,
+        run_location: 'cloud',
         created_at: now, updated_at: now,
       });
 
       const { startCloudJobPoller } = await import('../cloud-agent-poller');
       startCloudJobPoller(agentId, effective.owner, effective.repo, result.jobId, token);
-      notifyAllWindows('agent:status-changed', { agentId, status: 'running', summary, fallback });
+      notifyAllWindows('agent:status-changed', {
+        agentId,
+        status: 'running',
+        summary,
+        fallback,
+        spaceId: target.launchSpaceId,
+        threadId,
+      });
 
       return { agentId, sessionId: result.sessionId, fallback };
     }

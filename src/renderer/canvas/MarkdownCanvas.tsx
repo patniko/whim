@@ -20,7 +20,7 @@ import type {
 import { splitComments, joinComments, extractMentions, newThreadId } from './editor/comments';
 import { SelectionToolbar, CommentComposer, CommentPopover } from './editor/CommentUI';
 import { MentionPopup } from './editor/MentionUI';
-import { filterMentionCandidates, type MentionCandidate } from './editor/mentions';
+import { filterMentionCandidates, normalizeMentionLaunchText, type MentionCandidate } from './editor/mentions';
 import type { Rect, SelectionInfo, MentionQuery, FormatMark } from './editor/geometry';
 import { FrontmatterEditor } from './FrontmatterEditor';
 import { VoiceRecorderButton, type VoiceRecordingResult } from './VoiceRecorderButton';
@@ -222,6 +222,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     // Mention suggestion state
     const [mentionQuery, setMentionQuery] = useState<MentionQuery | null>(null);
     const [mentionIndex, setMentionIndex] = useState(0);
+    const mentionQueryRef = useRef<MentionQuery | null>(null);
     const recentInlineMentions = useRef(new Set<string>());
 
     const personasRef = useRef(personas);
@@ -720,24 +721,31 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     const mentionIndexRef = useRef(mentionIndex);
     mentionIndexRef.current = mentionIndex;
 
+    const closeMentionQuery = useCallback(() => {
+      mentionQueryRef.current = null;
+      setMentionQuery(null);
+    }, []);
+
     const handleMentionQuery = useCallback((info: MentionQuery | null) => {
+      mentionQueryRef.current = info;
       setMentionQuery(info);
       setMentionIndex(0);
     }, []);
 
     const applySelectedMention = useCallback((handle: string) => {
-      const mq = mentionQuery;
+      const mq = mentionQueryRef.current;
       if (!mq) return;
+      mentionQueryRef.current = null;
       setMentionQuery(null);
       const result = editorRef.current?.applyMention(handle, mq.from, mq.to);
       if (result && onInlineMention) {
-        const key = `${handle}:${result.lineNumber}:${result.lineMarkdown}`;
+        const key = `${handle}:${result.lineNumber}:${normalizeMentionLaunchText(result.lineMarkdown)}`;
         if (recentInlineMentions.current.has(key)) return;
         recentInlineMentions.current.add(key);
         setTimeout(() => recentInlineMentions.current.delete(key), 5000);
         onInlineMention(handle, result.lineMarkdown, result.lineNumber);
       }
-    }, [mentionQuery, onInlineMention]);
+    }, [onInlineMention]);
 
     // Intercept navigation keys while the mention popup is open (before the editor).
     useEffect(() => {
@@ -745,7 +753,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       const handler = (e: KeyboardEvent) => {
         const list = mentionCandidatesRef.current;
         if (list.length === 0) {
-          if (e.key === 'Escape') setMentionQuery(null);
+          if (e.key === 'Escape') closeMentionQuery();
           return;
         }
         if (e.key === 'ArrowDown') {
@@ -760,12 +768,12 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
           if (c) applySelectedMention(c.handle);
         } else if (e.key === 'Escape') {
           e.preventDefault();
-          setMentionQuery(null);
+          closeMentionQuery();
         }
       };
       document.addEventListener('keydown', handler, true);
       return () => document.removeEventListener('keydown', handler, true);
-    }, [mentionQuery, applySelectedMention]);
+    }, [mentionQuery, applySelectedMention, closeMentionQuery]);
 
     // File drag-and-drop handler
     useEffect(() => {

@@ -10,6 +10,10 @@ export interface TextMentionQuery {
   query: string;
 }
 
+export function normalizeMentionLaunchText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
 export function detectMentionBeforeCaret(text: string, caret: number): TextMentionQuery | null {
   if (caret < 0 || caret > text.length) return null;
   const before = text.slice(0, caret);

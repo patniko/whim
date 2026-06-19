@@ -424,7 +424,10 @@ async function launchFromCommentArgs(args: unknown[]): Promise<unknown> {
   if (persona.runLocation === 'cca') {
     const documentPath = target.documentPath ? path.relative(workspace, target.documentPath) : `${target.folder}/canvas.md`;
     const prompt = `${persona.instructions}\n\nDocument: ${documentPath}\nComment: "${commentBody}"\nOn text: "${quotedText}"`;
-    return launchCloudAgent(target.launchSpaceId, prompt, workspace, persona.handle);
+    return launchCloudAgent(target.launchSpaceId, prompt, workspace, persona.handle, {
+      quotedText,
+      threadId,
+    });
   }
 
   const { launchCommentAgent } = await import('../agent-service');
@@ -467,6 +470,7 @@ async function launchCloudAgent(
   prompt: string,
   workspace: string,
   personaHandle: string | null,
+  options?: { quotedText?: string; threadId?: string | null },
 ): Promise<unknown> {
   const { getWorkspaceRepo, getGitHubToken, launchCloudAgentWithFallback } = await import('../cloud-agent');
   const repoInfo = await getWorkspaceRepo(workspace);
@@ -499,7 +503,8 @@ async function launchCloudAgent(
     working_dir: workspace,
     source: 'cca' as any,
     persona_handle: personaHandle,
-    quoted_text: null,
+    quoted_text: options?.quotedText ?? null,
+    comment_thread_id: options?.threadId ?? null,
     run_location: 'cloud',
     created_at: now,
     updated_at: now,
@@ -507,7 +512,14 @@ async function launchCloudAgent(
 
   const { startCloudJobPoller } = await import('../cloud-agent-poller');
   startCloudJobPoller(agentId, effective.owner, effective.repo, result.jobId, token);
-  notifyAllWindows('agent:status-changed', { agentId, status: 'running', summary, fallback });
+  notifyAllWindows('agent:status-changed', {
+    agentId,
+    status: 'running',
+    summary,
+    fallback,
+    spaceId,
+    threadId: options?.threadId ?? null,
+  });
 
   return { agentId, sessionId: result.sessionId, jobId: result.jobId, fallback };
 }

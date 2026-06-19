@@ -5881,6 +5881,7 @@ import { mountCanvas, unmountCanvas, getCanvasContent, saveCanvas as saveCanvasE
 import { mountCanvasWorkerPanel, unmountCanvasWorkerPanel, isCanvasChatPaneOpen, closeCanvasChatPane } from './canvas/worker-panel-mount.tsx';
 import type { CanvasAgentInteraction, CanvasPresence, CanvasUser, CanvasDecoration, CanvasThreadAgentStatus } from './canvas/types';
 import type { MentionEvent } from './canvas/MarkdownCanvas';
+import { normalizeMentionLaunchText } from './canvas/editor/mentions';
 
 const canvasView = document.getElementById('canvas-view') as HTMLDivElement;
 const canvasBack = document.getElementById('canvas-back') as HTMLButtonElement;
@@ -5965,28 +5966,148 @@ function currentCanvasExportId(): string | null {
   return null;
 }
 
+const MENTION_LAUNCH_DEDUPE_MS = 15_000;
+const mentionLaunchDedupeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function reserveMentionLaunch(key: string): boolean {
+  if (mentionLaunchDedupeTimers.has(key)) return false;
+  const timer = setTimeout(() => {
+    mentionLaunchDedupeTimers.delete(key);
+  }, MENTION_LAUNCH_DEDUPE_MS);
+  mentionLaunchDedupeTimers.set(key, timer);
+  return true;
+}
+
+function releaseMentionLaunch(key: string): void {
+  const timer = mentionLaunchDedupeTimers.get(key);
+  if (timer) clearTimeout(timer);
+  mentionLaunchDedupeTimers.delete(key);
+}
+
+function mentionAnchorKey(anchor: { prefix?: string; suffix?: string }): string {
+  return `${normalizeMentionLaunchText(anchor.prefix ?? '')}|${normalizeMentionLaunchText(anchor.suffix ?? '')}`;
+}
+
+function showMentionLaunchError(error: unknown): void {
+  const message = typeof error === 'string'
+    ? error
+    : error instanceof Error ? error.message : 'Agent launch failed';
+  canvasSaveStatus.textContent = `✗ ${message}`;
+  setTimeout(() => { canvasSaveStatus.textContent = ''; }, 3000);
+}
+
+function beginOptimisticAgentDecoration(key: string, text: string): string | null {
+  const decorationText = text.trim();
+  if (!decorationText) return null;
+  const optimisticId = `optimistic:${key}`;
+  agentDecorationMap.set(optimisticId, { status: 'running', decorationText });
+  syncCanvasDecorations();
+  return optimisticId;
+}
+
+function clearOptimisticAgentDecoration(optimisticId: string | null): void {
+  if (!optimisticId) return;
+  if (agentDecorationMap.delete(optimisticId)) syncCanvasDecorations();
+}
+
+function beginOptimisticThreadStatus(key: string, threadId: string, handle: string): string {
+  const optimisticId = `optimistic:${key}`;
+  canvasAgentRawStatus.set(optimisticId, 'running');
+  canvasThreadAgentStatuses.set(threadId, {
+    threadId,
+    agentId: optimisticId,
+    status: 'starting',
+    label: `@${handle} starting...`,
+  });
+  syncCanvasAgentThreadStatuses();
+  return optimisticId;
+}
+
+function clearOptimisticThreadStatus(threadId: string, optimisticId: string | null): void {
+  if (!optimisticId) return;
+  const existing = canvasThreadAgentStatuses.get(threadId);
+  if (existing?.agentId === optimisticId) canvasThreadAgentStatuses.delete(threadId);
+  commentThreadAgents.delete(optimisticId);
+  commentThreadByAgent.delete(optimisticId);
+  canvasAgentRawStatus.delete(optimisticId);
+  syncCanvasAgentThreadStatuses();
+}
+
+function inlineMentionAnchor(handle: string, lineMarkdown: string): { prefix?: string; suffix?: string } {
+  const token = `@${handle}`;
+  const idx = lineMarkdown.indexOf(token);
+  if (idx < 0) return {};
+  const end = idx + token.length;
+  return {
+    prefix: lineMarkdown.slice(Math.max(0, end - 32), end),
+    suffix: lineMarkdown.slice(end, end + 32),
+  };
+}
+
 function launchMentionedAgents(targetSpaceId: string, event: MentionEvent): void {
   for (const handle of event.handles) {
-    whimAPI.launchCommentAgent(
+    const key = [
+      'comment',
+      targetSpaceId,
+      event.threadId ?? '',
+      handle,
+      normalizeMentionLaunchText(event.commentBody),
+      normalizeMentionLaunchText(event.quote),
+      mentionAnchorKey(event.anchor),
+    ].join(':');
+    if (!reserveMentionLaunch(key)) continue;
+    const optimisticId = event.threadId ? beginOptimisticThreadStatus(key, event.threadId, handle) : null;
+    void whimAPI.launchCommentAgent(
       targetSpaceId,
       event.commentBody,
       event.quote,
       event.anchor,
       handle,
       event.threadId,
-    );
+    ).then((result: any) => {
+      if (result?.error) {
+        clearOptimisticThreadStatus(event.threadId ?? '', optimisticId);
+        releaseMentionLaunch(key);
+        showMentionLaunchError(result.error);
+        return;
+      }
+      if (event.threadId) {
+        setTimeout(() => clearOptimisticThreadStatus(event.threadId!, optimisticId), 1500);
+      }
+    }).catch((err) => {
+      clearOptimisticThreadStatus(event.threadId ?? '', optimisticId);
+      releaseMentionLaunch(key);
+      showMentionLaunchError(err);
+    });
   }
 }
 
-function launchInlineMention(targetSpaceId: string, handle: string, lineMarkdown: string): void {
-  whimAPI.launchCommentAgent(
+function launchInlineMention(targetSpaceId: string, handle: string, lineMarkdown: string, lineNumber: number): void {
+  const normalizedLine = normalizeMentionLaunchText(lineMarkdown);
+  const key = ['inline', targetSpaceId, handle, lineNumber, normalizedLine].join(':');
+  if (!reserveMentionLaunch(key)) return;
+  const optimisticId = beginOptimisticAgentDecoration(key, lineMarkdown.trim() || `@${handle}`);
+  void whimAPI.launchCommentAgent(
     targetSpaceId,
     lineMarkdown,
     lineMarkdown,
-    {},
+    inlineMentionAnchor(handle, lineMarkdown),
     handle,
     null,
-  );
+  ).then((result: any) => {
+    if (result?.error) {
+      clearOptimisticAgentDecoration(optimisticId);
+      releaseMentionLaunch(key);
+      showMentionLaunchError(result.error);
+      return;
+    }
+    setTimeout(() => clearOptimisticAgentDecoration(optimisticId), 1500);
+    void refreshAgentDecorations();
+  }).catch((err) => {
+    clearOptimisticAgentDecoration(optimisticId);
+    releaseMentionLaunch(key);
+    showMentionLaunchError(err);
+  });
 }
 
 canvasTitle.contentEditable = 'false';
@@ -6538,8 +6659,8 @@ async function openCanvas(spaceId: string, expanded = false): Promise<void> {
       canvasSaveStatus.textContent = status;
     },
     onAgentMentioned: (event) => launchMentionedAgents(spaceId, event),
-    onInlineMention: (handle, lineMarkdown) => {
-      launchInlineMention(spaceId, handle, lineMarkdown);
+    onInlineMention: (handle, lineMarkdown, lineNumber) => {
+      launchInlineMention(spaceId, handle, lineMarkdown, lineNumber);
     },
     onForkSelection: async (selectedText) => {
       const space = await whimAPI.create({ body: selectedText });
@@ -6623,8 +6744,8 @@ async function openPage(spaceId: string, pageName: string): Promise<void> {
       canvasSaveStatus.textContent = status;
     },
     onAgentMentioned: (event) => launchMentionedAgents(pageSpaceId, event),
-    onInlineMention: (handle, lineMarkdown) => {
-      launchInlineMention(pageSpaceId, handle, lineMarkdown);
+    onInlineMention: (handle, lineMarkdown, lineNumber) => {
+      launchInlineMention(pageSpaceId, handle, lineMarkdown, lineNumber);
     },
   });
 
@@ -6986,8 +7107,8 @@ async function exitPreview(): Promise<void> {
       canvasSaveStatus.textContent = status;
     },
     onAgentMentioned: (event) => launchMentionedAgents(spaceId, event),
-    onInlineMention: (handle, lineMarkdown) => {
-      launchInlineMention(spaceId, handle, lineMarkdown);
+    onInlineMention: (handle, lineMarkdown, lineNumber) => {
+      launchInlineMention(spaceId, handle, lineMarkdown, lineNumber);
     },
     onForkSelection: async (selectedText) => {
       const space = await whimAPI.create({ body: selectedText });

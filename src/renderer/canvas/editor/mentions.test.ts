@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectMentionBeforeCaret, filterMentionCandidates } from './mentions';
+import { detectMentionBeforeCaret, filterMentionCandidates, normalizeMentionLaunchText } from './mentions';
 
 describe('mention helpers', () => {
   it('detects an @ query immediately before the caret', () => {
@@ -31,5 +31,10 @@ describe('mention helpers', () => {
         're',
       ),
     ).toEqual([{ handle: 'reviewer', emoji: '🔎', model: 'gpt-4o' }, { handle: 'Researcher' }]);
+  });
+
+  it('normalizes launch text for duplicate mention suppression', () => {
+    expect(normalizeMentionLaunchText('  please   review @agent  ')).toBe('please review @agent');
+    expect(normalizeMentionLaunchText('\n@agent\t\t')).toBe('@agent');
   });
 });
