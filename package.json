@@ -111,8 +111,8 @@
   "homepage": "https://github.com/patniko/whim#readme",
   "type": "commonjs",
   "dependencies": {
-    "@github/copilot": "^1.0.56-1",
-    "@github/copilot-sdk": "^1.0.1",
+    "@github/copilot": "1.0.71",
+    "@github/copilot-sdk": "1.0.7",
     "@huggingface/transformers": "^4.1.0",
     "@milkdown/kit": "^7.21.2",
     "@milkdown/react": "^7.21.2",

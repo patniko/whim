@@ -12,6 +12,7 @@ const mockSession = {
   sessionId: 'mock-session-id',
   send: vi.fn().mockResolvedValue(undefined),
   abort: vi.fn().mockResolvedValue(undefined),
+  disconnect: vi.fn().mockResolvedValue(undefined),
   setModel: vi.fn().mockResolvedValue(undefined),
   getEvents: vi.fn().mockResolvedValue([{ type: 'assistant.message', content: 'hello' }]),
   on: vi.fn(),
@@ -595,6 +596,31 @@ describe('launchCommentAgent', () => {
     );
   });
 
+  it('returns an error and tears down the session when the initial prompt is rejected', async () => {
+    enableMockClient();
+    mockSession.send.mockRejectedValueOnce(new Error('runtime rejected prompt'));
+
+    const result = await launchCommentAgent(
+      'space-1',
+      'fix this',
+      'quoted text',
+      {},
+      persona,
+      'thread-failed',
+      '/ws',
+      'folder',
+    );
+
+    expect(result).toEqual({ error: 'runtime rejected prompt' });
+    expect(mockSession.abort).toHaveBeenCalled();
+    expect(mockSession.disconnect).toHaveBeenCalled();
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'comment-agent-1',
+      'failed',
+      'Error: runtime rejected prompt',
+    );
+  });
+
   // Sandbox is now cross-platform — these tests run everywhere.
   it('appends [SANDBOX MODE] system prompt for sandboxed persona when enforcementMode=both', async () => {
     enableMockClient();
@@ -698,12 +724,9 @@ describe('launchCommentAgent', () => {
     mockSession.send.mockImplementation((...args: any[]) => { sendCalled(...args); return Promise.resolve('msg-id'); });
 
     const launchPromise = launchCommentAgent('space-1', 'hello', 'q', {}, cloudPersona, null, '/ws', 'folder');
-    // launchCommentAgent returns immediately after kicking off the
-    // fire-and-forget send; the send itself is gated behind session.start.
-    await launchPromise;
-
+    await vi.waitFor(() => expect(startCb).not.toBeNull());
     // Before session.start, session.send MUST NOT have been called yet —
-    // this is the bug we just fixed. Allow one microtask flush.
+    // and the launch promise must remain pending.
     await Promise.resolve();
     expect(sendCalled).not.toHaveBeenCalled();
 
@@ -716,6 +739,10 @@ describe('launchCommentAgent', () => {
     await new Promise(r => setTimeout(r, 0));
 
     expect(sendCalled).toHaveBeenCalledWith(expect.objectContaining({ prompt: 'hello' }));
+    await expect(launchPromise).resolves.toEqual({
+      agentId: 'comment-agent-1',
+      sessionId: 'mock-session-id',
+    });
   });
 });
 

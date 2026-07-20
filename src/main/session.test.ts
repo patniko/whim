@@ -539,11 +539,11 @@ describe('session', () => {
     it('returns compatible for version >= minimum', () => {
       mockGetConfigValue.mockReturnValue('/usr/bin/copilot');
       mockExistsSync.mockImplementation((p: unknown) => p === '/usr/bin/copilot');
-      mockExecSync.mockReturnValue(Buffer.from('GitHub Copilot CLI 1.0.36.\n'));
+      mockExecSync.mockReturnValue(Buffer.from('GitHub Copilot CLI 1.0.71.\n'));
 
       const info = checkCliCompatibility();
       expect(info.path).toBe('/usr/bin/copilot');
-      expect(info.version).toBe('1.0.36');
+      expect(info.version).toBe('1.0.71');
       expect(info.compatible).toBe(true);
       expect(info.minVersion).toBe(MIN_CLI_VERSION);
     });
@@ -560,11 +560,11 @@ describe('session', () => {
     it('returns incompatible for version < minimum', () => {
       mockGetConfigValue.mockReturnValue('/usr/bin/copilot');
       mockExistsSync.mockImplementation((p: unknown) => p === '/usr/bin/copilot');
-      mockExecSync.mockReturnValue(Buffer.from('GitHub Copilot CLI 1.0.35.\n'));
+      mockExecSync.mockReturnValue(Buffer.from('GitHub Copilot CLI 1.0.70.\n'));
 
       const info = checkCliCompatibility();
       expect(info.path).toBe('/usr/bin/copilot');
-      expect(info.version).toBe('1.0.35');
+      expect(info.version).toBe('1.0.70');
       expect(info.compatible).toBe(false);
     });
 

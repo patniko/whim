@@ -139,6 +139,7 @@ export async function launchCommentAgent(
   }
 
   const launchStillWanted = () => !record.aborted && registry.get(agentId) === record;
+  let session: any;
 
   try {
     const cliToolsPrompt = buildCliToolsPrompt();
@@ -183,7 +184,7 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
     }
     if (!launchStillWanted()) return { error: 'Agent launch cancelled' };
 
-    const session = await client.createSession({
+    session = await client.createSession({
       workingDirectory: workingDir,
       ...(sandboxConfigs ? { configDir: sandboxConfigs.onDir } : {}),
       mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
@@ -250,7 +251,6 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
     const sessionId = (session as any).sessionId || agentId;
     record.sessionId = sessionId;
     record.session = session;
-    record.phase = 'active';
     persistence.updateSessionId(agentId, sessionId);
     persistence.updateStatus(record);
 
@@ -287,39 +287,26 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
     // launchQuickAgent applies for the workers-tab @cloud path so canvas
     // @mentions/comments behave the same way.
     console.log(`[sdk-send] comment-agent agent=${agentId.slice(0, 8)} session.send promptLen=${commentBody.length}${isCloudSandbox ? ' (after cloud start)' : ''}`);
-    const readyPromise = isCloudSandbox
-      ? waitForCloudSessionStart(session, agentId)
-      : Promise.resolve();
-    readyPromise
-      .then(() => {
-        if (!launchStillWanted()) return undefined;
-        return session.send({
-          prompt: commentBody,
-          attachments: [{ type: 'file' as const, path: canvasPath, displayName: documentDisplayName }],
-        });
-      })
-      .then((messageId: any) => {
-        if (messageId === undefined) return;
-        console.log(`[sdk-send] comment-agent agent=${agentId.slice(0, 8)} session.send resolved messageId=${messageId ?? '<undefined>'}`);
-      })
-      .catch((err: any) => {
-        if (!launchStillWanted()) return;
-        console.error(`[sdk-send] comment-agent agent=${agentId.slice(0, 8)} session.send REJECTED:`, err?.message ?? err);
-        record.status = 'failed';
-        record.summary = `Error: ${err.message || 'Unknown'}`;
-        persistence.updateStatus(record);
-        notifier.notifyRenderer(`chat:event:${agentId}`, {
-          type: 'session.error',
-          message: err.message || 'Failed to process message',
-        });
-        if (record.commentContext) {
-          notifier.notifyRenderer('agent:presence-ended', { agentId, spaceId: record.spaceId });
-        }
-      });
+    if (isCloudSandbox) await waitForCloudSessionStart(session, agentId);
+    if (!launchStillWanted()) {
+      try { await session.abort?.(); } catch { /* best-effort */ }
+      return { error: 'Agent launch cancelled' };
+    }
+
+    // Do not report a successful launch until the runtime accepts the initial
+    // prompt. Otherwise a rejected send looks like an agent that never started.
+    record.phase = 'active';
+    const messageId = await session.send({
+      prompt: commentBody,
+      attachments: [{ type: 'file' as const, path: canvasPath, displayName: documentDisplayName }],
+    });
+    console.log(`[sdk-send] comment-agent agent=${agentId.slice(0, 8)} session.send resolved messageId=${messageId ?? '<undefined>'}`);
 
     return { agentId, sessionId };
   } catch (err: any) {
     if (!record.aborted) {
+      try { await session?.abort?.(); } catch { /* best-effort cleanup */ }
+      try { await session?.disconnect?.(); } catch { /* best-effort cleanup */ }
       record.status = 'failed';
       record.summary = `Error: ${err.message || 'Unknown'}`;
       persistence.updateStatus(record);
@@ -329,6 +316,10 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
         summary: record.summary,
         spaceId,
         threadId,
+      });
+      notifier.notifyRenderer(`chat:event:${agentId}`, {
+        type: 'session.error',
+        message: err.message || 'Failed to launch comment agent',
       });
       notifier.notifyRenderer('agent:presence-ended', { agentId, spaceId });
     }

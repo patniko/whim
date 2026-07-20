@@ -24,7 +24,7 @@ let cliResolved = false;
 
 // ── CLI version compatibility ───────────────────────────
 
-export const MIN_CLI_VERSION = '1.0.36';
+export const MIN_CLI_VERSION = '1.0.71';
 
 let resolvedCliVersion: string | null = null;
 let cliVersionResolved = false;

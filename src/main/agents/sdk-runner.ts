@@ -1530,6 +1530,10 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('session.idle', () => {
+    // A newly-created session can emit an idle event before its initial prompt
+    // has been submitted. Comment launches keep phase='starting' until send()
+    // is accepted so that startup idle cannot falsely complete the worker.
+    if (record.phase === 'starting') return;
     if (record.status === 'running') {
       record.status = 'completed';
       record.summary = 'Completed';

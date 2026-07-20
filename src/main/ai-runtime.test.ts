@@ -36,8 +36,8 @@ vi.mock('./session', () => ({
   resolveBundledCliPath: vi.fn(() => '/bundled/@github/copilot/index.js'),
   resolveAutoDetectedCliPath: vi.fn(() => null),
   resolveConfiguredCliPath: vi.fn((p: string | null) => p || null),
-  probeCliVersion: vi.fn(() => '1.0.56'),
-  MIN_CLI_VERSION: '1.0.36',
+  probeCliVersion: vi.fn(() => '1.0.71'),
+  MIN_CLI_VERSION: '1.0.71',
   compareVersions: (a: string, b: string): number => {
     const pa = a.split('.').map(Number);
     const pb = b.split('.').map(Number);
@@ -63,7 +63,7 @@ function withConfig(values: Record<string, unknown>): void {
 function resetSessionMocks(): void {
   vi.mocked(resolveConfiguredCliPath).mockImplementation((p: string | null) => p || null);
   vi.mocked(resolveAutoDetectedCliPath).mockReturnValue(null);
-  vi.mocked(probeCliVersion).mockReturnValue('1.0.56');
+  vi.mocked(probeCliVersion).mockReturnValue('1.0.71');
 }
 
 describe('resolveRuntimeConnection', () => {
@@ -135,9 +135,9 @@ describe('getRuntimeStatus', () => {
     withConfig({});
     const s = getRuntimeStatus();
     expect(s.source).toBe('bundled');
-    expect(s.version).toBe('1.0.56');
+    expect(s.version).toBe('1.0.71');
     expect(s.compatible).toBe(true);
-    expect(s.minVersion).toBe('1.0.36');
+    expect(s.minVersion).toBe('1.0.71');
   });
 
   it('marks an old local version as incompatible', () => {
