@@ -128,6 +128,11 @@ export function markSelfWrite(spaceId: string, content: string): void {
   entry.selfWriteHash = contentHash(content);
 }
 
+export function clearSelfWrite(spaceId: string): void {
+  const entry = watches.get(spaceId);
+  if (entry) entry.selfWriteHash = null;
+}
+
 /** Stop all active watchers. Called on app shutdown. */
 export function stopAllWatchers(): void {
   for (const spaceId of watches.keys()) {

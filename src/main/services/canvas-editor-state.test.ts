@@ -14,6 +14,7 @@ vi.mock('../notify', () => ({
 }));
 
 vi.mock('../canvas-watcher', () => ({
+  clearSelfWrite: vi.fn(),
   markSelfWrite: vi.fn(),
 }));
 
@@ -24,10 +25,10 @@ vi.mock('../workspace', () => ({
 
 import * as fs from 'fs';
 import { updateCanvasContent } from '../database';
-import { markSelfWrite } from '../canvas-watcher';
+import { clearSelfWrite, markSelfWrite } from '../canvas-watcher';
 import { notifyAllWindows } from '../notify';
 import { writeCanvas } from '../workspace';
-import { rememberCanvasEditorContent, writeMainCanvasWithMerge } from './canvas-editor-state';
+import { rememberCanvasEditorContent, writeEditorFileWithMerge, writeMainCanvasWithMerge } from './canvas-editor-state';
 
 describe('canvas editor write state', () => {
   beforeEach(() => {
@@ -49,6 +50,8 @@ describe('canvas editor write state', () => {
     expect(result).toEqual({ success: true, content: expected });
     expect(markSelfWrite).toHaveBeenCalledWith('space-1', expected);
     expect(writeCanvas).toHaveBeenCalledWith('/workspace', 'space-folder', expected);
+    expect(vi.mocked(markSelfWrite).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(writeCanvas).mock.invocationCallOrder[0]);
     expect(updateCanvasContent).toHaveBeenCalledWith('space-1', expected);
   });
 
@@ -71,5 +74,44 @@ describe('canvas editor write state', () => {
       spaceId: 'space-3',
       title: 'New Title',
     });
+  });
+
+  it('merges external changes for any editor-backed markdown file', () => {
+    const write = vi.fn();
+    rememberCanvasEditorContent('__page__space-1/notes', 'base\n');
+    vi.mocked(fs.readFileSync).mockReturnValueOnce('base\nexternal\n');
+
+    const result = writeEditorFileWithMerge(
+      '__page__space-1/notes',
+      '/workspace/space/notes.md',
+      'local\n',
+      write,
+    );
+
+    const expected = merge3('base\n', 'local\n', 'base\nexternal\n').merged;
+    expect(result).toEqual({ success: true, content: expected });
+    expect(markSelfWrite).toHaveBeenCalledWith('__page__space-1/notes', expected);
+    expect(write).toHaveBeenCalledWith(expected);
+  });
+
+  it('refuses to overwrite when the current disk content cannot be read', () => {
+    const error = Object.assign(new Error('denied'), { code: 'EACCES' });
+    vi.mocked(fs.readFileSync).mockImplementationOnce(() => { throw error; });
+    const write = vi.fn();
+
+    expect(writeEditorFileWithMerge('file', '/workspace/file.md', 'editor', write))
+      .toEqual({ success: false, error: 'read_failed' });
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('returns a structured failure when the file write fails', () => {
+    vi.mocked(fs.readFileSync).mockReturnValueOnce('base');
+
+    const result = writeEditorFileWithMerge('file', '/workspace/file.md', 'editor', () => {
+      throw new Error('disk full');
+    });
+
+    expect(result).toEqual({ success: false, error: 'write_failed' });
+    expect(clearSelfWrite).toHaveBeenCalledWith('file');
   });
 });

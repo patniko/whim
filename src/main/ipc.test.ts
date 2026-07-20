@@ -186,6 +186,7 @@ vi.mock('./agent-service', () => ({
   respondToUserInput: vi.fn(),
   respondToElicitation: vi.fn(),
   abortAgent: vi.fn(async () => {}),
+  deleteAgent: vi.fn(async () => {}),
   openAgentCli: vi.fn(async () => ({})),
   launchCommentAgent: vi.fn(async () => ({ agentId: 'a3' })),
   sendChatMessage: vi.fn(async () => ({ ok: true })),
@@ -216,6 +217,12 @@ vi.mock('./cloud-agent', () => ({
 vi.mock('./cloud-agent-poller', () => ({
   startCloudJobPoller: vi.fn(),
   getCloudJobPollResult: vi.fn(() => ({ status: 'running' })),
+  launchTrackedCloudAgent: vi.fn(async (options: any) => ({
+    agentId: 'mock-uuid',
+    sessionId: 'cs1',
+    jobId: 'cs1-job',
+    options,
+  })),
 }));
 
 vi.mock('uuid', () => ({
@@ -432,16 +439,17 @@ describe('IPC handlers', () => {
     it('returns not_found for unknown skill', () => {
       vi.mocked(getSkill).mockReturnValueOnce(undefined as any);
       const result = invoke('canvas:write', '__skill__unknown', 'content');
-      expect(result).toEqual({ error: 'not_found' });
+      expect(result).toEqual({ success: false, error: 'not_found' });
     });
   });
 
   describe('canvas:close', () => {
     it('writes and schedules auto-commit', () => {
-      invoke('canvas:close', 'space-1', 'final content');
+      const result = invoke('canvas:close', 'space-1', 'final content');
       expect(writeCanvas).toHaveBeenCalled();
       expect(updateCanvasContent).toHaveBeenCalled();
       expect(scheduleAutoCommit).toHaveBeenCalledWith('/mock/workspace');
+      expect(result).toEqual({ success: true, content: undefined });
     });
   });
 
@@ -513,25 +521,27 @@ describe('IPC handlers', () => {
       expect(result).toEqual({ error: 'Persona @ghost not found' });
     });
 
-    it('routes cloud persona to launchCloudAgentWithFallback and prepends instructions', async () => {
+    it('routes cloud persona through the shared tracked-launch helper', async () => {
       const cfg = vi.mocked(getConfigValue);
       cfg.mockImplementationOnce((key: string) => key === 'workspace' ? '/mock/workspace' : null as any);
       cfg.mockImplementationOnce((key: string) => key === 'personas' ? [{
         id: 'p2', handle: 'cloudie', instructions: 'You run in the cloud.',
         model: 'gpt-4o', runLocation: 'cca',
       }] as any : null as any);
-      const { launchCloudAgentWithFallback } = await import('./cloud-agent');
-      vi.mocked(launchCloudAgentWithFallback).mockClear();
+      const { launchTrackedCloudAgent } = await import('./cloud-agent-poller');
+      vi.mocked(launchTrackedCloudAgent).mockClear();
       const { launchQuickAgent } = await import('./agent-service');
       vi.mocked(launchQuickAgent).mockClear();
 
       const result = await invoke('agent:quick-launch', 'fix the build', 'cloudie');
-      expect(result).toEqual({ agentId: 'mock-uuid', sessionId: 'cs1' });
+      expect(result).toMatchObject({ agentId: 'mock-uuid', sessionId: 'cs1' });
       expect(launchQuickAgent).not.toHaveBeenCalled();
-      expect(launchCloudAgentWithFallback).toHaveBeenCalledOnce();
-      const cloudPrompt = vi.mocked(launchCloudAgentWithFallback).mock.calls[0][2];
-      expect(cloudPrompt).toContain('You run in the cloud.');
-      expect(cloudPrompt).toContain('fix the build');
+      expect(launchTrackedCloudAgent).toHaveBeenCalledWith(expect.objectContaining({
+        workspace: '/mock/workspace',
+        personaHandle: 'cloudie',
+        displayPrompt: 'fix the build',
+        prompt: expect.stringContaining('You run in the cloud.'),
+      }));
     });
 
     it('forwards sandboxed persona to launchQuickAgent (no longer blocks)', async () => {

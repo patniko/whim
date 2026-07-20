@@ -13,6 +13,12 @@ import type { SubagentSummary, SubagentInfo } from './subagent-types';
 // Helper types needed by the contract that don't exist in shared/ yet
 // ---------------------------------------------------------------------------
 
+export interface CanvasSaveResult {
+  success: boolean;
+  content?: string;
+  error?: string;
+}
+
 export type SpaceUpdates = Partial<
   Pick<Space, 'description' | 'body' | 'client' | 'due_at' | 'due_at_utc' | 'status' | 'attachments'>
 >;
@@ -369,8 +375,8 @@ export interface IpcCommands {
   // ── Canvas ───────────────────────────────────────────────
   'canvas:read': { args: [spaceId: string]; result: { content: string; error?: string } };
   'canvas:has-content': { args: [spaceId: string]; result: { hasContent: boolean } };
-  'canvas:write': { args: [spaceId: string, content: string]; result: { success?: boolean; error?: string } };
-  'canvas:close': { args: [spaceId: string, content: string]; result: void };
+  'canvas:write': { args: [spaceId: string, content: string]; result: CanvasSaveResult };
+  'canvas:close': { args: [spaceId: string, content: string]; result: CanvasSaveResult };
   'canvas:paste-file': { args: [spaceId: string, filename: string, dataArray: number[]]; result: { path: string } | { error: string } };
   'canvas:resolve-attachment': { args: [spaceId: string, relativePath: string]; result: { path: string; mimeType: string } | { error: string } };
   'canvas:fetch-link-meta': { args: [url: string]; result: LinkPreviewMeta };
@@ -381,8 +387,8 @@ export interface IpcCommands {
   // ── Canvas child pages ────────────────────────────────────
   'canvas:create-page': { args: [spaceId: string, pageName: string]; result: { success: boolean; page: string; error?: string } };
   'canvas:read-page': { args: [spaceId: string, pageName: string]; result: { content: string; error?: string } };
-  'canvas:write-page': { args: [spaceId: string, pageName: string, content: string]; result: { success?: boolean; error?: string } };
-  'canvas:close-page': { args: [spaceId: string, pageName: string, content: string]; result: { success?: boolean; error?: string } };
+  'canvas:write-page': { args: [spaceId: string, pageName: string, content: string]; result: CanvasSaveResult };
+  'canvas:close-page': { args: [spaceId: string, pageName: string, content: string]; result: CanvasSaveResult };
   'canvas:list-pages': { args: [spaceId: string]; result: { pages: string[]; error?: string } };
   'canvas:open-link': { args: [spaceId: string, url: string]; result: { action: 'canvas' | 'external' | 'none'; error?: string } };
   'canvas:read-file': { args: [spaceId: string, relativePath: string]; result: { data?: number[]; mimeType?: string; error?: string } };

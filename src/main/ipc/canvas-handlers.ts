@@ -1,12 +1,12 @@
 import { ipcMain, shell, BrowserWindow } from 'electron';
 import { isInitialized, getSpace, getSkill, assignSpaceFolder, updateCanvasContent } from '../database';
 import { getConfigValue } from '../config';
-import { initSpaceCanvas, ensureSpaceCanvas, readCanvas, scheduleAutoCommit, saveAttachment, resolveAttachmentPath, getMimeType, readSpaceFile, getSpaceHistory, restoreSpaceVersion, getSpaceVersionContent, resolveSpaceFolder, createPage, readPage, writePage, listPages } from '../workspace';
+import { initSpaceCanvas, ensureSpaceCanvas, readCanvas, scheduleAutoCommit, saveAttachment, resolveAttachmentPath, getMimeType, readSpaceFile, getSpaceHistory, restoreSpaceVersion, getSpaceVersionContent, resolveSpaceFolder, resolvePagePath, createPage, readPage, writePage, listPages } from '../workspace';
 import { parseFrontmatter, serializeFrontmatter } from '../frontmatter';
 import { fetchLinkPreview } from '../services/link-preview';
 import { startWatching, stopWatching } from '../canvas-watcher';
 import { mirrorRendererEvent } from '../web/event-hub';
-import { forgetCanvasEditorContent, rememberCanvasEditorContent, writeMainCanvasWithMerge } from '../services/canvas-editor-state';
+import { forgetCanvasEditorContent, rememberCanvasEditorContent, writeEditorFileWithMerge, writeMainCanvasWithMerge, type CanvasWriteResult } from '../services/canvas-editor-state';
 import { openFileInNewWindow, isWorkspaceMdFile } from '../window-manager';
 import type { SkillFrontmatter } from '../../shared/types';
 import * as fs from 'fs';
@@ -27,6 +27,34 @@ function parseSyntheticPageId(spaceId: string): { realSpaceId: string; pageName:
   } catch {
     return null;
   }
+}
+
+function pageEditorId(spaceId: string, pageName: string): string {
+  return `__page__${spaceId}/${encodeURIComponent(pageName)}`;
+}
+
+function notifyEditorContentUpdated(editorId: string, content: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('canvas:content-updated', { spaceId: editorId, content });
+  }
+  mirrorRendererEvent('canvas:content-updated', { spaceId: editorId, content });
+}
+
+function watchEditorFile(editorId: string, filePath: string, onChange?: (content: string) => void): void {
+  startWatching(editorId, filePath, (content) => {
+    rememberCanvasEditorContent(editorId, content);
+    onChange?.(content);
+    notifyEditorContentUpdated(editorId, content);
+  });
+}
+
+function closeSucceeded(result: CanvasWriteResult, workspace: string, editorId: string): CanvasWriteResult {
+  if (result.success) {
+    stopWatching(editorId);
+    forgetCanvasEditorContent(editorId);
+    scheduleAutoCommit(workspace);
+  }
+  return result;
 }
 
 export function registerCanvasHandlers(): void {
@@ -77,6 +105,8 @@ export function registerCanvasHandlers(): void {
       if (!isWorkspaceMdFile(filePath)) return { content: '', error: 'not_in_workspace' };
       try {
         const content = fs.readFileSync(filePath, 'utf-8');
+        rememberCanvasEditorContent(spaceId, content);
+        watchEditorFile(spaceId, filePath);
         return { content };
       } catch {
         return { content: '', error: 'read_failed' };
@@ -96,6 +126,11 @@ export function registerCanvasHandlers(): void {
       }
       const result = readPage(workspace, folder, pageName);
       if ('error' in result) return { content: '', error: result.error };
+      const resolvedPage = resolvePagePath(workspace, folder, pageName);
+      if (!('error' in resolvedPage)) {
+        rememberCanvasEditorContent(spaceId, result.content);
+        watchEditorFile(spaceId, resolvedPage.path);
+      }
       return { content: result.content };
     }
 
@@ -120,8 +155,7 @@ export function registerCanvasHandlers(): void {
     // Start watching for external changes (e.g. from agents)
     const folderRoot = resolveSpaceFolder(workspace, folder);
     const canvasPath = path.join(folderRoot, CANVAS_FILE);
-    startWatching(spaceId, canvasPath, (newContent: string) => {
-      rememberCanvasEditorContent(spaceId, newContent);
+    watchEditorFile(spaceId, canvasPath, (newContent: string) => {
       const titleUpdate = updateCanvasContent(spaceId, newContent);
       if (titleUpdate.titleChanged) {
         for (const win of BrowserWindow.getAllWindows()) {
@@ -129,10 +163,6 @@ export function registerCanvasHandlers(): void {
         }
         mirrorRendererEvent('space:title-updated', { spaceId, title: titleUpdate.title });
       }
-      for (const win of BrowserWindow.getAllWindows()) {
-        win.webContents.send('canvas:content-updated', { spaceId, content: newContent });
-      }
-      mirrorRendererEvent('canvas:content-updated', { spaceId, content: newContent });
     });
 
     return { content };
@@ -140,33 +170,33 @@ export function registerCanvasHandlers(): void {
 
   ipcMain.handle('canvas:write', (_event, spaceId: string, content: string) => {
     const workspace = getConfigValue('workspace');
-    if (!workspace || !isInitialized()) return { error: 'no_workspace' };
+    if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
 
     // Route workspace file writes to the actual file on disk
     if (spaceId.startsWith('__file__')) {
       const filePath = decodeURIComponent(spaceId.slice('__file__'.length));
-      if (!isWorkspaceMdFile(filePath)) return { error: 'not_in_workspace' };
-      try {
-        fs.writeFileSync(filePath, content, 'utf-8');
+      if (!isWorkspaceMdFile(filePath)) return { success: false, error: 'not_in_workspace' };
+      const result = writeEditorFileWithMerge(spaceId, filePath, content, (contentToWrite) => {
+        fs.writeFileSync(filePath, contentToWrite, 'utf-8');
+      });
+      if (result.success) {
         scheduleAutoCommit(workspace);
-        return { success: true };
-      } catch {
-        return { error: 'write_failed' };
       }
+      return result;
     }
 
     // Route skill autosaves to the skill file
     if (spaceId.startsWith('__skill__')) {
       const skillId = spaceId.slice('__skill__'.length);
       const skill = getSkill(skillId);
-      if (!skill) return { error: 'not_found' };
+      if (!skill) return { success: false, error: 'not_found' };
       try {
         const { frontmatter, body } = parseFrontmatter<SkillFrontmatter>(content);
         const fileContent = serializeFrontmatter(frontmatter, body);
         fs.writeFileSync(skill.filePath, fileContent, 'utf-8');
         return { success: true };
       } catch {
-        return { error: 'write_failed' };
+        return { success: false, error: 'write_failed' };
       }
     }
 
@@ -175,19 +205,22 @@ export function registerCanvasHandlers(): void {
     if (pageTarget) {
       const { realSpaceId, pageName } = pageTarget;
       const space = getSpace(realSpaceId);
-      if (!space) return { error: 'not_found' };
+      if (!space) return { success: false, error: 'not_found' };
       let folder = space.folder;
       if (!folder) {
         folder = initSpaceCanvas(workspace, realSpaceId, space.description, space.body);
         assignSpaceFolder(realSpaceId, folder);
       }
-      const result = writePage(workspace, folder, pageName, content);
-      if ('error' in result) return { error: result.error };
-      return { success: true };
+      const resolvedPage = resolvePagePath(workspace, folder, pageName);
+      if ('error' in resolvedPage) return { success: false, error: resolvedPage.error };
+      return writeEditorFileWithMerge(spaceId, resolvedPage.path, content, (contentToWrite) => {
+        const result = writePage(workspace, folder, pageName, contentToWrite);
+        if ('error' in result) throw new Error(result.error);
+      });
     }
 
     const space = getSpace(spaceId);
-    if (!space) return { error: 'not_found' };
+    if (!space) return { success: false, error: 'not_found' };
 
     let folder = space.folder;
     if (!folder) {
@@ -201,17 +234,16 @@ export function registerCanvasHandlers(): void {
   // Save canvas + trigger a commit (called when leaving the canvas)
   ipcMain.handle('canvas:close', (_event, spaceId: string, content: string) => {
     const workspace = getConfigValue('workspace');
-    if (!workspace || !isInitialized()) return;
+    if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
 
     // Route workspace file closes to the actual file on disk
     if (spaceId.startsWith('__file__')) {
       const filePath = decodeURIComponent(spaceId.slice('__file__'.length));
-      if (!isWorkspaceMdFile(filePath)) return;
-      try {
-        fs.writeFileSync(filePath, content, 'utf-8');
-        scheduleAutoCommit(workspace);
-      } catch { /* ignore write failures on close */ }
-      return;
+      if (!isWorkspaceMdFile(filePath)) return { success: false, error: 'not_in_workspace' };
+      const result = writeEditorFileWithMerge(spaceId, filePath, content, (contentToWrite) => {
+        fs.writeFileSync(filePath, contentToWrite, 'utf-8');
+      });
+      return closeSucceeded(result, workspace, spaceId);
     }
 
     // Route page closes to page files
@@ -219,22 +251,23 @@ export function registerCanvasHandlers(): void {
     if (pageTarget) {
       const { realSpaceId, pageName } = pageTarget;
       const space = getSpace(realSpaceId);
-      if (!space) return;
+      if (!space) return { success: false, error: 'not_found' };
       let folder = space.folder;
       if (!folder) {
         folder = initSpaceCanvas(workspace, realSpaceId, space.description, space.body);
         assignSpaceFolder(realSpaceId, folder);
       }
-      writePage(workspace, folder, pageName, content);
-      scheduleAutoCommit(workspace);
-      return;
+      const resolvedPage = resolvePagePath(workspace, folder, pageName);
+      if ('error' in resolvedPage) return { success: false, error: resolvedPage.error };
+      const result = writeEditorFileWithMerge(spaceId, resolvedPage.path, content, (contentToWrite) => {
+        const pageResult = writePage(workspace, folder, pageName, contentToWrite);
+        if ('error' in pageResult) throw new Error(pageResult.error);
+      });
+      return closeSucceeded(result, workspace, spaceId);
     }
 
-    // Stop watching — user is leaving this canvas
-    stopWatching(spaceId);
-
     const space = getSpace(spaceId);
-    if (!space) return;
+    if (!space) return { success: false, error: 'not_found' };
 
     let folder = space.folder;
     if (!folder) {
@@ -242,9 +275,7 @@ export function registerCanvasHandlers(): void {
       assignSpaceFolder(spaceId, folder);
     }
 
-    writeMainCanvasWithMerge(workspace, spaceId, folder, content);
-    forgetCanvasEditorContent(spaceId);
-    scheduleAutoCommit(workspace);
+    return closeSucceeded(writeMainCanvasWithMerge(workspace, spaceId, folder, content), workspace, spaceId);
   });
 
   // ── Canvas file paste ─────────────────────────────────
@@ -403,15 +434,21 @@ export function registerCanvasHandlers(): void {
 
     const result = readPage(workspace, folder, pageName);
     if ('error' in result) return { content: '', error: result.error };
+    const editorId = pageEditorId(spaceId, pageName);
+    const resolvedPage = resolvePagePath(workspace, folder, pageName);
+    if (!('error' in resolvedPage)) {
+      rememberCanvasEditorContent(editorId, result.content);
+      watchEditorFile(editorId, resolvedPage.path);
+    }
     return { content: result.content };
   });
 
   ipcMain.handle('canvas:write-page', (_event, spaceId: string, pageName: string, content: string) => {
     const workspace = getConfigValue('workspace');
-    if (!workspace || !isInitialized()) return { error: 'no_workspace' };
+    if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
 
     const space = getSpace(spaceId);
-    if (!space) return { error: 'not_found' };
+    if (!space) return { success: false, error: 'not_found' };
 
     let folder = space.folder;
     if (!folder) {
@@ -419,17 +456,21 @@ export function registerCanvasHandlers(): void {
       assignSpaceFolder(spaceId, folder);
     }
 
-    const result = writePage(workspace, folder, pageName, content);
-    if ('error' in result) return { error: result.error };
-    return { success: true };
+    const resolvedPage = resolvePagePath(workspace, folder, pageName);
+    if ('error' in resolvedPage) return { success: false, error: resolvedPage.error };
+    const editorId = pageEditorId(spaceId, pageName);
+    return writeEditorFileWithMerge(editorId, resolvedPage.path, content, (contentToWrite) => {
+      const result = writePage(workspace, folder, pageName, contentToWrite);
+      if ('error' in result) throw new Error(result.error);
+    });
   });
 
   ipcMain.handle('canvas:close-page', (_event, spaceId: string, pageName: string, content: string) => {
     const workspace = getConfigValue('workspace');
-    if (!workspace || !isInitialized()) return { error: 'no_workspace' };
+    if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
 
     const space = getSpace(spaceId);
-    if (!space) return { error: 'not_found' };
+    if (!space) return { success: false, error: 'not_found' };
 
     let folder = space.folder;
     if (!folder) {
@@ -437,10 +478,14 @@ export function registerCanvasHandlers(): void {
       assignSpaceFolder(spaceId, folder);
     }
 
-    const result = writePage(workspace, folder, pageName, content);
-    if ('error' in result) return { error: result.error };
-    scheduleAutoCommit(workspace);
-    return { success: true };
+    const resolvedPage = resolvePagePath(workspace, folder, pageName);
+    if ('error' in resolvedPage) return { success: false, error: resolvedPage.error };
+    const editorId = pageEditorId(spaceId, pageName);
+    const result = writeEditorFileWithMerge(editorId, resolvedPage.path, content, (contentToWrite) => {
+      const pageResult = writePage(workspace, folder, pageName, contentToWrite);
+      if ('error' in pageResult) throw new Error(pageResult.error);
+    });
+    return closeSucceeded(result, workspace, editorId);
   });
 
   ipcMain.handle('canvas:list-pages', (_event, spaceId: string) => {
