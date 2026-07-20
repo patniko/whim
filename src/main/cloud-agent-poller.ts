@@ -289,11 +289,18 @@ export async function restoreActiveCloudPollers(): Promise<void> {
     if (activePollers.has(session.id)) continue;
     const repository = parseRepository(session.cca_effective_repository ?? session.cca_repository);
     if (!session.cca_job_id || !repository) {
+      const summary = 'Cloud tracking is unavailable for this pre-upgrade session; the remote task may still be running. Check GitHub or relaunch it from Whim.';
       updateAgentSessionStatus(
         session.id,
-        'failed',
-        'Cloud session cannot be recovered because its job metadata is missing. Relaunch the task.',
+        session.status,
+        summary,
       );
+      notifyAllWindows('agent:status-changed', {
+        agentId: session.id,
+        status: session.status,
+        summary,
+        trackingError: true,
+      });
       continue;
     }
     if (!token) {

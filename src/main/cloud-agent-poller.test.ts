@@ -139,7 +139,7 @@ describe('cloud-agent-poller', () => {
     expect(getCloudJobStatus).toHaveBeenCalledWith('owner', 'repo', 'job-1', 'new-token');
   });
 
-  it('restores recoverable CCA sessions and marks legacy rows actionable', async () => {
+  it('restores recoverable CCA sessions without falsely failing legacy rows', async () => {
     vi.mocked(listAgentSessions).mockReturnValue([
       {
         id: 'recoverable', session_id: 'session-1', space_id: null, prompt: 'p',
@@ -163,8 +163,16 @@ describe('cloud-agent-poller', () => {
     expect(getCloudJobStatus).toHaveBeenCalledWith('fork', 'repo', 'job-1', 'token');
     expect(updateAgentSessionStatus).toHaveBeenCalledWith(
       'legacy',
-      'failed',
-      expect.stringContaining('job metadata is missing'),
+      'running',
+      expect.stringContaining('remote task may still be running'),
+    );
+    expect(mirrorRendererEvent).toHaveBeenCalledWith(
+      'agent:status-changed',
+      expect.objectContaining({
+        agentId: 'legacy',
+        status: 'running',
+        trackingError: true,
+      }),
     );
   });
 
