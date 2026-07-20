@@ -9,7 +9,7 @@ import type { AgentRecord } from './agent-registry';
 import { AgentNotifier } from './agent-notifier';
 import { AgentPersistence } from './agent-persistence';
 import { InteractionBroker } from './interaction-broker';
-import { buildCliToolsPrompt, waitForCloudSessionStart, enableRemoteControl } from './sdk-runner';
+import { buildCliToolsPrompt, sendInitialPrompt, enableRemoteControl } from './sdk-runner';
 import { buildSandboxLaunchSetup } from './sandbox-launch';
 import { SANDBOX_SYSTEM_PROMPT } from './sandbox-policies';
 import { getWorkspaceRepo } from '../cloud-agent';
@@ -281,30 +281,16 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
       threadId,
     });
 
-    // Cloud sessions: wait for the remote worker's `session.start` event
-    // before sending — otherwise the runtime silently swallows the prompt
-    // (see waitForCloudSessionStart docs). Mirrors the gating
-    // launchQuickAgent applies for the workers-tab @cloud path so canvas
-    // @mentions/comments behave the same way.
-    console.log(`[sdk-send] comment-agent agent=${agentId.slice(0, 8)} session.send promptLen=${commentBody.length}${isCloudSandbox ? ' (after cloud start)' : ''}`);
-    if (isCloudSandbox) await waitForCloudSessionStart(session, agentId);
-    if (!launchStillWanted()) {
-      try { await session.abort?.(); } catch { /* best-effort */ }
-      return { error: 'Agent launch cancelled' };
-    }
-
-    // Do not report a successful launch until the runtime accepts the initial
-    // prompt. Otherwise a rejected send looks like an agent that never started.
-    record.phase = 'active';
-    const messageId = await session.send({
+    await sendInitialPrompt(session, record, {
       prompt: commentBody,
       attachments: [{ type: 'file' as const, path: canvasPath, displayName: documentDisplayName }],
+      waitForCloud: isCloudSandbox,
+      logLabel: 'comment-agent',
     });
-    console.log(`[sdk-send] comment-agent agent=${agentId.slice(0, 8)} session.send resolved messageId=${messageId ?? '<undefined>'}`);
 
     return { agentId, sessionId };
   } catch (err: any) {
-    if (!record.aborted) {
+    if (!record.aborted && record.status !== 'failed') {
       try { await session?.abort?.(); } catch { /* best-effort cleanup */ }
       try { await session?.disconnect?.(); } catch { /* best-effort cleanup */ }
       record.status = 'failed';

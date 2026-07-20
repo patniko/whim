@@ -132,6 +132,7 @@ import {
   launchAgent,
   launchCommentAgent,
   launchQuickAgent,
+  launchDocumentAgent,
   approveAgent,
   abortAgent,
   listAgents,
@@ -312,6 +313,54 @@ describe('launchAgent', () => {
     // Expect multiple listeners (assistant.message_delta, assistant.message, session.idle, etc.)
     expect(mockSession.on.mock.calls.length).toBeGreaterThanOrEqual(5);
   });
+
+  it('returns an error and disconnects when the initial prompt is rejected', async () => {
+    enableMockClient();
+    mockSession.send.mockRejectedValueOnce(new Error('selection rejected'));
+
+    const result = await launchAgent(
+      'space-1',
+      'text',
+      { quote: '', prefix: '', suffix: '' },
+      '/ws',
+      'folder',
+    );
+
+    expect(result).toEqual({ error: 'selection rejected' });
+    expect(mockSession.abort).toHaveBeenCalled();
+    expect(mockSession.disconnect).toHaveBeenCalled();
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'agent-1',
+      'failed',
+      'Error: selection rejected',
+    );
+  });
+
+  it('does not report success until the initial prompt is accepted', async () => {
+    enableMockClient();
+    let resolveSend!: (messageId: string) => void;
+    mockSession.send.mockReturnValueOnce(new Promise(resolve => {
+      resolveSend = resolve;
+    }));
+
+    const launchPromise = launchAgent(
+      'space-1',
+      'text',
+      { quote: '', prefix: '', suffix: '' },
+      '/ws',
+      'folder',
+    );
+    let settled = false;
+    void launchPromise.finally(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolveSend('message-1');
+    await expect(launchPromise).resolves.toEqual({
+      agentId: 'agent-1',
+      sessionId: 'mock-session-id',
+    });
+  });
 });
 
 describe('launchQuickAgent', () => {
@@ -393,6 +442,22 @@ describe('launchQuickAgent', () => {
 
     expect(createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({ persona_handle: 'reviewer', summary: expect.stringContaining('@reviewer') }),
+    );
+  });
+
+  it('returns an error and disconnects when the initial prompt is rejected', async () => {
+    enableMockClient();
+    mockSession.send.mockRejectedValueOnce(new Error('quick rejected'));
+
+    const result = await launchQuickAgent('do the thing', '/ws');
+
+    expect(result).toEqual({ error: 'quick rejected' });
+    expect(mockSession.abort).toHaveBeenCalled();
+    expect(mockSession.disconnect).toHaveBeenCalled();
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'quick-agent-1',
+      'failed',
+      'Error: quick rejected',
     );
   });
 
@@ -513,6 +578,51 @@ describe('launchQuickAgent', () => {
         mockSession.sessionId = originalSessionId;
       }
     });
+});
+
+describe('launchDocumentAgent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSession.send.mockResolvedValue(undefined);
+    mockClient.createSession.mockResolvedValue(mockSession);
+    vi.mocked(uuid).mockReturnValue('document-agent-1');
+  });
+
+  it('returns success only after the document prompt is accepted', async () => {
+    enableMockClient();
+    let resolveSend!: (messageId: string) => void;
+    mockSession.send.mockReturnValueOnce(new Promise(resolve => {
+      resolveSend = resolve;
+    }));
+
+    const launchPromise = launchDocumentAgent('space-1', '/ws', 'folder');
+    let settled = false;
+    void launchPromise.finally(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolveSend('document-message');
+    await expect(launchPromise).resolves.toEqual({
+      agentId: 'document-agent-1',
+      sessionId: 'mock-session-id',
+    });
+  });
+
+  it('returns an error and disconnects when the document prompt is rejected', async () => {
+    enableMockClient();
+    mockSession.send.mockRejectedValueOnce(new Error('document rejected'));
+
+    const result = await launchDocumentAgent('space-1', '/ws', 'folder');
+
+    expect(result).toEqual({ error: 'document rejected' });
+    expect(mockSession.abort).toHaveBeenCalled();
+    expect(mockSession.disconnect).toHaveBeenCalled();
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'document-agent-1',
+      'failed',
+      'Error: document rejected',
+    );
+  });
 });
 
 describe('launchCommentAgent', () => {
