@@ -6322,7 +6322,12 @@ canvasMarkComplete.addEventListener('click', async () => {
   closeCanvasMenu();
   if (!canvasSpaceId) return;
   const spaceId = canvasSpaceId;
-  await saveCanvasEditor();
+  const saveResult = await saveCanvasEditor();
+  if (!saveResult.success) {
+    showStatus('Save failed — canvas not completed', true);
+    setTimeout(hideStatus, 3000);
+    return;
+  }
   await whimAPI.update(spaceId, { status: 'done' });
   showStatus('✓ Marked complete');
   setTimeout(hideStatus, 2000);
@@ -6899,7 +6904,12 @@ canvasLaunchBtn.addEventListener('click', async () => {
   if (canvasSkillId) {
     await launchSkillAsSpace(canvasSkillId);
   } else if (canvasSpaceId) {
-    await saveCanvasEditor();
+    const saveResult = await saveCanvasEditor();
+    if (!saveResult.success) {
+      showStatus('Save failed — agent not launched', true);
+      setTimeout(hideStatus, 3000);
+      return;
+    }
 
     const result = await whimAPI.launchDocumentAgent(canvasSpaceId);
     if ('error' in result) {
