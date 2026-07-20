@@ -62,6 +62,7 @@ vi.mock('./database', () => ({
   updateCanvasAgentStatus: vi.fn(),
   createAgentSession: vi.fn(),
   updateAgentSessionStatus: vi.fn(),
+  deleteAgentSession: vi.fn(),
   updateAgentSessionId: vi.fn(),
   getAgentSession: vi.fn(),
   listAgentSessions: vi.fn().mockReturnValue([]),
@@ -76,6 +77,10 @@ vi.mock('./workspace', () => ({
 
 vi.mock('./session', () => ({
   launchSessionInTerminal: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('./cloud-agent-poller', () => ({
+  stopCloudJobPoller: vi.fn(() => true),
 }));
 
 vi.mock('./mcp', () => ({
@@ -135,6 +140,7 @@ import {
   launchDocumentAgent,
   approveAgent,
   abortAgent,
+  deleteAgent,
   listAgents,
   listAllAgents,
   sendChatMessage,
@@ -328,6 +334,7 @@ describe('launchAgent', () => {
 
     expect(result).toEqual({ error: 'selection rejected' });
     expect(mockSession.abort).toHaveBeenCalled();
+    expect(mockSession.disconnect).toHaveBeenCalled();
     expect(mockSession.disconnect).toHaveBeenCalled();
     expect(updateAgentSessionStatus).toHaveBeenCalledWith(
       'agent-1',
@@ -900,6 +907,63 @@ describe('abortAgent', () => {
     expect(mockSession.abort).toHaveBeenCalled();
     // Status should be updated to 'failed' in DB
     expect(updateAgentSessionStatus).toHaveBeenCalledWith(agentId, 'failed', 'Aborted by user');
+  });
+
+  it('stops CCA tracking without pretending the remote job was cancelled', async () => {
+    vi.mocked(getAgentSession).mockReturnValueOnce({
+      id: 'cca-agent', session_id: 'cca-session', space_id: null, prompt: 'p',
+      status: 'running', summary: '', working_dir: '/ws', source: 'cca',
+      persona_handle: null, quoted_text: null, run_location: 'cloud',
+      cca_job_id: 'job-1', cca_repository: 'owner/repo',
+      cca_effective_repository: 'owner/repo',
+      created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
+    });
+    const { stopCloudJobPoller } = await import('./cloud-agent-poller');
+
+    await abortAgent('cca-agent');
+
+    expect(stopCloudJobPoller).toHaveBeenCalledWith('cca-agent');
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'cca-agent',
+      'failed',
+      expect.stringContaining('cloud job may continue'),
+    );
+  });
+
+  it('uses explicit stop-tracking semantics for CLI sessions', async () => {
+    vi.mocked(getAgentSession).mockReturnValueOnce({
+      id: 'cli-agent', session_id: 'cli-session', space_id: null, prompt: 'CLI Session',
+      status: 'running', summary: '', working_dir: '/ws', source: 'cli',
+      persona_handle: null, quoted_text: null, run_location: 'local',
+      created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
+    });
+
+    await abortAgent('cli-agent');
+
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'cli-agent',
+      'failed',
+      expect.stringContaining('terminal session may still be running'),
+    );
+  });
+
+  it('aborts before deleting a tracked session', async () => {
+    vi.mocked(getAgentSession).mockReturnValueOnce({
+      id: 'cli-delete', session_id: 'cli-session', space_id: null, prompt: 'CLI Session',
+      status: 'running', summary: '', working_dir: '/ws', source: 'cli',
+      persona_handle: null, quoted_text: null, run_location: 'local',
+      created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
+    });
+    const { deleteAgentSession } = await import('./database');
+
+    await deleteAgent('cli-delete');
+
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'cli-delete',
+      'failed',
+      expect.any(String),
+    );
+    expect(deleteAgentSession).toHaveBeenCalledWith('cli-delete');
   });
 });
 
@@ -2077,6 +2141,48 @@ describe('reconcileStaleAgents', () => {
     // updateAgentSessionStatus should NOT be called for cloud-session.
     const calls = vi.mocked(updateAgentSessionStatus).mock.calls.filter(c => c[0] === 'cloud-session');
     expect(calls).toHaveLength(0);
+  });
+
+  it('preserves an external CLI session across restart until its exit signal completes it', () => {
+    vi.useFakeTimers();
+    stopCliExitMonitor();
+    const now = new Date().toISOString();
+    const cliSession = {
+      id: 'cli-live',
+      session_id: 'cli-session',
+      space_id: null,
+      prompt: 'CLI Session',
+      status: 'running' as const,
+      summary: 'Running in terminal...',
+      working_dir: '/ws',
+      source: 'cli' as const,
+      persona_handle: null,
+      quoted_text: null,
+      run_location: 'local' as const,
+      created_at: now,
+      updated_at: now,
+    };
+    vi.mocked(listAgentSessions).mockReturnValue([cliSession]);
+    vi.mocked(getAgentSession).mockReturnValue(cliSession);
+
+    reconcileStaleAgents();
+    expect(updateAgentSessionStatus).not.toHaveBeenCalledWith(
+      'cli-live',
+      'failed',
+      expect.any(String),
+    );
+
+    vi.mocked(fs.readdirSync).mockReturnValue(['cli-live'] as any);
+    startCliExitMonitor();
+    vi.advanceTimersByTime(10_000);
+
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'cli-live',
+      'completed',
+      'CLI session ended',
+    );
+    stopCliExitMonitor();
+    vi.useRealTimers();
   });
 
   it('reconciles only local sessions when both kinds are present', () => {

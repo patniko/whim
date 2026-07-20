@@ -194,14 +194,23 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
       const source = d.source === 'cloud' ? 'cca' : (d.source ?? 'sdk');
       const runLocation = d.run_location === 'cloud' ? 'cloud' : 'local';
       db.prepare(
-        `INSERT OR REPLACE INTO agent_sessions (id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, yolo_mode, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT OR REPLACE INTO agent_sessions (id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, cca_job_id, cca_repository, cca_effective_repository, cca_fallback_json, cca_result_json, yolo_mode, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         d.id, d.session_id, d.space_id ?? null, d.prompt, d.status ?? 'running',
         d.summary ?? '', d.working_dir ?? null, source, d.persona_handle ?? null,
         d.quoted_text ?? null, d.comment_thread_id ?? null,
-        runLocation, d.yolo_mode ? 1 : 0, d.created_at, d.updated_at,
+        runLocation, d.cca_job_id ?? null, d.cca_repository ?? null,
+        d.cca_effective_repository ?? null, d.cca_fallback_json ?? null,
+        d.cca_result_json ?? null, d.yolo_mode ? 1 : 0, d.created_at, d.updated_at,
       );
+      break;
+    }
+
+    case 'agent_session.cca_result': {
+      const d = event.data;
+      db.prepare('UPDATE agent_sessions SET cca_result_json = ?, updated_at = ? WHERE id = ?')
+        .run(d.cca_result_json ?? null, d.updated_at ?? event.ts, d.id);
       break;
     }
 
@@ -384,15 +393,21 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
       }
       if (Array.isArray(d.agent_sessions)) {
         for (const a of d.agent_sessions) {
+          const source = a.source === 'cloud' ? 'cca' : (a.source ?? 'sdk');
           db.prepare(
-            `INSERT OR REPLACE INTO agent_sessions (id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, yolo_mode, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            `INSERT OR REPLACE INTO agent_sessions (id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, cca_job_id, cca_repository, cca_effective_repository, cca_fallback_json, cca_result_json, yolo_mode, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).run(
             a.id, a.session_id, a.space_id ?? null, a.prompt,
             a.status ?? 'completed', a.summary ?? '', a.working_dir ?? null,
-            a.source ?? 'sdk', a.persona_handle ?? null, a.quoted_text ?? null,
+            source, a.persona_handle ?? null, a.quoted_text ?? null,
             a.comment_thread_id ?? null,
             a.run_location === 'cloud' ? 'cloud' : 'local',
+            a.cca_job_id ?? null,
+            a.cca_repository ?? null,
+            a.cca_effective_repository ?? null,
+            a.cca_fallback_json ?? null,
+            a.cca_result_json ?? null,
             a.yolo_mode ? 1 : 0,
             a.created_at, a.updated_at,
           );

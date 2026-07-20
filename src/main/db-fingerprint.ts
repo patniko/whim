@@ -28,7 +28,7 @@ import * as crypto from 'crypto';
 import { listLogFiles } from './log-store';
 
 /** Bump this when the DB schema in initDatabase changes. Mismatches force a rebuild. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** Sibling filename next to spaces.db. */
 export const FINGERPRINT_FILENAME = 'db.fingerprint.json';

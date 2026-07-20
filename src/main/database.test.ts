@@ -48,6 +48,7 @@ import {
   listAllRunningAgents,
   createAgentSession,
   updateAgentSessionStatus,
+  updateAgentSessionCcaResult,
   getAgentSession,
   listAgentSessions,
   deleteAgentSession,
@@ -516,6 +517,32 @@ describe('database', () => {
     it('defaults comment_thread_id to null for non-comment agents', () => {
       createAgentSession(makeAgentSession({ id: 'as-nothread', session_id: 'sid-nothread' }));
       expect(getAgentSession('as-nothread')!.comment_thread_id).toBeNull();
+    });
+
+    it('persists CCA recovery metadata and latest result', () => {
+      createAgentSession(makeAgentSession({
+        id: 'cca-session',
+        source: 'cca',
+        run_location: 'cloud',
+        cca_job_id: 'job-42',
+        cca_repository: 'upstream/repo',
+        cca_effective_repository: 'fork/repo',
+        cca_fallback_json: '{"reason":"sso_blocked"}',
+        cca_result_json: '{"status":"queued"}',
+      }));
+
+      updateAgentSessionCcaResult('cca-session', '{"status":"completed"}');
+      const fetched = getAgentSession('cca-session')!;
+      expect(fetched.cca_job_id).toBe('job-42');
+      expect(fetched.cca_repository).toBe('upstream/repo');
+      expect(fetched.cca_effective_repository).toBe('fork/repo');
+      expect(fetched.cca_fallback_json).toContain('sso_blocked');
+      expect(fetched.cca_result_json).toBe('{"status":"completed"}');
+      expect(appendEvent).toHaveBeenCalledWith(
+        expect.any(String),
+        'agent_session.cca_result',
+        expect.objectContaining({ id: 'cca-session', cca_result_json: '{"status":"completed"}' }),
+      );
     });
 
     it('updateAgentSessionStatus updates status without summary', () => {

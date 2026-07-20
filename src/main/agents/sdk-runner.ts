@@ -1456,6 +1456,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   const chatChannel = `chat:event:${agentId}`;
 
   session.on((event: any) => {
+    if (record.aborted) return;
     // Persist meaningful events to the chat transcript so we can replay
     // them into a fresh session if the original session is unreachable
     // later (e.g. cloud worker expired, SDK runtime restarted with
@@ -1483,12 +1484,14 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
 
   // SDK events wrap payloads in event.data; fall back to top-level for compat
   session.on('assistant.message_delta', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     const delta = d.deltaContent ?? d.delta ?? '';
     notifier.notifyRenderer(chatChannel, { type: 'assistant.message_delta', delta });
   });
 
   session.on('assistant.message', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     const content = d.content || d.message || '';
     record.summary = truncate(content || 'Agent responded', 100);
@@ -1500,6 +1503,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('assistant.reasoning_delta', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     notifier.notifyRenderer(chatChannel, {
       type: 'assistant.reasoning_delta',
@@ -1509,6 +1513,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('assistant.reasoning', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     notifier.notifyRenderer(chatChannel, {
       type: 'assistant.reasoning',
@@ -1518,6 +1523,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('tool.execution_start', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     record.summary = `Using ${d.toolName || 'tool'}...`;
     notifier.notifyRenderer('agent:status-changed', {
@@ -1536,6 +1542,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('tool.execution_progress', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     notifier.notifyRenderer(chatChannel, {
       type: 'tool.progress',
@@ -1545,6 +1552,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('tool.execution_complete', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     // SDK result is { content, detailedContent? } — flatten to string
     const rawResult = d.result;
@@ -1572,6 +1580,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('session.idle', () => {
+    if (record.aborted) return;
     // A newly-created session can emit an idle event before its initial prompt
     // has been submitted. Comment launches keep phase='starting' until send()
     // is accepted so that startup idle cannot falsely complete the worker.
@@ -1626,6 +1635,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('session.error', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     record.status = 'failed';
     record.summary = `Error: ${d.message || 'Unknown error'}`;
@@ -1660,6 +1670,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
 
   // Remote steering state changes
   session.on('session.remote_steerable_changed' as any, (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     const remoteSteerable = !!d.remoteSteerable;
     if (record.remote) {
@@ -1680,6 +1691,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   // the URL so the renderer can surface a shareable link without the user
   // having to call enableRemoteControl first.
   session.on('session.info' as any, (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     if (d?.infoType !== 'remote' || !d?.url) return;
     const url: string = d.url;
@@ -1709,6 +1721,7 @@ function installSubagentSubscription(session: CopilotSession, record: AgentRecor
   const chatChannel = `chat:event:${parentAgentId}`;
 
   (session as any).on((event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     const type = event.type ?? d.type;
 

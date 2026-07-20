@@ -1,7 +1,6 @@
 import { ipcMain } from 'electron';
 import { isInitialized, getSpace } from '../database';
 import { getConfigValue } from '../config';
-import { notifyAllWindows } from '../notify';
 import * as path from 'path';
 import { resolveCommentLaunchTarget } from '../services/comment-launch-target';
 
@@ -32,48 +31,16 @@ export function registerAgentHandlers(): void {
     if (persona.runLocation === 'cca') {
       const documentPath = target.documentPath ? path.relative(workspace, target.documentPath) : path.join(target.folder, 'canvas.md');
       const prompt = `${persona.instructions}\n\nDocument: ${documentPath}\nComment: "${commentBody}"\nOn text: "${quotedText}"`;
-      const { getWorkspaceRepo, getGitHubToken, launchCloudAgentWithFallback } = await import('../cloud-agent');
-      const repoInfo = await getWorkspaceRepo(workspace);
-      if (!repoInfo) return { error: 'Could not determine repository from workspace.' };
-
-      const token = await getGitHubToken();
-      if (!token) return { error: 'No GitHub token found.' };
-
-      const launch = await launchCloudAgentWithFallback(repoInfo.owner, repoInfo.repo, prompt, token);
-      if ('error' in launch) return launch;
-      const { result, fallback } = launch;
-
-      const { v4: uuid } = await import('uuid');
-      const agentId = uuid();
-      const now = new Date().toISOString();
-      const effective = fallback
-        ? { owner: fallback.effectiveOwner, repo: fallback.effectiveRepo }
-        : repoInfo;
-      const summary = fallback
-        ? `Cloud job ${result.jobId} on fork ${fallback.effectiveOwner}/${fallback.effectiveRepo} (upstream ${fallback.upstream.owner}/${fallback.upstream.repo} blocked by SSO)`
-        : `Cloud job ${result.jobId}`;
-      const { createAgentSession } = await import('../database');
-      createAgentSession({
-        id: agentId, session_id: result.sessionId, space_id: target.launchSpaceId,
-        prompt: commentBody, status: 'running', summary,
-        working_dir: workspace, source: 'cca' as any, persona_handle: persona.handle,
-        quoted_text: quotedText || null, comment_thread_id: threadId,
-        run_location: 'cloud',
-        created_at: now, updated_at: now,
-      });
-
-      const { startCloudJobPoller } = await import('../cloud-agent-poller');
-      startCloudJobPoller(agentId, effective.owner, effective.repo, result.jobId, token);
-      notifyAllWindows('agent:status-changed', {
-        agentId,
-        status: 'running',
-        summary,
-        fallback,
+      const { launchTrackedCloudAgent } = await import('../cloud-agent-poller');
+      return launchTrackedCloudAgent({
         spaceId: target.launchSpaceId,
+        prompt,
+        displayPrompt: commentBody,
+        workspace,
+        personaHandle: persona.handle,
+        quotedText: quotedText || undefined,
         threadId,
       });
-
-      return { agentId, sessionId: result.sessionId, fallback };
     }
 
     const { launchCommentAgent } = await import('../agent-service');
@@ -150,48 +117,14 @@ export function registerAgentHandlers(): void {
 
     if (persona && persona.runLocation === 'cca') {
       const fullPrompt = `${persona.instructions}\n\n${prompt}`;
-      const { getWorkspaceRepo, getGitHubToken, launchCloudAgentWithFallback } = await import('../cloud-agent');
-      const repoInfo = await getWorkspaceRepo(workspace);
-      if (!repoInfo) return { error: 'Could not determine repository from workspace. Ensure a git remote is configured.' };
-
-      const token = await getGitHubToken();
-      if (!token) return { error: 'No GitHub token found. Run `gh auth login` or set GITHUB_TOKEN.' };
-
-      const launch = await launchCloudAgentWithFallback(repoInfo.owner, repoInfo.repo, fullPrompt, token);
-      if ('error' in launch) return launch;
-      const { result, fallback } = launch;
-
-      const { v4: uuid } = await import('uuid');
-      const agentId = uuid();
-      const now = new Date().toISOString();
-      const effective = fallback
-        ? { owner: fallback.effectiveOwner, repo: fallback.effectiveRepo }
-        : repoInfo;
-      const summary = fallback
-        ? `Cloud job ${result.jobId} on fork ${fallback.effectiveOwner}/${fallback.effectiveRepo} (@${persona.handle}; upstream SSO blocked)`
-        : `Cloud job ${result.jobId} (@${persona.handle})`;
-      const { createAgentSession } = await import('../database');
-      createAgentSession({
-        id: agentId,
-        session_id: result.sessionId,
-        space_id: null,
-        prompt,
-        status: 'running',
-        summary,
-        working_dir: workspace,
-        source: 'cca' as any,
-        persona_handle: persona.handle,
-        quoted_text: null,
-        run_location: 'cloud',
-        created_at: now,
-        updated_at: now,
+      const { launchTrackedCloudAgent } = await import('../cloud-agent-poller');
+      return launchTrackedCloudAgent({
+        spaceId: null,
+        prompt: fullPrompt,
+        displayPrompt: prompt,
+        workspace,
+        personaHandle: persona.handle,
       });
-
-      const { startCloudJobPoller } = await import('../cloud-agent-poller');
-      startCloudJobPoller(agentId, effective.owner, effective.repo, result.jobId, token);
-      notifyAllWindows('agent:status-changed', { agentId, status: 'running', summary, fallback });
-
-      return { agentId, sessionId: result.sessionId, fallback };
     }
 
     const { launchQuickAgent } = await import('../agent-service');
@@ -215,11 +148,8 @@ export function registerAgentHandlers(): void {
   });
 
   ipcMain.handle('agent:delete-session', async (_event, agentId: string) => {
-    const { abortAgent, forgetAgent } = await import('../agent-service');
-    try { await abortAgent(agentId); } catch { /* already stopped */ }
-    const { deleteAgentSession } = await import('../database');
-    deleteAgentSession(agentId);
-    forgetAgent(agentId);
+    const { deleteAgent } = await import('../agent-service');
+    await deleteAgent(agentId);
     return { ok: true };
   });
 
@@ -265,51 +195,12 @@ export function registerAgentHandlers(): void {
     const workspace = getConfigValue('workspace');
     if (!workspace) return { error: 'no_workspace' };
 
-    const { getWorkspaceRepo, getGitHubToken, launchCloudAgentWithFallback } = await import('../cloud-agent');
-    const repoInfo = await getWorkspaceRepo(workspace);
-    if (!repoInfo) return { error: 'Could not determine repository from workspace. Ensure a git remote is configured.' };
-
-    const token = await getGitHubToken();
-    if (!token) return { error: 'No GitHub token found. Run `gh auth login` or set GITHUB_TOKEN.' };
-
-    const launch = await launchCloudAgentWithFallback(repoInfo.owner, repoInfo.repo, prompt, token);
-    if ('error' in launch) return launch;
-    const { result, fallback } = launch;
-
-    // Register in agent_sessions DB for tracking
-    const { v4: uuid } = await import('uuid');
-    const agentId = uuid();
-    const now = new Date().toISOString();
-    const effective = fallback
-      ? { owner: fallback.effectiveOwner, repo: fallback.effectiveRepo }
-      : repoInfo;
-    const summary = fallback
-      ? `Cloud job ${result.jobId} on fork ${fallback.effectiveOwner}/${fallback.effectiveRepo} (upstream ${fallback.upstream.owner}/${fallback.upstream.repo} blocked by SSO)`
-      : `Cloud job ${result.jobId}`;
-    const { createAgentSession } = await import('../database');
-    createAgentSession({
-      id: agentId,
-      session_id: result.sessionId,
-      space_id: spaceId || null,
+    const { launchTrackedCloudAgent } = await import('../cloud-agent-poller');
+    return launchTrackedCloudAgent({
+      spaceId: spaceId || null,
       prompt,
-      status: 'running',
-      summary,
-      working_dir: workspace,
-      source: 'cca' as any,
-      persona_handle: null,
-      quoted_text: null,
-      run_location: 'cloud',
-      created_at: now,
-      updated_at: now,
+      workspace,
     });
-
-    // Start polling for this job
-    const { startCloudJobPoller } = await import('../cloud-agent-poller');
-    startCloudJobPoller(agentId, effective.owner, effective.repo, result.jobId, token);
-
-    notifyAllWindows('agent:status-changed', { agentId, status: 'running', summary, fallback });
-
-    return { agentId, sessionId: result.sessionId, jobId: result.jobId, fallback };
   });
 
   ipcMain.handle('agent:cloud-status', async (_event, agentId: string) => {

@@ -62,6 +62,14 @@ export interface AgentSession {
    * Control.
    */
   run_location: 'local' | 'cloud';
+  /** CCA job id and repository metadata used to restore polling after restart. */
+  cca_job_id?: string | null;
+  cca_repository?: string | null;
+  cca_effective_repository?: string | null;
+  /** Serialized CloudJobFallbackInfo when the launch used a fork fallback. */
+  cca_fallback_json?: string | null;
+  /** Serialized latest CloudJobStatus returned by the CCA API. */
+  cca_result_json?: string | null;
   /**
    * Whether yolo mode (auto-approve all permission requests) was enabled on
    * this session.  Persisted so a session that the user flipped into yolo mode
