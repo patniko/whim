@@ -331,6 +331,9 @@ export async function abortAgent(agentId: string): Promise<void> {
   const persisted = persistence.getSession(agentId);
   const source = persisted?.source ?? (record ? 'sdk' : null);
   if (!source) return;
+  const status = record?.status ?? persisted?.status;
+  const isCloudSdk = source === 'sdk' && (record?.runLocation === 'cloud' || persisted?.run_location === 'cloud');
+  if (status === 'completed' || (status === 'failed' && (!isCloudSdk || record?.aborted === true))) return;
 
   if (source === 'cca') {
     const { stopCloudJobPoller } = await import('./cloud-agent-poller');
@@ -360,17 +363,79 @@ export async function abortAgent(agentId: string): Promise<void> {
   }
 
   if (!record) {
-    persistence.updateSessionStatus(agentId, 'failed', 'Stopped by user');
+    if (!persisted) return;
+    const isActive = persisted?.status === 'running' || persisted?.status === 'waiting-approval';
+    if (!isActive && !isCloudSdk) return;
+    if (persisted.run_location === 'cloud') {
+      const { abortRestoredCloudAgent } = await import('./agents/sdk-runner');
+      const abortResult = await abortRestoredCloudAgent(agentId);
+      if (abortResult === 'retry') {
+        const summary = 'Could not reconnect to stop this cloud agent. It may still be running; retry before deleting it.';
+        persistence.updateSessionStatus(agentId, persisted.status, summary);
+        notifier.notifyRenderer('agent:status-changed', {
+          agentId,
+          status: persisted.status,
+          summary,
+          spaceId: persisted.space_id ?? undefined,
+          threadId: persisted.comment_thread_id ?? undefined,
+          trackingError: true,
+        });
+        throw new Error(summary);
+      }
+    }
+    persistence.updateSessionStatus(agentId, 'failed', 'Aborted by user');
+    notifier.notifyRenderer('agent:status-changed', {
+      agentId,
+      status: 'failed',
+      summary: 'Aborted by user',
+      spaceId: persisted?.space_id ?? undefined,
+      threadId: persisted?.comment_thread_id ?? undefined,
+    });
     return;
   }
 
-  record.aborted = true;
-  broker.clearPendingInteractions(record);
+  if (record.runLocation === 'cloud' && record.phase === 'starting' && !record.session) {
+    record.aborted = true;
+    const summary = 'Cancellation is waiting for the cloud session to finish starting. Retry deletion after it stops.';
+    record.summary = summary;
+    persistence.updateSessionStatus(agentId, record.status, summary);
+    notifier.notifyRenderer('agent:status-changed', {
+      agentId,
+      status: record.status,
+      summary,
+      spaceId: record.spaceId,
+      threadId: record.commentContext?.threadId,
+      trackingError: true,
+    });
+    throw new Error(summary);
+  }
+
   try {
     if (record.session) await record.session.abort();
   } catch (err) {
     console.warn(`[agent-service] SDK abort failed for ${agentId}:`, err);
+    if (record.runLocation === 'cloud') {
+      const { isCloudSessionGone } = await import('./agents/sdk-runner');
+      if (isCloudSessionGone(err)) {
+        console.log(`[agent-service] Cloud session already gone for ${agentId}; clearing local state`);
+      } else {
+        const summary = 'Could not stop this cloud agent. It may still be running; retry before deleting it.';
+        record.summary = summary;
+        persistence.updateSessionStatus(agentId, record.status, summary);
+        notifier.notifyRenderer('agent:status-changed', {
+          agentId,
+          status: record.status,
+          summary,
+          spaceId: record.spaceId,
+          threadId: record.commentContext?.threadId,
+          trackingError: true,
+        });
+        throw new Error(summary);
+      }
+    }
   }
+  record.aborted = true;
+  broker.clearPendingInteractions(record);
   try {
     if (record.session) await record.session.disconnect();
   } catch (err) {
@@ -392,12 +457,9 @@ export async function abortAgent(agentId: string): Promise<void> {
 }
 
 export async function deleteAgent(agentId: string): Promise<void> {
-  try {
-    await abortAgent(agentId);
-  } finally {
-    deleteAgentSession(agentId);
-    forgetAgent(agentId);
-  }
+  await abortAgent(agentId);
+  deleteAgentSession(agentId);
+  forgetAgent(agentId);
 }
 
 export function forgetAgent(agentId: string): void {

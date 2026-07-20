@@ -140,6 +140,42 @@ export async function launchCommentAgent(
 
   const launchStillWanted = () => !record.aborted && registry.get(agentId) === record;
   let session: any;
+  const stopCancelledCloudSession = async (): Promise<void> => {
+    const sessionId = session?.sessionId || agentId;
+    record.sessionId = sessionId;
+    record.session = session;
+    persistence.updateSessionId(agentId, sessionId);
+    try {
+      await session.abort();
+      try { await session.disconnect?.(); } catch { /* best-effort cleanup */ }
+      record.session = undefined;
+      record.status = 'failed';
+      record.summary = 'Aborted by user';
+      persistence.updateStatus(record);
+      notifier.notifyRenderer('agent:status-changed', {
+        agentId,
+        status: 'failed',
+        summary: record.summary,
+        spaceId,
+        threadId,
+      });
+    } catch (error) {
+      record.aborted = false;
+      record.phase = 'active';
+      record.summary = 'Could not stop this cloud agent after startup. It may still be running; retry before deleting it.';
+      persistence.updateStatus(record);
+      setupListeners(session, record);
+      notifier.notifyRenderer('agent:status-changed', {
+        agentId,
+        status: record.status,
+        summary: record.summary,
+        spaceId,
+        threadId,
+        trackingError: true,
+      });
+      console.warn(`[comment-workflow] Failed to abort cancelled cloud launch ${agentId}:`, error);
+    }
+  };
 
   try {
     const cliToolsPrompt = buildCliToolsPrompt();
@@ -211,7 +247,8 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
       },
     });
     if (!launchStillWanted()) {
-      try { await (session as any).abort?.(); } catch { /* best-effort */ }
+      if (isCloudSandbox) await stopCancelledCloudSession();
+      else try { await (session as any).abort?.(); } catch { /* best-effort */ }
       return { error: 'Agent launch cancelled' };
     }
 
@@ -244,7 +281,8 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
       }
     }
     if (!launchStillWanted()) {
-      try { await (session as any).abort?.(); } catch { /* best-effort */ }
+      if (isCloudSandbox) await stopCancelledCloudSession();
+      else try { await (session as any).abort?.(); } catch { /* best-effort */ }
       return { error: 'Agent launch cancelled' };
     }
 
@@ -290,7 +328,26 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
 
     return { agentId, sessionId };
   } catch (err: any) {
-    if (!record.aborted && record.status !== 'failed') {
+    if (record.aborted && !session) {
+      record.status = 'failed';
+      record.summary = 'Launch cancelled before the cloud session started';
+      persistence.updateStatus(record);
+      notifier.notifyRenderer('agent:status-changed', {
+        agentId,
+        status: 'failed',
+        summary: record.summary,
+        spaceId,
+        threadId,
+      });
+    } else if (
+      isCloudSandbox
+      && record.status === 'running'
+      && record.phase === 'active'
+      && record.session === session
+    ) {
+      // sendInitialPrompt preserved this session because the cloud worker
+      // could not be aborted. Keep it connected and retryable.
+    } else if (!record.aborted && record.status !== 'failed') {
       try { await session?.abort?.(); } catch { /* best-effort cleanup */ }
       try { await session?.disconnect?.(); } catch { /* best-effort cleanup */ }
       record.status = 'failed';

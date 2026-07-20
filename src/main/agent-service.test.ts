@@ -35,6 +35,11 @@ const mockSession = {
 const mockClient = {
   createSession: vi.fn().mockResolvedValue(mockSession),
   resumeSession: vi.fn().mockResolvedValue(mockSession),
+  rpc: {
+    sessions: {
+      connect: vi.fn().mockResolvedValue(undefined),
+    },
+  },
 };
 
 vi.mock('./ai', () => ({
@@ -368,6 +373,38 @@ describe('launchAgent', () => {
       sessionId: 'mock-session-id',
     });
   });
+
+  it('ignores idle and reports cancellation while the initial prompt is pending', async () => {
+    enableMockClient();
+    let idleCb: ((event: unknown) => void) | null = null;
+    mockSession.on.mockImplementation((event: unknown, callback?: (event: unknown) => void) => {
+      if (event === 'session.idle') idleCb = callback ?? null;
+      return () => {};
+    });
+    let resolveSend!: (messageId: string) => void;
+    mockSession.send.mockReturnValueOnce(new Promise(resolve => {
+      resolveSend = resolve;
+    }));
+
+    const launchPromise = launchAgent(
+      'space-1',
+      'text',
+      { quote: '', prefix: '', suffix: '' },
+      '/ws',
+      'folder',
+    );
+    await vi.waitFor(() => expect(mockSession.send).toHaveBeenCalled());
+    idleCb?.({});
+    await abortAgent('agent-1');
+    resolveSend('message-1');
+
+    await expect(launchPromise).resolves.toEqual({ error: 'Agent launch cancelled' });
+    expect(updateAgentSessionStatus).not.toHaveBeenCalledWith(
+      'agent-1',
+      'completed',
+      expect.any(String),
+    );
+  });
 });
 
 describe('launchQuickAgent', () => {
@@ -466,6 +503,36 @@ describe('launchQuickAgent', () => {
       'failed',
       'Error: quick rejected',
     );
+  });
+
+  it('keeps a cloud worker retryable when initial-launch cleanup cannot abort it', async () => {
+    enableMockClient();
+    const cloudPersona = {
+      id: 'cloud-persona', handle: 'cloud', instructions: 'Run in cloud.',
+      model: 'gpt-4o', runLocation: 'cloud' as const,
+    };
+    let startCb: ((event: unknown) => void) | null = null;
+    mockSession.on.mockImplementation((event: unknown, callback?: (event: unknown) => void) => {
+      if (event === 'session.start') startCb = callback ?? null;
+      return () => {};
+    });
+    setTimeout(() => startCb?.({ data: { producer: 'copilot-agent' } }), 0);
+    mockSession.send.mockRejectedValueOnce(new Error('quick rejected'));
+    mockSession.abort.mockRejectedValueOnce(new Error('abort unavailable'));
+
+    const result = await launchQuickAgent('do the thing', '/ws', cloudPersona as any);
+
+    expect(result).toEqual({ error: 'quick rejected' });
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'quick-agent-1',
+      'running',
+      expect.stringContaining('Retry abort before deleting'),
+    );
+    expect(mockSession.disconnect).not.toHaveBeenCalled();
+
+    await deleteAgent('quick-agent-1');
+    const { deleteAgentSession } = await import('./database');
+    expect(deleteAgentSession).toHaveBeenCalledWith('quick-agent-1');
   });
 
   it('sets up sandbox for sandboxed persona', async () => {
@@ -704,6 +771,77 @@ describe('launchCommentAgent', () => {
     expect(mockSession.send).not.toHaveBeenCalled();
   });
 
+  it('defers deleting a cloud comment agent until startup cancellation succeeds', async () => {
+    enableMockClient();
+    const cloudPersona = { ...persona, runLocation: 'cloud' as const };
+    let resolveSession!: (session: typeof mockSession) => void;
+    mockClient.createSession.mockReturnValueOnce(new Promise(resolve => {
+      resolveSession = resolve;
+    }));
+    const { deleteAgentSession } = await import('./database');
+
+    const launchPromise = launchCommentAgent(
+      'space-1',
+      'fix this',
+      'quoted text',
+      {},
+      cloudPersona,
+      'thread-cloud-pending',
+      '/ws',
+      'folder',
+    );
+    await vi.waitFor(() => expect(mockClient.createSession).toHaveBeenCalled());
+
+    await expect(deleteAgent('comment-agent-1')).rejects.toThrow('waiting for the cloud session');
+    expect(deleteAgentSession).not.toHaveBeenCalled();
+
+    resolveSession(mockSession);
+    await expect(launchPromise).resolves.toEqual({ error: 'Agent launch cancelled' });
+    expect(mockSession.abort).toHaveBeenCalled();
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'comment-agent-1',
+      'failed',
+      'Aborted by user',
+    );
+
+    await deleteAgent('comment-agent-1');
+    expect(deleteAgentSession).toHaveBeenCalledWith('comment-agent-1');
+  });
+
+  it('makes a cancelled cloud comment launch deletable when createSession rejects', async () => {
+    enableMockClient();
+    const cloudPersona = { ...persona, runLocation: 'cloud' as const };
+    let rejectSession!: (error: Error) => void;
+    mockClient.createSession.mockReturnValueOnce(new Promise((_, reject) => {
+      rejectSession = reject;
+    }));
+    const { deleteAgentSession } = await import('./database');
+
+    const launchPromise = launchCommentAgent(
+      'space-1',
+      'fix this',
+      'quoted text',
+      {},
+      cloudPersona,
+      'thread-cloud-rejected',
+      '/ws',
+      'folder',
+    );
+    await vi.waitFor(() => expect(mockClient.createSession).toHaveBeenCalled());
+    await expect(deleteAgent('comment-agent-1')).rejects.toThrow('waiting for the cloud session');
+
+    rejectSession(new Error('cloud startup failed'));
+    await expect(launchPromise).resolves.toEqual({ error: 'cloud startup failed' });
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'comment-agent-1',
+      'failed',
+      'Launch cancelled before the cloud session started',
+    );
+
+    await deleteAgent('comment-agent-1');
+    expect(deleteAgentSession).toHaveBeenCalledWith('comment-agent-1');
+  });
+
   it('sends the comment body as the prompt', async () => {
     enableMockClient();
     await launchCommentAgent('space-1', 'fix this', 'quoted text', {}, persona, null, '/ws', 'folder');
@@ -736,6 +874,42 @@ describe('launchCommentAgent', () => {
       'failed',
       'Error: runtime rejected prompt',
     );
+  });
+
+  it('keeps a cloud comment worker retryable when prompt cleanup cannot abort it', async () => {
+    enableMockClient();
+    const cloudPersona = { ...persona, runLocation: 'cloud' as const };
+    let startCb: ((event: unknown) => void) | null = null;
+    mockSession.on.mockImplementation((event: unknown, callback?: (event: unknown) => void) => {
+      if (event === 'session.start') startCb = callback ?? null;
+      return () => {};
+    });
+    setTimeout(() => startCb?.({ data: { producer: 'copilot-agent' } }), 0);
+    mockSession.send.mockRejectedValueOnce(new Error('runtime rejected prompt'));
+    mockSession.abort.mockRejectedValueOnce(new Error('abort unavailable'));
+
+    const result = await launchCommentAgent(
+      'space-1',
+      'fix this',
+      'quoted text',
+      {},
+      cloudPersona,
+      'thread-cloud-failed',
+      '/ws',
+      'folder',
+    );
+
+    expect(result).toEqual({ error: 'runtime rejected prompt' });
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'comment-agent-1',
+      'running',
+      expect.stringContaining('Retry abort before deleting'),
+    );
+    expect(mockSession.disconnect).not.toHaveBeenCalled();
+
+    await deleteAgent('comment-agent-1');
+    const { deleteAgentSession } = await import('./database');
+    expect(deleteAgentSession).toHaveBeenCalledWith('comment-agent-1');
   });
 
   // Sandbox is now cross-platform — these tests run everywhere.
@@ -889,6 +1063,8 @@ describe('abortAgent', () => {
     mockSession.send.mockResolvedValue(undefined);
     mockSession.abort.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
+    mockClient.resumeSession.mockResolvedValue(mockSession);
+    mockClient.rpc.sessions.connect.mockResolvedValue(undefined);
     uuidCounter = 0;
     vi.mocked(uuid).mockImplementation(() => `abort-agent-${++uuidCounter}`);
   });
@@ -907,6 +1083,52 @@ describe('abortAgent', () => {
     expect(mockSession.abort).toHaveBeenCalled();
     // Status should be updated to 'failed' in DB
     expect(updateAgentSessionStatus).toHaveBeenCalledWith(agentId, 'failed', 'Aborted by user');
+  });
+
+  it('preserves a live SDK cloud session when abort fails', async () => {
+    enableMockClient();
+    const persona = {
+      id: 'cloud-persona', handle: 'cloud', instructions: 'Run in cloud.',
+      model: 'gpt-4o', runLocation: 'cloud' as const,
+    };
+    let startCb: ((event: unknown) => void) | null = null;
+    mockSession.on.mockImplementation((event: unknown, callback?: (event: unknown) => void) => {
+      if (event === 'session.start') startCb = callback ?? null;
+      return () => {};
+    });
+    setTimeout(() => startCb?.({ data: { producer: 'copilot-agent' } }), 0);
+    const launched = await launchQuickAgent('cloud task', '/ws', persona as any);
+    const agentId = (launched as { agentId: string }).agentId;
+    mockSession.abort.mockRejectedValueOnce(new Error('network unavailable'));
+    const { deleteAgentSession } = await import('./database');
+
+    await expect(deleteAgent(agentId)).rejects.toThrow('may still be running');
+
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      agentId,
+      'running',
+      expect.stringContaining('retry before deleting'),
+    );
+    expect(deleteAgentSession).not.toHaveBeenCalled();
+    expect(mockSession.disconnect).not.toHaveBeenCalled();
+  });
+
+  it('deletes a completed live SDK session without aborting it', async () => {
+    enableMockClient();
+    let idleCb: ((event: unknown) => void) | null = null;
+    mockSession.on.mockImplementation((event: unknown, callback?: (event: unknown) => void) => {
+      if (event === 'session.idle') idleCb = callback ?? null;
+      return () => {};
+    });
+    const launched = await launchQuickAgent('finish task', '/ws');
+    const agentId = (launched as { agentId: string }).agentId;
+    idleCb?.({});
+    const { deleteAgentSession } = await import('./database');
+
+    await deleteAgent(agentId);
+
+    expect(mockSession.abort).not.toHaveBeenCalled();
+    expect(deleteAgentSession).toHaveBeenCalledWith(agentId);
   });
 
   it('stops CCA tracking without pretending the remote job was cancelled', async () => {
@@ -945,6 +1167,95 @@ describe('abortAgent', () => {
       'failed',
       expect.stringContaining('terminal session may still be running'),
     );
+  });
+
+  it('reconnects and aborts a restored SDK cloud session', async () => {
+    enableMockClient();
+    vi.mocked(getAgentSession).mockReturnValue({
+      id: 'sdk-cloud', session_id: 'cloud-session', space_id: 'space-1', prompt: 'Cloud work',
+      status: 'running', summary: '', working_dir: '/ws', source: 'sdk',
+      persona_handle: null, quoted_text: null, run_location: 'cloud',
+      created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
+    });
+
+    await abortAgent('sdk-cloud');
+
+    expect(mockClient.rpc.sessions.connect).toHaveBeenCalledWith({ sessionId: 'cloud-session' });
+    expect(mockClient.resumeSession).toHaveBeenCalledWith(
+      'cloud-session',
+      expect.objectContaining({ workingDirectory: '/ws' }),
+    );
+    expect(mockSession.abort).toHaveBeenCalled();
+    expect(mockSession.disconnect).toHaveBeenCalled();
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith('sdk-cloud', 'failed', 'Aborted by user');
+  });
+
+  it('preserves a restored SDK cloud session when reconnecting to abort fails', async () => {
+    enableMockClient();
+    vi.mocked(getAgentSession).mockReturnValue({
+      id: 'sdk-cloud', session_id: 'cloud-session', space_id: 'space-1', prompt: 'Cloud work',
+      status: 'running', summary: '', working_dir: '/ws', source: 'sdk',
+      persona_handle: null, quoted_text: null, run_location: 'cloud',
+      created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
+    });
+    mockClient.rpc.sessions.connect.mockRejectedValueOnce(new Error('offline'));
+    const { deleteAgentSession } = await import('./database');
+
+    await expect(deleteAgent('sdk-cloud')).rejects.toThrow('may still be running');
+
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'sdk-cloud',
+      'running',
+      expect.stringContaining('retry before deleting'),
+    );
+    expect(deleteAgentSession).not.toHaveBeenCalled();
+  });
+
+  it('deletes restored cloud metadata when the SDK confirms the session is gone', async () => {
+    enableMockClient();
+    vi.mocked(getAgentSession).mockReturnValue({
+      id: 'sdk-cloud-missing', session_id: 'cloud-session', space_id: 'space-1', prompt: 'Cloud work',
+      status: 'failed', summary: 'Error', working_dir: '/ws', source: 'sdk',
+      persona_handle: null, quoted_text: null, run_location: 'cloud',
+      created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
+    });
+    mockClient.rpc.sessions.connect.mockRejectedValueOnce(new Error('Session not found: cloud-session'));
+    const { deleteAgentSession } = await import('./database');
+
+    await deleteAgent('sdk-cloud-missing');
+
+    expect(deleteAgentSession).toHaveBeenCalledWith('sdk-cloud-missing');
+  });
+
+  it('deletes a completed SDK cloud session without reconnecting', async () => {
+    vi.mocked(getAgentSession).mockReturnValue({
+      id: 'sdk-cloud-done', session_id: 'cloud-session', space_id: 'space-1', prompt: 'Cloud work',
+      status: 'completed', summary: 'Done', working_dir: '/ws', source: 'sdk',
+      persona_handle: null, quoted_text: null, run_location: 'cloud',
+      created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
+    });
+    const { deleteAgentSession } = await import('./database');
+
+    await deleteAgent('sdk-cloud-done');
+
+    expect(mockClient.rpc.sessions.connect).not.toHaveBeenCalled();
+    expect(deleteAgentSession).toHaveBeenCalledWith('sdk-cloud-done');
+  });
+
+  it('treats disconnect failure as cleanup after a successful cloud abort', async () => {
+    enableMockClient();
+    vi.mocked(getAgentSession).mockReturnValue({
+      id: 'sdk-cloud', session_id: 'cloud-session', space_id: 'space-1', prompt: 'Cloud work',
+      status: 'running', summary: '', working_dir: '/ws', source: 'sdk',
+      persona_handle: null, quoted_text: null, run_location: 'cloud',
+      created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
+    });
+    mockSession.disconnect.mockRejectedValueOnce(new Error('already disconnected'));
+
+    await expect(abortAgent('sdk-cloud')).resolves.toBeUndefined();
+
+    expect(mockSession.abort).toHaveBeenCalled();
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith('sdk-cloud', 'failed', 'Aborted by user');
   });
 
   it('aborts before deleting a tracked session', async () => {

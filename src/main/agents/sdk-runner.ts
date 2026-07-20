@@ -136,9 +136,14 @@ function launchStillWanted(record: AgentRecord): boolean {
   return !record.aborted && registry.get(record.agentId) === record;
 }
 
-async function disconnectLaunchSession(session: CopilotSession): Promise<void> {
-  try { await session.abort(); } catch { /* best-effort cleanup */ }
+async function disconnectLaunchSession(session: CopilotSession, preserveOnAbortFailure = false): Promise<boolean> {
+  try {
+    await session.abort();
+  } catch {
+    if (preserveOnAbortFailure) return false;
+  }
   try { await session.disconnect(); } catch { /* best-effort cleanup */ }
+  return true;
 }
 
 async function failInitialLaunch(
@@ -146,10 +151,30 @@ async function failInitialLaunch(
   record: AgentRecord,
   error: unknown,
 ): Promise<void> {
-  await disconnectLaunchSession(session);
+  const stopped = await disconnectLaunchSession(session, record.runLocation === 'cloud');
   if (record.aborted) return;
 
   const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+  if (!stopped && record.runLocation === 'cloud') {
+    record.phase = 'active';
+    record.summary = `Initial launch failed and the cloud worker could not be stopped: ${message}. Retry abort before deleting it.`;
+    broker.clearPendingInteractions(record);
+    if (!record.ephemeral) persistence.updateStatus(record);
+    notifier.notifyRenderer('agent:status-changed', {
+      agentId: record.agentId,
+      status: record.status,
+      summary: record.summary,
+      spaceId: record.spaceId,
+      threadId: record.commentContext?.threadId,
+      trackingError: true,
+    });
+    notifier.notifyRenderer(`chat:event:${record.agentId}`, {
+      type: 'session.error',
+      message: record.summary,
+    });
+    return;
+  }
+  record.aborted = true;
   record.status = 'failed';
   record.summary = `Error: ${message}`;
   broker.clearPendingInteractions(record);
@@ -195,7 +220,6 @@ export async function sendInitialPrompt(
       throw new Error('Agent launch cancelled');
     }
 
-    record.phase = 'active';
     console.log(
       `[sdk-send] ${options.logLabel} agent=${record.agentId.slice(0, 8)} ` +
       `session.send promptLen=${options.prompt.length}`,
@@ -204,6 +228,10 @@ export async function sendInitialPrompt(
       prompt: options.prompt,
       ...(options.attachments ? { attachments: options.attachments } : {}),
     });
+    if (!launchStillWanted(record)) {
+      throw new Error('Agent launch cancelled');
+    }
+    record.phase = 'active';
     console.log(
       `[sdk-send] ${options.logLabel} agent=${record.agentId.slice(0, 8)} ` +
       `session.send resolved messageId=${messageId ?? '<undefined>'}`,
@@ -1114,6 +1142,37 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
     // catch it means the remote side was unreachable, so there is no
     // live worker to orphan.
     return restartExpiredSession(agentId, persisted, workingDir);
+  }
+}
+
+export function isCloudSessionGone(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /session (?:was )?not found|not found:.*session|session .*expired|session .*deleted/i.test(message);
+}
+
+export async function abortRestoredCloudAgent(agentId: string): Promise<'aborted' | 'missing' | 'retry'> {
+  const persisted = persistence.getSession(agentId);
+  if (!persisted || persisted.source !== 'sdk' || persisted.run_location !== 'cloud') return 'retry';
+
+  const client = getCopilotClient();
+  if (!client) return 'retry';
+
+  try {
+    await (client as any).rpc.sessions.connect({ sessionId: persisted.session_id });
+    const session = await client.resumeSession(persisted.session_id, {
+      workingDirectory: persisted.working_dir || getConfig().workspace || undefined,
+    });
+    await session.abort();
+    try {
+      await session.disconnect();
+    } catch (error) {
+      console.warn(`[sdk-runner] Cloud agent ${agentId} aborted but disconnect failed:`, error);
+    }
+    return 'aborted';
+  } catch (error) {
+    if (isCloudSessionGone(error)) return 'missing';
+    console.warn(`[sdk-runner] Failed to reconnect and abort cloud agent ${agentId}:`, error);
+    return 'retry';
   }
 }
 
