@@ -8615,7 +8615,8 @@ if (isCanvasMode) {
   whimAPI.onCanvasRequestHide(async () => {
     try {
       if (canvasSpaceId || canvasSkillId || canvasPageSpaceId || canvasFilePath) {
-        await saveAndUnmountCurrent();
+        const saved = await saveAndUnmountCurrent();
+        if (!saved) return;
       }
       canvasTitle.textContent = '';
       canvasTitle.contentEditable = 'false';
@@ -8630,8 +8631,10 @@ if (isCanvasMode) {
       // Reset the beforeunload guard so the next session's unsaved edits
       // (e.g. on app quit) still flush via the beforeunload listener.
       canvasClosing = false;
-    } finally {
       whimAPI.canvasHideReady();
+    } catch (error) {
+      console.error('[canvas] failed to save before close:', error);
+      canvasSaveStatus.textContent = '✗ save failed';
     }
   });
 
