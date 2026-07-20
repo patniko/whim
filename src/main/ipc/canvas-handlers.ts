@@ -42,7 +42,6 @@ function notifyEditorContentUpdated(editorId: string, content: string): void {
 
 function watchEditorFile(editorId: string, filePath: string, onChange?: (content: string) => void): void {
   startWatching(editorId, filePath, (content) => {
-    rememberCanvasEditorContent(editorId, content);
     onChange?.(content);
     notifyEditorContentUpdated(editorId, content);
   });
