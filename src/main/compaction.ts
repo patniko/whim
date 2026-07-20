@@ -180,6 +180,11 @@ function createCompactionSchema(database: Database.Database): void {
       quoted_text TEXT,
       comment_thread_id TEXT,
       run_location TEXT NOT NULL DEFAULT 'local',
+      cca_job_id TEXT,
+      cca_repository TEXT,
+      cca_effective_repository TEXT,
+      cca_fallback_json TEXT,
+      cca_result_json TEXT,
       yolo_mode INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
@@ -236,7 +241,7 @@ function materialiseSnapshot(database: Database.Database): {
     spaces: database.prepare('SELECT id, description, body, raw_text, client, due_at, due_at_utc, recurrence, completed_at, folder, source_skill_id, attachments, status, created_at, updated_at FROM spaces').all() as any[],
     space_events: database.prepare('SELECT id, space_id, event_type, due_at, due_at_utc, completed_at, recurrence_json, created_at FROM space_events').all() as any[],
     canvas_agents: database.prepare('SELECT id, space_id, selected_text, session_id, pid, status, created_at, updated_at FROM canvas_agents').all() as any[],
-    agent_sessions: database.prepare('SELECT id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, yolo_mode, created_at, updated_at FROM agent_sessions').all() as any[],
+    agent_sessions: database.prepare('SELECT id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, cca_job_id, cca_repository, cca_effective_repository, cca_fallback_json, cca_result_json, yolo_mode, created_at, updated_at FROM agent_sessions').all() as any[],
     subagent_records: database.prepare('SELECT id, parent_agent_id, tool_call_id, agent_name, display_name, description, agent_type, status, started_at, completed_at, duration_ms, model, total_tokens, total_tool_calls, error, streaming_content, streaming_content_path, turns_json, turns_path, progress_json, created_at, updated_at FROM subagent_records').all() as any[],
     subagent_tool_calls: database.prepare('SELECT subagent_id, parent_agent_id, tool_call_id, tool_name, arguments_json, result, result_path, success, error, started_at, completed_at, created_at FROM subagent_tool_calls').all() as any[],
   };
