@@ -61,19 +61,19 @@ describe('bundled Copilot platform runtime resolution', () => {
     setRuntime(originalPlatform, originalArch);
   });
 
-  it('defines the exact native entrypoint contract for every packaged platform', () => {
+  it('defines the exact platform entrypoint contract for every packaged platform', () => {
     expect(getCopilotPlatformEntrypoints('darwin', 'arm64')[0].appRelativePath)
-      .toBe('node_modules/@github/copilot-darwin-arm64/copilot');
+      .toBe('node_modules/@github/copilot-darwin-arm64/index.js');
     expect(getCopilotPlatformEntrypoints('win32', 'x64')[0].appRelativePath)
-      .toBe('node_modules\\@github\\copilot-win32-x64\\copilot.exe');
+      .toBe('node_modules\\@github\\copilot-win32-x64\\index.js');
     expect(getCopilotPlatformEntrypoints('linux', 'x64', true)[0].appRelativePath)
-      .toBe('node_modules/@github/copilot-linuxmusl-x64/copilot');
+      .toBe('node_modules/@github/copilot-linuxmusl-x64/index.js');
   });
 
-  it('resolves the packaged app.asar.unpacked native binary', () => {
+  it('resolves the packaged app.asar.unpacked platform entrypoint', () => {
     setRuntime('darwin', 'arm64');
     const appPath = '/Applications/whim.app/Contents/Resources/app.asar';
-    const expected = `${appPath}.unpacked/node_modules/@github/copilot-darwin-arm64/copilot`;
+    const expected = `${appPath}.unpacked/node_modules/@github/copilot-darwin-arm64/index.js`;
     mockGetAppPath.mockReturnValue(appPath);
     mockExistsSync.mockImplementation((file) => file === expected);
 
@@ -81,9 +81,9 @@ describe('bundled Copilot platform runtime resolution', () => {
     expect(getBundledCopilotCandidates(appPath, 'darwin', 'arm64')[0]).toBe(expected);
   });
 
-  it('resolves Windows npm shims to the 1.0.71 platform binary', () => {
+  it('resolves Windows npm shims to the 1.0.71 platform entrypoint', () => {
     setRuntime('win32', 'x64');
-    const expected = 'C:\\ProgramData\\npm\\node_modules\\@github\\copilot-win32-x64\\copilot.exe';
+    const expected = 'C:\\ProgramData\\npm\\node_modules\\@github\\copilot-win32-x64\\index.js';
     mockExistsSync.mockImplementation((file) => file === expected);
 
     expect(resolveCmdToJs('C:\\ProgramData\\npm\\copilot.cmd')).toBe(expected);

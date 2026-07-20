@@ -26,7 +26,7 @@ export function getCopilotPlatformEntrypoints(
   const variants = platform === 'linux'
     ? (linuxMusl ? ['linuxmusl', 'linux'] : ['linux', 'linuxmusl'])
     : [platform];
-  const executableName = platform === 'win32' ? 'copilot.exe' : 'copilot';
+  const executableName = 'index.js';
 
   return variants.map((variant) => {
     const packageName = `copilot-${variant}-${arch}`;

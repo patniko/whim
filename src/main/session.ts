@@ -282,7 +282,7 @@ export function resolveCommandOnPath(command: string): string | null {
 /**
  * On Windows, .cmd wrappers cannot be spawned directly by the Copilot SDK
  * (it uses spawn() without shell:true, causing EINVAL). Resolve to the
- * installed platform-package native binary in the same npm prefix. Legacy
+ * installed platform-package JavaScript entrypoint in the same npm prefix. Legacy
  * `@github/copilot/index.js` installs remain supported as a fallback.
  */
 export function resolveCmdToJs(cmdPath: string): string {
@@ -311,8 +311,8 @@ export function resolveCmdToJs(cmdPath: string): string {
 
     for (const nodeModulesDir of nodeModulesDirs) {
       for (const entrypoint of getCopilotPlatformEntrypoints('win32', process.arch, false)) {
-        const nativeBinary = w.join(nodeModulesDir, entrypoint.packageRelativePath);
-        if (fs.existsSync(nativeBinary)) return nativeBinary;
+        const platformEntrypoint = w.join(nodeModulesDir, entrypoint.packageRelativePath);
+        if (fs.existsSync(platformEntrypoint)) return platformEntrypoint;
       }
     }
 
@@ -503,13 +503,13 @@ let bundledCliResolved = false;
 
 /**
  * Resolve the path to the Copilot CLI bundled with the app
- * (the native executable in the pinned platform package). This runs a
+ * (the JavaScript entrypoint in the pinned platform package). This runs a
  * known-compatible CLI version with no external install required — the
  * default runtime source.
  *
  * In a packaged build the package is unpacked from the asar archive (see
  * `build.asarUnpack` in package.json). We prefer the `app.asar.unpacked`
- * platform binary and use the in-place `node_modules` equivalent for
+ * platform entrypoint and use the in-place `node_modules` equivalent for
  * unpackaged/dev runs. A legacy `index.js` is retained as a safe fallback.
  */
 export function resolveBundledCliPath(): string | null {

@@ -53,7 +53,13 @@ if (missing.length > 0) {
 }
 
 const copilotRuntime = platform === 'mac' ? macCopilotRuntime : winCopilotRuntime;
-const runtimeCheck = spawnSync(copilotRuntime, ['--version'], { encoding: 'utf8' });
+const appExecutable = platform === 'mac'
+  ? path.join(macDirectory, 'Contents', 'MacOS', 'whim')
+  : path.join(buildDir, 'win-unpacked', 'whim.exe');
+const runtimeCheck = spawnSync(appExecutable, [copilotRuntime, '--version'], {
+  encoding: 'utf8',
+  env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+});
 if (runtimeCheck.status !== 0) {
   throw new Error(`Packaged Copilot runtime failed to start:\n${runtimeCheck.stderr || runtimeCheck.error}`);
 }
