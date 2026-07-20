@@ -76,6 +76,12 @@ describe('cli-electron-shim', () => {
       expect(mockWriteFileSync).not.toHaveBeenCalled();
     });
 
+    it('returns null for native Windows executables', () => {
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      expect(getCliShimPath('C:\\ProgramData\\npm\\node_modules\\@github\\copilot-win32-x64\\copilot.exe')).toBeNull();
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
     it('writes shim file under userData/cli-shim on Windows and returns its path', () => {
       Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
       mockGetPath.mockReturnValue('C:\\Users\\test\\AppData\\Roaming\\whim');

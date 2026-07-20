@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as path from 'path';
 
 // Mock Electron and heavy dependencies before importing
 vi.mock('electron', () => ({
@@ -81,7 +82,7 @@ describe('resolveLinkedSkillConfig', () => {
     const result = resolveLinkedSkillConfig(content, '/workspace');
 
     expect(result).toBeDefined();
-    expect(result!.skillDirectories).toEqual(['/workspace/.agents/skills']);
+    expect(result!.skillDirectories).toEqual([path.join('/workspace', '.agents', 'skills')]);
     // Only the unlinked skill should be disabled
     expect(result!.disabledSkills).toEqual(['Code Review']);
   });

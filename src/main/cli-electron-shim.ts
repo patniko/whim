@@ -45,6 +45,7 @@ import(pathToFileURL(target).href).catch((err) => {
 export function getCliShimPath(realCliPath: string): string | null {
   if (process.platform !== 'win32') return null;
   if (!realCliPath) return null;
+  if (path.win32.extname(realCliPath).toLowerCase() === '.exe') return null;
 
   const userData = app.getPath('userData');
   const shimDir = path.win32.join(userData, 'cli-shim');

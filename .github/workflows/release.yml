@@ -10,13 +10,70 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
 jobs:
-  release-mac:
-    runs-on: macos-latest
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.release-preflight.outputs.commit_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Validate tag, version, and release credentials
+        id: release-preflight
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: npm run release:preflight -- --platform all
+
+  validate-mac-package:
+    needs: preflight
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build unsigned package
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run build:mac
+
+      - name: Verify packaged application
+        run: npm run smoke:package -- --platform mac
+
+  release-mac:
+    needs: [preflight, validate-mac-package]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -69,11 +126,12 @@ jobs:
         run: security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
 
   release-win:
+    needs: [preflight, validate-mac-package]
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ needs.preflight.outputs.commit_sha }}
 
       - uses: actions/setup-node@v4
         with:

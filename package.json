@@ -12,6 +12,10 @@
     "lint": "oxlint src/",
     "format": "oxfmt src/",
     "typecheck": "tsc -p tsconfig.main.json --noEmit",
+    "audit:dependencies": "node scripts/audit-dependencies.js",
+    "test:reliability-scripts": "node --test scripts/audit-dependencies.test.js scripts/workflow-config.test.js",
+    "release:preflight": "node scripts/release-preflight.js",
+    "smoke:package": "node scripts/verify-package.js",
     "postinstall": "node -e \"if(process.platform==='darwin'){require('child_process').execSync('bash scripts/codesign-dev.sh',{stdio:'inherit'})}else{console.log('[codesign] Skipping — not macOS')}\"",
     "rebuild:electron": "node -e \"const v=require('electron/package.json').version; const fs=require('fs'); const p=require('path'); const marker=p.join('node_modules','better-sqlite3','.electron-target'); if(fs.existsSync(marker)&&fs.readFileSync(marker,'utf8')===v+'_'+process.arch){console.log('[rebuild] better-sqlite3 already built for Electron '+v+', skipping');process.exit(0)} const {execSync}=require('child_process'); process.stdout.write('[rebuild] Rebuilding better-sqlite3 for Electron '+v+'...'); execSync('npx --yes node-gyp rebuild --target='+v+' --arch='+process.arch+' --dist-url=https://electronjs.org/headers --runtime=electron', {cwd:'node_modules/better-sqlite3', stdio:'pipe'}); fs.writeFileSync(marker,v+'_'+process.arch); console.log(' done')\"",
     "rebuild:node": "node -e \"const fs=require('fs');const cp=require('child_process');const m=require('path').join('node_modules','better-sqlite3','.electron-target');try{if(fs.existsSync(m))fs.unlinkSync(m)}catch(e){console.warn('[rebuild:node] unlink marker:',e.message)}try{cp.execSync('npm rebuild better-sqlite3',{stdio:'pipe'})}catch(e){console.warn('[rebuild:node] rebuild failed (likely a running Electron app holding better_sqlite3.node — stop it and re-run): '+(e.stderr?.toString()||e.message).split('\\n').slice(0,3).join(' '))}\"",
@@ -35,17 +39,11 @@
     },
     "files": [
       "dist/**/*",
-      "!node_modules/@github/copilot-darwin-x64/**",
-      "!node_modules/@github/copilot-darwin-arm64/**",
-      "!node_modules/@github/copilot-win32-x64/**",
-      "!node_modules/@github/copilot-win32-arm64/**",
-      "!node_modules/@github/copilot-linux-x64/**",
-      "!node_modules/@github/copilot-linux-arm64/**",
-      "!node_modules/@github/copilot-linuxmusl-x64/**",
-      "!node_modules/@github/copilot-linuxmusl-arm64/**"
+      "!node_modules/better-sqlite3/.electron-target"
     ],
     "asarUnpack": [
-      "node_modules/@github/copilot/**"
+      "node_modules/@github/copilot/**",
+      "node_modules/@github/copilot-*/**"
     ],
     "extraResources": [
       {
@@ -113,9 +111,9 @@
   "dependencies": {
     "@github/copilot": "1.0.71",
     "@github/copilot-sdk": "1.0.7",
-    "@huggingface/transformers": "^4.1.0",
-    "@milkdown/kit": "^7.21.2",
-    "@milkdown/react": "^7.21.2",
+    "@huggingface/transformers": "^4.2.0",
+    "@milkdown/kit": "^7.21.3",
+    "@milkdown/react": "^7.21.3",
     "@mozilla/readability": "^0.6.0",
     "@prosemirror-adapter/react": "^0.5.3",
     "@types/qrcode": "^1.5.6",
@@ -124,7 +122,7 @@
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.3",
     "html-to-docx": "^1.8.0",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.3.0",
     "linkedom": "^0.18.12",
     "lucide-react": "^1.8.0",
     "marked": "^18.0.5",
@@ -134,7 +132,7 @@
     "react-dom": "^19.2.5",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "uuid": "^13.0.0",
+    "uuid": "^13.0.2",
     "ws": "^8.20.0"
   },
   "devDependencies": {
@@ -147,13 +145,13 @@
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.18.1",
     "electron": "^41.2.1",
-    "electron-builder": "^26.8.1",
+    "electron-builder": "^26.15.3",
     "electronmon": "^2.0.4",
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.1",
     "happy-dom": "^20.10.2",
     "oxfmt": "^0.46.0",
     "oxlint": "^1.61.0",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.10"
   }
 }
