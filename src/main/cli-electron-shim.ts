@@ -35,27 +35,27 @@ import(pathToFileURL(target).href).catch((err) => {
 }
 
 /**
- * Returns the path to a CJS wrapper that should be spawned in place of the
- * real CLI on Windows. Re-writes the file on every call so the wrapper content
- * stays in sync with the current Whim build.
+ * Returns the path to a CJS wrapper that should be spawned in place of a
+ * JavaScript CLI entrypoint under Electron. Re-writes the file on every call
+ * so the wrapper content stays in sync with the current Whim build.
  *
- * Returns `null` on non-Windows platforms (no shim needed there because
- * `process.execPath` is Node, not Electron).
+ * Native executables are spawned directly and do not need the wrapper.
  */
 export function getCliShimPath(realCliPath: string): string | null {
-  if (process.platform !== 'win32') return null;
   if (!realCliPath) return null;
-  if (path.win32.extname(realCliPath).toLowerCase() === '.exe') return null;
+  const pathApi = process.platform === 'win32' ? path.win32 : path.posix;
+  if (pathApi.extname(realCliPath).toLowerCase() !== '.js') return null;
 
   const userData = app.getPath('userData');
-  const shimDir = path.win32.join(userData, 'cli-shim');
+  const shimDir = pathApi.join(userData, 'cli-shim');
   // The SDK only treats `.js` files as JavaScript that needs to be run via
   // Node; `.mjs` is spawned directly (EFTYPE on Windows). Keep the `.js`
   // extension and use CJS syntax in `buildShimContent`.
-  const shimPath = path.win32.join(shimDir, 'cli-electron-shim.js');
+  const shimPath = pathApi.join(shimDir, 'cli-electron-shim.js');
 
   try {
     fs.mkdirSync(shimDir, { recursive: true });
+    fs.writeFileSync(pathApi.join(shimDir, 'package.json'), '{"type":"commonjs"}\n', 'utf8');
     fs.writeFileSync(shimPath, buildShimContent(realCliPath), 'utf8');
   } catch (err) {
     console.warn('[cli-shim] Failed to materialize Electron shim:', err);
