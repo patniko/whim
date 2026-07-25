@@ -345,29 +345,50 @@ export interface RuntimeTestResult extends RuntimeStatus {
 }
 
 /**
- * Live-test the configured runtime by spawning a throwaway client, connecting,
- * and performing a real handshake (`listModels`). Confirms not just that a CLI
- * exists but that the connection actually works end-to-end. Bounded by a
- * timeout so the UI never hangs on a misconfigured runtime.
+ * Stable identity of a resolved runtime. Two resolutions with the same key
+ * would spawn an identical runtime process, so a reinit between them is a
+ * no-op that only costs an extra CLI spawn (and, on macOS, an extra keychain
+ * prompt when the CLI reads its stored token).
+ */
+function runtimeKey(runtime: ResolvedRuntime): string {
+  const token = runtime.kind === 'server' ? (getConfigValue('cliServerToken') || '') : '';
+  return `${runtime.kind}\u0000${runtime.target ?? ''}\u0000${token}`;
+}
+
+/** Runtime key the live `client` was started against; null when not started. */
+let activeRuntimeKey: string | null = null;
+
+/**
+ * Live-test the configured runtime by performing a real handshake
+ * (`listModels`). When the configured runtime is the one the primary client is
+ * already connected to, the test reuses that client rather than spawning a
+ * throwaway one — every extra spawn is another CLI process reading credentials
+ * (and on macOS, another keychain prompt). Bounded by a timeout so the UI never
+ * hangs on a misconfigured runtime.
  */
 export async function testRuntimeConnection(timeoutMs = 25_000): Promise<RuntimeTestResult> {
   const status = getRuntimeStatus();
   const runtime = resolveRuntimeConnection();
-  const cliEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
-  const opts: Record<string, unknown> = {
-    ...(runtime.connection ? { connection: runtime.connection } : {}),
-    env: cliEnv,
-  };
+  const reusable = client && activeRuntimeKey === runtimeKey(runtime) ? client : null;
 
   let testClient: CopilotClient | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   try {
-    testClient = new CopilotClient(opts as any);
-    const client = testClient;
+    let target: CopilotClient;
+    if (reusable) {
+      target = reusable;
+    } else {
+      const cliEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+      testClient = new CopilotClient({
+        ...(runtime.connection ? { connection: runtime.connection } : {}),
+        env: cliEnv,
+      } as any);
+      target = testClient;
+    }
     const handshake = (async () => {
-      await client.start();
+      if (testClient) await testClient.start();
       // Listing models proves the runtime responds over the connection.
-      await client.listModels();
+      await target.listModels();
     })();
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`Connection test timed out after ${timeoutMs}ms`)), timeoutMs);
@@ -389,7 +410,16 @@ export async function testRuntimeConnection(timeoutMs = 25_000): Promise<Runtime
   }
 }
 
-export async function initCopilot(): Promise<void> {
+/** In-flight primary init, so concurrent callers share one CLI spawn. */
+let initInFlight: Promise<void> | null = null;
+
+export function initCopilot(): Promise<void> {
+  if (initInFlight) return initInFlight;
+  initInFlight = doInitCopilot().finally(() => { initInFlight = null; });
+  return initInFlight;
+}
+
+async function doInitCopilot(): Promise<void> {
   // Build a custom env for CLI subprocesses: ELECTRON_RUN_AS_NODE makes
   // electron.exe behave as plain Node.js so the CLI doesn't launch a full
   // Chromium GUI. We pass this via the SDK's `env` option rather than
@@ -412,55 +442,120 @@ export async function initCopilot(): Promise<void> {
     };
     client = new CopilotClient(opts as any);
     await client.start();
+    activeRuntimeKey = runtimeKey(runtime);
     // Eagerly init the parse session (most commonly used)
     await getParseSession();
     console.log('[copilot-sdk] Client started, parse session created');
   } catch (err) {
     console.error('[copilot-sdk] Failed to initialize primary client:', err);
     client = null;
+    activeRuntimeKey = null;
     // If the primary client failed (e.g. CLI exited), don't attempt the
     // ephemeral client — it shares the same CLI and will fail identically.
     ephemeralClient = null;
-    return;
   }
-
-  try {
-    // Start a separate client for ephemeral sessions. When sessionFs is
-    // enabled the SDK requires *every* createSession call to provide a
-    // createSessionFsHandler, so this must be a dedicated client.
-    const connection = resolveRuntimeConnection().connection;
-    const ephemeralOpts: Record<string, unknown> = {
-      ...(connection ? { connection } : {}),
-      enableRemoteSessions: true,
-      env: cliEnv,
-      sessionFs: {
-        initialCwd: '/',
-        sessionStatePath: '/.session-state',
-        conventions: 'posix',
-      },
-    };
-    ephemeralClient = new CopilotClient(ephemeralOpts as any);
-    await ephemeralClient.start();
-    console.log('[copilot-sdk] Ephemeral client started');
-  } catch (err) {
-    console.error('[copilot-sdk] Failed to initialize ephemeral client:', err);
-    ephemeralClient = null;
-  }
+  // The ephemeral client is NOT started here. It's a second CLI process that
+  // most sessions never need, and every process start re-reads credentials
+  // (on macOS that means another keychain prompt). It's spun up lazily by
+  // ensureEphemeralCopilotClient() on the first ephemeral agent launch.
 }
 
 export function getCopilotClient(): CopilotClient | null {
   return client;
 }
 
-/** Returns the dedicated CopilotClient for ephemeral (zero-persistence) sessions. */
+/** In-flight ephemeral init, so concurrent ephemeral launches share one spawn. */
+let ephemeralInFlight: Promise<CopilotClient | null> | null = null;
+
+/**
+ * Returns the dedicated CopilotClient for ephemeral (zero-persistence)
+ * sessions, starting it on first use. Ephemeral sessions need their own client
+ * because enabling `sessionFs` forces *every* createSession call on that client
+ * to supply a `createSessionFsHandler`.
+ */
+export function ensureEphemeralCopilotClient(): Promise<CopilotClient | null> {
+  if (ephemeralClient) return Promise.resolve(ephemeralClient);
+  if (ephemeralInFlight) return ephemeralInFlight;
+  if (!client) return Promise.resolve(null);
+  ephemeralInFlight = startEphemeralClient().finally(() => { ephemeralInFlight = null; });
+  return ephemeralInFlight;
+}
+
+async function startEphemeralClient(): Promise<CopilotClient | null> {
+  try {
+    const connection = resolveRuntimeConnection().connection;
+    const ephemeralOpts: Record<string, unknown> = {
+      ...(connection ? { connection } : {}),
+      enableRemoteSessions: true,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      sessionFs: {
+        initialCwd: '/',
+        sessionStatePath: '/.session-state',
+        conventions: 'posix',
+      },
+    };
+    const started = new CopilotClient(ephemeralOpts as any);
+    await started.start();
+    ephemeralClient = started;
+    console.log('[copilot-sdk] Ephemeral client started');
+    return ephemeralClient;
+  } catch (err) {
+    console.error('[copilot-sdk] Failed to initialize ephemeral client:', err);
+    ephemeralClient = null;
+    return null;
+  }
+}
+
+/** Returns the ephemeral client only if it has already been started. */
 export function getEphemeralCopilotClient(): CopilotClient | null {
   return ephemeralClient;
 }
 
-/** Shut down and re-initialize the Copilot SDK client (e.g. after CLI path change). */
-export async function reinitCopilot(): Promise<void> {
+/**
+ * Shut down and re-initialize the Copilot SDK client (e.g. after a CLI path
+ * change). Skipped when the newly-resolved runtime is identical to the running
+ * one — a pointless respawn otherwise. Pass `force` to reinit regardless.
+ */
+export async function reinitCopilot(force = false): Promise<void> {
+  const key = runtimeKey(resolveRuntimeConnection());
+  if (!force && client && activeRuntimeKey === key) {
+    console.log('[copilot-sdk] Runtime unchanged; skipping reinit');
+    return;
+  }
   await shutdownCopilot();
   await initCopilot();
+}
+
+/**
+ * Debounce window for {@link scheduleCopilotReinit}. Settings writes arrive in
+ * bursts (the CLI settings UI writes cliPath then cliSource back to back), and
+ * each immediate reinit would tear down and respawn the CLI.
+ */
+const REINIT_DEBOUNCE_MS = 500;
+let reinitTimer: ReturnType<typeof setTimeout> | null = null;
+let reinitPending: Promise<void> | null = null;
+let reinitResolve: (() => void) | null = null;
+
+/**
+ * Coalesce a burst of runtime-config changes into a single reinit. Returns a
+ * promise that resolves once the reinit has run — but callers handling IPC
+ * should NOT await it, or sequential settings writes won't coalesce.
+ */
+export function scheduleCopilotReinit(): Promise<void> {
+  if (!reinitPending) {
+    reinitPending = new Promise<void>(resolve => { reinitResolve = resolve; });
+  }
+  if (reinitTimer) clearTimeout(reinitTimer);
+  reinitTimer = setTimeout(() => {
+    reinitTimer = null;
+    const done = reinitResolve;
+    reinitPending = null;
+    reinitResolve = null;
+    void reinitCopilot().catch(err => {
+      console.error('[copilot-sdk] Scheduled reinit failed:', err);
+    }).finally(() => done?.());
+  }, REINIT_DEBOUNCE_MS);
+  return reinitPending;
 }
 
 export async function setAIModel(model: string): Promise<void> {
@@ -485,6 +580,7 @@ export async function listAvailableModels(): Promise<{ id: string; name?: string
 }
 
 export async function shutdownCopilot(): Promise<void> {
+  activeRuntimeKey = null;
   try {
     for (const s of [parseSession, recurrenceSession, recallSession]) {
       if (s) await s.disconnect();

@@ -90,6 +90,7 @@ vi.mock('./ai', () => ({
   classifyInput: vi.fn(async () => ({ type: 'space' })),
   setAIModel: vi.fn(async () => {}),
   reinitCopilot: vi.fn(async () => {}),
+  scheduleCopilotReinit: vi.fn(() => Promise.resolve()),
   listAvailableModels: vi.fn(async () => ['gpt-4', 'gpt-3.5']),
 }));
 

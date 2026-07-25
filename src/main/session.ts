@@ -331,11 +331,26 @@ export function resolveCmdToJs(cmdPath: string): string {
 }
 
 /**
+ * Cache of `<cli> --version` probes, keyed by path. Each probe spawns the CLI,
+ * and on macOS a spawned CLI may read its token from the login keychain — which
+ * can trigger a keychain prompt. Caching keeps that to once per path per run.
+ * Cleared by {@link invalidateCliPath}.
+ */
+const probedVersions = new Map<string, string | null>();
+
+/**
  * Probe a candidate CLI's version by running `<cli> --version`. `.js` entries
  * are run via the current Node/Electron binary (as plain Node). Returns null on
- * any failure. Not cached — callers should cache as needed.
+ * any failure. Cached per path; call `invalidateCliPath()` to re-probe.
  */
 export function probeCliVersion(cliPath: string): string | null {
+  if (probedVersions.has(cliPath)) return probedVersions.get(cliPath) ?? null;
+  const version = runVersionProbe(cliPath);
+  probedVersions.set(cliPath, version);
+  return version;
+}
+
+function runVersionProbe(cliPath: string): string | null {
   try {
     const cmd = /\.js$/i.test(cliPath)
       ? `"${process.execPath}" "${cliPath}" --version`
@@ -605,6 +620,7 @@ export function invalidateCliPath(): void {
   resolvedBundledCliPath = null;
   cliVersionResolved = false;
   resolvedCliVersion = null;
+  probedVersions.clear();
   invalidateMxcCapability();
 }
 

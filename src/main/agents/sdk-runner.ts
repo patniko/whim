@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { getCopilotClient, getEphemeralCopilotClient } from '../ai';
+import { getCopilotClient, ensureEphemeralCopilotClient } from '../ai';
 import { AgentAnchor, type LaunchDocumentAgentOptions } from '../../shared/types';
 import { getConfig, getConfigValue, type AgentPersona } from '../config';
 import { getAllMcpServers } from '../mcp';
@@ -461,7 +461,7 @@ export async function launchQuickAgent(
   // Cloud sessions use the regular client — the cloud environment provides its
   // own filesystem so we avoid the sessionFs + cloud interaction on the
   // ephemeral client.
-  const client = (isEphemeral && !isCloudSandbox) ? getEphemeralCopilotClient() : getCopilotClient();
+  const client = (isEphemeral && !isCloudSandbox) ? await ensureEphemeralCopilotClient() : getCopilotClient();
   if (!client) {
     return { error: isEphemeral ? 'Ephemeral Copilot client not initialized' : 'Copilot SDK not initialized' };
   }
