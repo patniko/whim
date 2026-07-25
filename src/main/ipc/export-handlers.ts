@@ -1,4 +1,4 @@
-import { ipcMain, dialog, shell, BrowserWindow, ShareMenu } from 'electron';
+import { ipcMain, shell, BrowserWindow, ShareMenu } from 'electron';
 import * as fs from 'fs';
 import { buildExport } from '../export';
 import {
@@ -7,6 +7,7 @@ import {
   getExportDestinationById,
   type ExportFormat,
 } from '../config';
+import { showOpenDialog } from './dialog-utils';
 
 export function registerExportHandlers(): void {
   // Export a canvas to a temp file and return its path (no sharing/reveal).
@@ -74,9 +75,7 @@ export function registerExportHandlers(): void {
       title: options?.title || 'Select Folder',
       properties: ['openDirectory', 'createDirectory'] as Array<'openDirectory' | 'createDirectory'>,
     };
-    const result = win
-      ? await dialog.showOpenDialog(win, dialogOpts)
-      : await dialog.showOpenDialog(dialogOpts);
+    const result = await showOpenDialog(win, dialogOpts);
 
     if (result.canceled || result.filePaths.length === 0) {
       return { canceled: true as const };
