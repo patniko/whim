@@ -17,6 +17,7 @@ import {
 import { generateTintColor, isValidTint, hueOf } from './lib/tint';
 import { parseFrontmatter } from '../shared/frontmatter';
 import { deriveMarkdownTitle, ensureMarkdownH1Title } from '../shared/markdown-title';
+import type { CanvasSaveResult } from '../shared/ipc-contract';
 
 interface ResolvedProfile {
   id: string;
@@ -198,8 +199,8 @@ interface WhimAPI {
   gitPull(): Promise<{ ok: true } | { error: string; conflict?: boolean }>;
   onGitSyncChanged(callback: (status: { available: boolean; branch: string | null; ahead: number; behind: number; unavailableReason?: string }) => void): void;
   readCanvas(spaceId: string): Promise<{ content: string; error?: string }>;
-  writeCanvas(spaceId: string, content: string): Promise<{ success?: boolean; error?: string }>;
-  closeCanvas(spaceId: string, content: string): Promise<void>;
+  writeCanvas(spaceId: string, content: string): Promise<CanvasSaveResult>;
+  closeCanvas(spaceId: string, content: string): Promise<CanvasSaveResult>;
   canvasHistory(spaceId: string): Promise<{ commits: FolderCommit[]; error?: string }>;
   canvasRestore(spaceId: string, sha: string): Promise<{ success: boolean; error?: string }>;
   canvasPreviewVersion(spaceId: string, sha: string): Promise<{ content: string; error?: string }>;
@@ -254,8 +255,8 @@ interface WhimAPI {
   onOpenPersonaSandboxEditor(callback: (data: { personaHandle: string }) => void): void;
   createPage(spaceId: string, pageName: string): Promise<{ success: boolean; page: string; error?: string }>;
   readPage(spaceId: string, pageName: string): Promise<{ content: string; error?: string }>;
-  writePage(spaceId: string, pageName: string, content: string): Promise<{ success?: boolean; error?: string }>;
-  closePage(spaceId: string, pageName: string, content: string): Promise<{ success?: boolean; error?: string }>;
+  writePage(spaceId: string, pageName: string, content: string): Promise<CanvasSaveResult>;
+  closePage(spaceId: string, pageName: string, content: string): Promise<CanvasSaveResult>;
   listPages(spaceId: string): Promise<{ pages: string[]; error?: string }>;
   openPageWindow(target: { kind: 'page'; spaceId: string; page: string; title: string }): void;
   openSettingsWindow(): void;
@@ -6321,7 +6322,12 @@ canvasMarkComplete.addEventListener('click', async () => {
   closeCanvasMenu();
   if (!canvasSpaceId) return;
   const spaceId = canvasSpaceId;
-  await saveCanvasEditor();
+  const saveResult = await saveCanvasEditor();
+  if (!saveResult.success) {
+    showStatus('Save failed — canvas not completed', true);
+    setTimeout(hideStatus, 3000);
+    return;
+  }
   await whimAPI.update(spaceId, { status: 'done' });
   showStatus('✓ Marked complete');
   setTimeout(hideStatus, 2000);
@@ -6806,9 +6812,39 @@ async function saveCanvas(): Promise<void> {
 }
 
 async function closeCanvas(): Promise<void> {
-  // If previewing, use the saved original content instead of the preview editor content
   const wasPreviewActive = previewActive;
   const savedContent = previewSavedContent;
+  const spaceId = canvasSpaceId;
+  const wasNewIntent = canvasIsNewIntent;
+  const skillId = canvasSkillId;
+  const pageSpaceId = canvasPageSpaceId;
+  const pageName = canvasPageName;
+  const filePath = canvasFilePath;
+
+  const saveResult = await saveCanvasEditor();
+  if (!saveResult.success) {
+    canvasSaveStatus.textContent = '✗ save failed — canvas kept open';
+    return;
+  }
+  const finalContent = wasPreviewActive ? (savedContent || '') : getCanvasContent();
+
+  let closeResult: CanvasSaveResult = { success: true };
+  if (skillId) {
+    await saveSkillFromCanvas(skillId, finalContent);
+  } else if (filePath) {
+    closeResult = await whimAPI.closeCanvas(`__file__${encodeURIComponent(filePath)}`, finalContent);
+  } else if (pageSpaceId && pageName) {
+    closeResult = await whimAPI.closePage(pageSpaceId, pageName, finalContent);
+  } else if (spaceId) {
+    closeResult = await whimAPI.closeCanvas(spaceId, finalContent);
+  }
+
+  if (!closeResult.success) {
+    canvasSaveStatus.textContent = '✗ close save failed — canvas kept open';
+    return;
+  }
+
+  canvasClosing = true;
   if (previewActive) {
     previewActive = false;
     previewSha = null;
@@ -6819,33 +6855,18 @@ async function closeCanvas(): Promise<void> {
   unmountCanvasWorkerPanel();
   clearAgentDecorations();
   canvasChatPaneOpen = false;
-  const spaceId = canvasSpaceId;
-  const wasNewIntent = canvasIsNewIntent;
-  const skillId = canvasSkillId;
-  const pageSpaceId = canvasPageSpaceId;
-  const pageName = canvasPageName;
+  await unmountCanvas(false);
   canvasSpaceId = null;
   canvasSkillId = null;
   canvasPageSpaceId = null;
   canvasPageName = null;
+  canvasFilePath = null;
   canvasIsNewIntent = false;
   canvasLinkedSkillIds = [];
   canvasSkillChips.classList.add('hidden');
   canvasSkillPicker.classList.add('hidden');
-  canvasClosing = true;
 
-  // Get content BEFORE unmounting — use saved content if we were previewing
-  const finalContent = wasPreviewActive ? (savedContent || '') : getCanvasContent();
-  await unmountCanvas();
-
-  if (skillId) {
-    // Save skill content
-    await saveSkillFromCanvas(skillId, finalContent);
-  } else if (pageSpaceId && pageName) {
-    await whimAPI.closePage(pageSpaceId, pageName, finalContent);
-  } else if (spaceId) {
-    await whimAPI.closeCanvas(spaceId, finalContent);
-
+  if (spaceId) {
     // If this was a new space created from Enter on empty input,
     // trigger AI refinement using the canvas content as the body
     if (wasNewIntent && finalContent.trim()) {
@@ -6883,7 +6904,12 @@ canvasLaunchBtn.addEventListener('click', async () => {
   if (canvasSkillId) {
     await launchSkillAsSpace(canvasSkillId);
   } else if (canvasSpaceId) {
-    await saveCanvasEditor();
+    const saveResult = await saveCanvasEditor();
+    if (!saveResult.success) {
+      showStatus('Save failed — agent not launched', true);
+      setTimeout(hideStatus, 3000);
+      return;
+    }
 
     const result = await whimAPI.launchDocumentAgent(canvasSpaceId);
     if ('error' in result) {
@@ -7537,7 +7563,7 @@ whimAPI.onAgentReplyReady((data) => {
 });
 
 whimAPI.onCanvasContentUpdated((data) => {
-  const activeSpaceId = currentCanvasAgentSpaceId();
+  const activeSpaceId = currentCanvasExportId();
   if (!activeSpaceId || data.spaceId !== activeSpaceId) return;
   replaceCanvasContent(data.content);
 });
@@ -7868,16 +7894,11 @@ loadPinState();
 loadRemoteState();
 
 // Flush canvas saves when the window is about to close (app quit, reload)
-window.addEventListener('beforeunload', () => {
+window.addEventListener('beforeunload', (event) => {
   if (canvasClosing) return;
-  const content = getCanvasContent();
-  if (canvasSkillId) {
-    saveSkillFromCanvas(canvasSkillId, content);
-  } else if (canvasPageSpaceId && canvasPageName) {
-    whimAPI.closePage(canvasPageSpaceId, canvasPageName, content);
-  } else if (canvasSpaceId) {
-    whimAPI.closeCanvas(canvasSpaceId, content);
-  }
+  if (!canvasSkillId && !canvasPageSpaceId && !canvasSpaceId && !canvasFilePath) return;
+  event.preventDefault();
+  void closeCanvas();
 });
 
 document.addEventListener('keydown', (e) => {
@@ -8525,33 +8546,44 @@ if (isCanvasMode) {
   whimAPI.onCanvasThemeChanged((theme: string) => {
     applyTheme(normalizeChoice(theme));
   });
-  async function saveAndUnmountCurrent(): Promise<void> {
+  async function saveAndUnmountCurrent(): Promise<boolean> {
+    const saveResult = await saveCanvasEditor();
+    if (!saveResult.success) {
+      canvasSaveStatus.textContent = '✗ save failed — current canvas kept open';
+      return false;
+    }
     const finalContent = getCanvasContent();
-    await unmountCanvas();
+    let closeResult: CanvasSaveResult = { success: true };
     if (canvasSkillId) {
       await saveSkillFromCanvas(canvasSkillId, finalContent);
-      canvasSkillId = null;
     } else if (canvasFilePath) {
       const fileSpaceId = `__file__${encodeURIComponent(canvasFilePath)}`;
-      await whimAPI.closeCanvas(fileSpaceId, finalContent);
-      canvasFilePath = null;
+      closeResult = await whimAPI.closeCanvas(fileSpaceId, finalContent);
     } else if (canvasPageSpaceId && canvasPageName) {
-      await whimAPI.closePage(canvasPageSpaceId, canvasPageName, finalContent);
-      canvasPageSpaceId = null;
-      canvasPageName = null;
+      closeResult = await whimAPI.closePage(canvasPageSpaceId, canvasPageName, finalContent);
     } else if (canvasSpaceId) {
-      await whimAPI.closeCanvas(canvasSpaceId, finalContent);
-      canvasSpaceId = null;
+      closeResult = await whimAPI.closeCanvas(canvasSpaceId, finalContent);
     }
+    if (!closeResult.success) {
+      canvasSaveStatus.textContent = '✗ close save failed — current canvas kept open';
+      return false;
+    }
+    await unmountCanvas(false);
+    canvasSkillId = null;
+    canvasFilePath = null;
+    canvasPageSpaceId = null;
+    canvasPageName = null;
+    canvasSpaceId = null;
     resetCanvasAgentMaps();
     syncCanvasAgentThreadStatuses();
+    return true;
   }
 
   // Listen for target to load (from main process)
   whimAPI.onLoadCanvasTarget(async (target: { kind: string; id: string; title: string }) => {
     // If a canvas is already open, save and close it first
     if (canvasSpaceId || canvasSkillId || canvasPageSpaceId || canvasFilePath) {
-      await saveAndUnmountCurrent();
+      if (!await saveAndUnmountCurrent()) return;
     }
 
     if (target.kind === 'skill') {
@@ -8593,7 +8625,8 @@ if (isCanvasMode) {
   whimAPI.onCanvasRequestHide(async () => {
     try {
       if (canvasSpaceId || canvasSkillId || canvasPageSpaceId || canvasFilePath) {
-        await saveAndUnmountCurrent();
+        const saved = await saveAndUnmountCurrent();
+        if (!saved) return;
       }
       canvasTitle.textContent = '';
       canvasTitle.contentEditable = 'false';
@@ -8608,8 +8641,10 @@ if (isCanvasMode) {
       // Reset the beforeunload guard so the next session's unsaved edits
       // (e.g. on app quit) still flush via the beforeunload listener.
       canvasClosing = false;
-    } finally {
       whimAPI.canvasHideReady();
+    } catch (error) {
+      console.error('[canvas] failed to save before close:', error);
+      canvasSaveStatus.textContent = '✗ save failed';
     }
   });
 

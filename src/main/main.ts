@@ -19,6 +19,7 @@ import { createMainWindow, toggleWindow, setupSnapOnDrop, registerWindowIpcHandl
 import { createTray, destroyTray } from './tray';
 import { initAutoUpdater, cleanupAutoUpdater } from './update-service';
 import { syncWebRemoteServer, stopWebRemoteServer } from './web/server';
+import { restoreActiveCloudPollers, stopAllCloudPollers } from './cloud-agent-poller';
 
 let currentToggleAccelerator: string | null = null;
 
@@ -211,24 +212,13 @@ app.whenReady().then(async () => {
 
   registerIpcHandlers();
   const mainWin = createMainWindow({ preloadPath });
-  registerWindowIpcHandlers(preloadPath);
-  setupSnapOnDrop();
-  createTray();
-  preloadModel();
-  initCopilot();
-  startCliExitMonitor();
-  reconcileStaleAgents();
-  initAutoUpdater();
-
-  // Auto-show window on launch once content has loaded
+  // Register before any recovery work that may invoke a slow external auth
+  // command. Otherwise the page can finish loading while startup is awaiting
+  // recovery, causing this one-shot event to be missed.
   mainWin.webContents.once('did-finish-load', () => {
     toggleWindow();
 
-    // Pre-warm the settings + canvas windows in the background so the first
-    // open of each is instant. Skip when no workspace is configured (welcome
-    // flow) to keep first-launch cheap for new users.
     if (workspace && fs.existsSync(workspace)) {
-      // Defer to idle so the main window finishes animating in first.
       setTimeout(() => {
         try {
           preWarmSettingsWindow(preloadPath);
@@ -243,6 +233,17 @@ app.whenReady().then(async () => {
       }, 1500);
     }
   });
+  registerWindowIpcHandlers(preloadPath);
+  setupSnapOnDrop();
+  createTray();
+  preloadModel();
+  initCopilot();
+  startCliExitMonitor();
+  void restoreActiveCloudPollers().catch((err) => {
+    console.warn('[main] Cloud poller recovery failed:', err);
+  });
+  reconcileStaleAgents();
+  initAutoUpdater();
 
   // Dev mode: watch renderer files and auto-reload windows
   if (!app.isPackaged) {
@@ -277,6 +278,7 @@ app.on('before-quit', () => {
 app.on('will-quit', async () => {
   globalShortcut.unregisterAll();
   stopCliExitMonitor();
+  stopAllCloudPollers();
   stopScheduler();
   await stopWebRemoteServer();
   cleanupAutoUpdater();

@@ -5,7 +5,7 @@ import type { AgentRecord } from './agents/agent-registry';
 import { AgentNotifier } from './agents/agent-notifier';
 import { AgentPersistence } from './agents/agent-persistence';
 import { InteractionBroker } from './agents/interaction-broker';
-import { listAllRunningAgents, updateCanvasAgentStatus } from './database';
+import { deleteAgentSession, listAllRunningAgents, updateCanvasAgentStatus } from './database';
 import { subscribeWebRemoteEvents } from './web/event-hub';
 
 // Import runner modules
@@ -328,14 +328,121 @@ export async function resolveSandboxBlock(
 
 export async function abortAgent(agentId: string): Promise<void> {
   const record = registry.get(agentId);
-  if (!record) return;
+  const persisted = persistence.getSession(agentId);
+  const source = persisted?.source ?? (record ? 'sdk' : null);
+  if (!source) return;
+  const status = record?.status ?? persisted?.status;
+  const isCloudSdk = source === 'sdk' && (record?.runLocation === 'cloud' || persisted?.run_location === 'cloud');
+  if (status === 'completed' || (status === 'failed' && (!isCloudSdk || record?.aborted === true))) return;
+
+  if (source === 'cca') {
+    const { stopCloudJobPoller } = await import('./cloud-agent-poller');
+    stopCloudJobPoller(agentId);
+    const summary = 'Stopped tracking by user. The cloud job may continue running on GitHub.';
+    persistence.updateSessionStatus(agentId, 'failed', summary);
+    notifier.notifyRenderer('agent:status-changed', {
+      agentId,
+      status: 'failed',
+      summary,
+      spaceId: persisted?.space_id ?? undefined,
+      threadId: persisted?.comment_thread_id ?? undefined,
+    });
+    return;
+  }
+
+  if (source === 'cli') {
+    const summary = 'Stopped tracking by user. The terminal session may still be running.';
+    persistence.updateSessionStatus(agentId, 'failed', summary);
+    notifier.notifyRenderer('agent:status-changed', {
+      agentId,
+      status: 'failed',
+      summary,
+      spaceId: persisted?.space_id ?? undefined,
+    });
+    return;
+  }
+
+  if (!record) {
+    if (!persisted) return;
+    const isActive = persisted?.status === 'running' || persisted?.status === 'waiting-approval';
+    if (!isActive && !isCloudSdk) return;
+    if (persisted.run_location === 'cloud') {
+      const { abortRestoredCloudAgent } = await import('./agents/sdk-runner');
+      const abortResult = await abortRestoredCloudAgent(agentId);
+      if (abortResult === 'retry') {
+        const summary = 'Could not reconnect to stop this cloud agent. It may still be running; retry before deleting it.';
+        persistence.updateSessionStatus(agentId, persisted.status, summary);
+        notifier.notifyRenderer('agent:status-changed', {
+          agentId,
+          status: persisted.status,
+          summary,
+          spaceId: persisted.space_id ?? undefined,
+          threadId: persisted.comment_thread_id ?? undefined,
+          trackingError: true,
+        });
+        throw new Error(summary);
+      }
+    }
+    persistence.updateSessionStatus(agentId, 'failed', 'Aborted by user');
+    notifier.notifyRenderer('agent:status-changed', {
+      agentId,
+      status: 'failed',
+      summary: 'Aborted by user',
+      spaceId: persisted?.space_id ?? undefined,
+      threadId: persisted?.comment_thread_id ?? undefined,
+    });
+    return;
+  }
+
+  if (record.runLocation === 'cloud' && record.phase === 'starting' && !record.session) {
+    record.aborted = true;
+    const summary = 'Cancellation is waiting for the cloud session to finish starting. Retry deletion after it stops.';
+    record.summary = summary;
+    persistence.updateSessionStatus(agentId, record.status, summary);
+    notifier.notifyRenderer('agent:status-changed', {
+      agentId,
+      status: record.status,
+      summary,
+      spaceId: record.spaceId,
+      threadId: record.commentContext?.threadId,
+      trackingError: true,
+    });
+    throw new Error(summary);
+  }
 
   try {
-    record.aborted = true;
-    broker.clearPendingInteractions(record);
-    if (record.session) {
-      await record.session.abort();
+    if (record.session) await record.session.abort();
+  } catch (err) {
+    console.warn(`[agent-service] SDK abort failed for ${agentId}:`, err);
+    if (record.runLocation === 'cloud') {
+      const { isCloudSessionGone } = await import('./agents/sdk-runner');
+      if (isCloudSessionGone(err)) {
+        console.log(`[agent-service] Cloud session already gone for ${agentId}; clearing local state`);
+      } else {
+        const summary = 'Could not stop this cloud agent. It may still be running; retry before deleting it.';
+        record.summary = summary;
+        persistence.updateSessionStatus(agentId, record.status, summary);
+        notifier.notifyRenderer('agent:status-changed', {
+          agentId,
+          status: record.status,
+          summary,
+          spaceId: record.spaceId,
+          threadId: record.commentContext?.threadId,
+          trackingError: true,
+        });
+        throw new Error(summary);
+      }
     }
+  }
+  record.aborted = true;
+  broker.clearPendingInteractions(record);
+  try {
+    if (record.session) await record.session.disconnect();
+  } catch (err) {
+    console.warn(`[agent-service] SDK disconnect failed for ${agentId}:`, err);
+  } finally {
+    record.aborted = true;
+    record.session = undefined;
     record.status = 'failed';
     record.summary = 'Aborted by user';
     persistence.updateStatus(record);
@@ -346,9 +453,13 @@ export async function abortAgent(agentId: string): Promise<void> {
       spaceId: record.spaceId,
       threadId: record.commentContext?.threadId,
     });
-  } catch {
-    // ignore
   }
+}
+
+export async function deleteAgent(agentId: string): Promise<void> {
+  await abortAgent(agentId);
+  deleteAgentSession(agentId);
+  forgetAgent(agentId);
 }
 
 export function forgetAgent(agentId: string): void {
@@ -488,11 +599,10 @@ export function onAgentListChanged(listener: () => void): () => void {
  * case where the app quit while agents were active — the in-memory registry
  * is lost on restart so these entries would otherwise stay stale forever.
  *
- * Cloud sessions (`run_location === 'cloud'`) are explicitly preserved: their
- * worker continues to run remotely after the app quits, so on restart we
- * leave their status untouched and let the user resume them on click.  The
- * resumed session reconnects to the live cloud worker via
- * `client.resumeSession`.
+ * Cloud sessions and external CLI sessions are explicitly preserved. Their
+ * workers can outlive this app process, and CLI launch does not expose a
+ * reliable child PID for liveness checks. The CLI exit-signal monitor remains
+ * responsible for converting preserved CLI sessions to completed.
  *
  * Call once after DB + agent-service initialization.
  */
@@ -507,6 +617,13 @@ export function reconcileStaleAgents(): void {
 
   for (const row of persisted) {
     if (STALE_STATUSES.has(row.status) && !registry.has(row.id)) {
+      // The terminal process is external and may still be alive. Since the
+      // launcher does not provide a process identity we can verify, preserve
+      // the active state until its durable exit signal arrives.
+      if (row.source === 'cli') {
+        console.log(`[agent-service] Preserving external CLI session ${row.id} across restart (status=${row.status})`);
+        continue;
+      }
       // Cloud sessions persist across app restarts — the runtime is remote
       // and the user can resume by clicking the session.  Don't mark these
       // as failed.

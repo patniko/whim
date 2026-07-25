@@ -8,6 +8,11 @@ import { setSpaceSessionId } from './database';
 import { createSpaceFolder } from './workspace';
 import { launchInTerminal as platformLaunchInTerminal } from './platform/terminal';
 import { focusTerminalWindow } from './platform/focus';
+import {
+  getBundledCopilotCandidates,
+  getCopilotPlatformEntrypoints,
+  isLinuxMuslRuntime,
+} from './copilot-runtime-path';
 
 // Per-space launch lock to prevent duplicate terminals
 const launching = new Set<string>();
@@ -277,12 +282,8 @@ export function resolveCommandOnPath(command: string): string | null {
 /**
  * On Windows, .cmd wrappers cannot be spawned directly by the Copilot SDK
  * (it uses spawn() without shell:true, causing EINVAL). Resolve to the
- * underlying @github/copilot/index.js entry point in the same npm prefix,
- * which the SDK can spawn via process.execPath.
- *
- * We use index.js (the full CLI bundle) rather than npm-loader.js because
- * the loader checks for a platform-specific native binary and Node >= 24,
- * both of which fail under Electron's runtime.
+ * installed platform-package JavaScript entrypoint in the same npm prefix. Legacy
+ * `@github/copilot/index.js` installs remain supported as a fallback.
  */
 export function resolveCmdToJs(cmdPath: string): string {
   if (process.platform !== 'win32') return cmdPath;
@@ -290,9 +291,8 @@ export function resolveCmdToJs(cmdPath: string): string {
   const ext = path.win32.extname(cmdPath).toLowerCase();
 
   // Handle .cmd wrappers and extensionless npm shim scripts (Unix shell
-  // scripts that npm places alongside the .cmd). Both need to be mapped to
-  // the underlying @github/copilot/index.js because Node's spawn() cannot
-  // execute them directly.
+  // scripts that npm places alongside the .cmd). Both need to be mapped to an
+  // executable package entrypoint because Node's spawn() cannot execute them.
   // For extensionless files, only resolve if a .cmd sibling exists — this
   // confirms it's an npm-generated shim rather than a standalone binary.
   if (ext !== '.cmd') {
@@ -305,23 +305,23 @@ export function resolveCmdToJs(cmdPath: string): string {
   const w = path.win32;
   try {
     const dir = w.dirname(cmdPath);
+    const nodeModulesDirs = w.basename(dir) === '.bin'
+      ? [w.dirname(dir)]
+      : [w.join(dir, 'node_modules')];
 
-    // Case 1: Global npm prefix (e.g. C:\ProgramData\npm\copilot.cmd)
-    // Package is at <prefix>\node_modules\@github\copilot\index.js
-    const globalJs = w.join(dir, 'node_modules', '@github', 'copilot', 'index.js');
-    if (fs.existsSync(globalJs)) {
-      // Prefer self-updated CLI over the npm-installed version — it's
-      // typically newer and bundles MXC support.
-      const selfUpdated = findLatestSelfUpdatedCli();
-      if (selfUpdated) return selfUpdated;
-      return globalJs;
+    for (const nodeModulesDir of nodeModulesDirs) {
+      for (const entrypoint of getCopilotPlatformEntrypoints('win32', process.arch, false)) {
+        const platformEntrypoint = w.join(nodeModulesDir, entrypoint.packageRelativePath);
+        if (fs.existsSync(platformEntrypoint)) return platformEntrypoint;
+      }
     }
 
-    // Case 2: Local node_modules\.bin\copilot.cmd
-    // Package is at <project>\node_modules\@github\copilot\index.js
-    if (w.basename(dir) === '.bin') {
-      const localJs = w.join(w.dirname(dir), '@github', 'copilot', 'index.js');
-      if (fs.existsSync(localJs)) return localJs;
+    const selfUpdated = findLatestSelfUpdatedCli();
+    if (selfUpdated) return selfUpdated;
+
+    for (const nodeModulesDir of nodeModulesDirs) {
+      const legacyJs = w.join(nodeModulesDir, '@github', 'copilot', 'index.js');
+      if (fs.existsSync(legacyJs)) return legacyJs;
     }
   } catch {
     // Fall through to return original
@@ -503,28 +503,26 @@ let bundledCliResolved = false;
 
 /**
  * Resolve the path to the Copilot CLI bundled with the app
- * (`@github/copilot/index.js`, pinned in package.json). Spawned via
- * Electron-as-Node, this runs a known-compatible CLI version with no external
- * install required — the default runtime source.
+ * (the JavaScript entrypoint in the pinned platform package). This runs a
+ * known-compatible CLI version with no external install required — the
+ * default runtime source.
  *
  * In a packaged build the package is unpacked from the asar archive (see
- * `build.asarUnpack` in package.json) so its native addons under `prebuilds/`
- * can execute. We prefer the `app.asar.unpacked` location and fall back to the
- * in-place `node_modules` for unpackaged/dev runs. Result is cached.
+ * `build.asarUnpack` in package.json). We prefer the `app.asar.unpacked`
+ * platform entrypoint and use the in-place `node_modules` equivalent for
+ * unpackaged/dev runs. A legacy `index.js` is retained as a safe fallback.
  */
 export function resolveBundledCliPath(): string | null {
   if (bundledCliResolved) return resolvedBundledCliPath;
   bundledCliResolved = true;
 
-  const rel = path.join('node_modules', '@github', 'copilot', 'index.js');
   const appPath = app.getAppPath();
-  const candidates: string[] = [];
-  if (appPath.endsWith('.asar')) {
-    candidates.push(path.join(`${appPath}.unpacked`, rel));
-    candidates.push(path.join(appPath, rel));
-  } else {
-    candidates.push(path.join(appPath, rel));
-  }
+  const candidates = getBundledCopilotCandidates(
+    appPath,
+    process.platform,
+    process.arch,
+    isLinuxMuslRuntime(),
+  );
 
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
@@ -603,6 +601,8 @@ export function invalidateCliPath(): void {
   resolvedCliPath = null;
   autoPathResolved = false;
   resolvedAutoPath = null;
+  bundledCliResolved = false;
+  resolvedBundledCliPath = null;
   cliVersionResolved = false;
   resolvedCliVersion = null;
   invalidateMxcCapability();

@@ -30,7 +30,7 @@ import { hasDisplayableFrontmatter, serializeFrontmatter, tryParseFrontmatter } 
 import { deriveMarkdownTitle } from '../../shared/markdown-title';
 
 declare const whimAPI: {
-  writeCanvas(spaceId: string, content: string): Promise<void>;
+  writeCanvas(spaceId: string, content: string): Promise<CanvasSaveResult>;
   pasteFile(spaceId: string, filename: string, dataArray: number[]): Promise<{ error?: string; filename?: string; relativePath?: string }>;
   readFile(spaceId: string, relativePath: string): Promise<{ data?: number[]; mimeType?: string; error?: string }>;
   getSetting(key: string): Promise<string | null>;
@@ -51,6 +51,12 @@ declare const whimAPI: {
   respondToElicitation(agentId: string, requestId: string, action: 'accept' | 'decline' | 'cancel', content?: Record<string, unknown>): Promise<void>;
   resolveSandboxBlock(agentId: string, requestId: string, decision: 'allow-once' | 'allow-for-session' | 'disable'): Promise<void>;
 };
+
+export interface CanvasSaveResult {
+  success: boolean;
+  content?: string;
+  error?: string;
+}
 
 /** Route a whim:// resource click to the matching window opener. */
 function openWhimResource(url: string): void {
@@ -107,7 +113,7 @@ export interface MarkdownCanvasProps {
 }
 
 export interface MarkdownCanvasHandle {
-  saveNow(): Promise<void>;
+  saveNow(): Promise<CanvasSaveResult>;
   getContent(): string;
   getEditorMode(): EditorMode;
   toggleMode(): { mode: EditorMode; error?: string };
@@ -126,6 +132,10 @@ export interface MarkdownCanvasHandle {
 }
 
 const AUTOSAVE_DELAY_MS = 2000;
+
+export function mergeDirtyRawExternalChange(base: string, local: string, disk: string): string {
+  return merge3(base, local, disk).merged;
+}
 
 const VOICE_PLACEHOLDER = '🎤 *[Recording transcription…]*';
 
@@ -285,39 +295,65 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     void users;
 
     const saveRequestedDuringSaveRef = useRef(false);
-    const doSaveRef = useRef<(() => Promise<void>) | undefined>(undefined);
+    const savingPromiseRef = useRef<Promise<CanvasSaveResult> | null>(null);
+    const doSaveRef = useRef<(() => Promise<CanvasSaveResult>) | undefined>(undefined);
 
     const doSave = useCallback(async () => {
-      // A save is already in flight — record that another is needed and bail.
-      if (savingRef.current) { saveRequestedDuringSaveRef.current = true; return; }
+      if (savingPromiseRef.current) {
+        saveRequestedDuringSaveRef.current = true;
+        const inFlightResult = await savingPromiseRef.current;
+        if (getFullContent() !== lastSavedRef.current) {
+          return doSaveRef.current?.() ?? { success: false, error: 'save_failed' };
+        }
+        return inFlightResult;
+      }
       const fullContent = getFullContent();
-      if (fullContent === lastSavedRef.current) return;
+      if (fullContent === lastSavedRef.current) return { success: true };
 
       savingRef.current = true;
-      try {
-        const result = await whimAPI.writeCanvas(spaceId, fullContent);
-        const savedContent = (result as any)?.content ?? fullContent;
-        lastSavedRef.current = savedContent;
-        lastDiskContentRef.current = savedContent;
-        if (savedContent !== fullContent) {
-          const region = stripFm(savedContent);
-          const { body, threads: savedThreads } = splitComments(region);
-          setContent(body);
-          contentRef.current = body;
-          emitTitleChange(body);
-          setThreads(savedThreads);
-          threadsRef.current = savedThreads;
-          if (editorModeRef.current === 'rendered') editorRef.current?.replaceAll(body);
+      const savePromise = (async (): Promise<CanvasSaveResult> => {
+        try {
+          const result = await whimAPI.writeCanvas(spaceId, fullContent);
+          if (!result?.success) {
+            onSaveStatus('✗ save failed');
+            setTimeout(() => onSaveStatus(''), 3000);
+            return result ?? { success: false, error: 'save_failed' };
+          }
+          const savedContent = result.content ?? fullContent;
+          lastSavedRef.current = savedContent;
+          lastDiskContentRef.current = savedContent;
+          if (savedContent !== fullContent) {
+            const region = stripFm(savedContent);
+            const { body, threads: savedThreads } = splitComments(region);
+            setContent(body);
+            contentRef.current = body;
+            emitTitleChange(body);
+            setThreads(savedThreads);
+            threadsRef.current = savedThreads;
+            if (editorModeRef.current === 'raw') {
+              setRawContent(savedContent);
+              rawContentRef.current = savedContent;
+            } else {
+              editorRef.current?.replaceAll(body);
+            }
+          }
+          onDirtyChange(getFullContent() !== lastSavedRef.current);
+          onSaveStatus('Saved ✓');
+          setTimeout(() => onSaveStatus(''), 1500);
+          return { success: true, content: result.content };
+        } catch {
+          onSaveStatus('✗ save failed');
+          setTimeout(() => onSaveStatus(''), 3000);
+          return { success: false, error: 'save_failed' };
         }
-        onDirtyChange(getFullContent() !== lastSavedRef.current);
-        onSaveStatus('Saved ✓');
-        setTimeout(() => onSaveStatus(''), 1500);
-      } catch {
-        onSaveStatus('✗ save failed');
-        setTimeout(() => onSaveStatus(''), 3000);
+      })();
+      savingPromiseRef.current = savePromise;
+      const result = await savePromise;
+      if (savingPromiseRef.current === savePromise) savingPromiseRef.current = null;
+      try {
+        return result;
       } finally {
         savingRef.current = false;
-        // Edits arrived while we were saving — flush them now so nothing is lost.
         if (saveRequestedDuringSaveRef.current) {
           saveRequestedDuringSaveRef.current = false;
           if (getFullContent() !== lastSavedRef.current) {
@@ -341,7 +377,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
         clearTimeout(pendingSaveRef.current);
         pendingSaveRef.current = null;
       }
-      await doSave();
+      return doSave();
     }, [doSave]);
 
     const markDirtyAndSave = useCallback(() => {
@@ -475,6 +511,28 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       },
       updateFrontmatter: handleFrontmatterChange,
       replaceContent: (newDiskContent: string) => {
+        if (editorModeRef.current === 'raw' && rawContentRef.current !== lastSavedRef.current) {
+          const merged = mergeDirtyRawExternalChange(lastDiskContentRef.current, rawContentRef.current, newDiskContent);
+          setRawContent(merged);
+          rawContentRef.current = merged;
+          const parsed = hasFrontmatterRef.current ? tryParseFm(merged) : null;
+          const region = parsed?.body ?? merged;
+          const { body, threads: mergedThreads } = splitComments(region);
+          setContent(body);
+          contentRef.current = body;
+          setThreads(mergedThreads);
+          threadsRef.current = mergedThreads;
+          if (parsed) {
+            setFrontmatter(parsed.frontmatter);
+            frontmatterRef.current = parsed.frontmatter;
+          }
+          lastDiskContentRef.current = newDiskContent;
+          emitTitleChange(body);
+          onDirtyChange(true);
+          onSaveStatus('External changes merged — review and save');
+          return;
+        }
+
         // Strip frontmatter first for frontmatter-backed canvases, so the
         // comments split + merge operate on the body region (not the YAML block).
         let region = newDiskContent;
@@ -497,12 +555,6 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
 
         if (editorModeRef.current === 'raw') {
           const full = buildFull(diskBody, diskThreads);
-          // Don't clobber unsaved raw edits — keep the user's text (raw mode has
-          // no merge; their next save wins). Record disk state for later merges.
-          if (rawContentRef.current !== lastSavedRef.current) {
-            lastDiskContentRef.current = full;
-            return;
-          }
           if (pendingSaveRef.current) { clearTimeout(pendingSaveRef.current); pendingSaveRef.current = null; }
           setRawContent(full);
           rawContentRef.current = full;

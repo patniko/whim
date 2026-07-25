@@ -284,7 +284,7 @@ export function resolveRuntimeConnection(): ResolvedRuntime {
       ? resolveAutoDetectedCliPath()
       : resolveConfiguredCliPath(getConfigValue('cliPath'));
     if (localPath) {
-      // On Windows we must spawn through a shim that strips Electron runtime
+      // JavaScript CLI entrypoints need a shim that strips Electron runtime
       // markers — otherwise the CLI mis-parses argv and exits.
       const effectivePath = getCliShimPath(localPath) ?? localPath;
       if (effectivePath !== localPath) {

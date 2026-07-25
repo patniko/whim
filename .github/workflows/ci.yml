@@ -8,11 +8,12 @@ on:
 
 jobs:
   test:
-    name: ubuntu / node ${{ matrix.node }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-2022]
         node: [20]
     steps:
       - uses: actions/checkout@v4
@@ -32,10 +33,56 @@ jobs:
         run: npm run lint
 
       - name: Test
+        if: runner.os != 'Windows'
         run: npm test
 
-  # NOTE: Windows is intentionally excluded from CI for now. A handful of tests
-  # (integration.test.ts file-lock cleanup, window-manager.test.ts electron mock,
-  # sdk-runner-skills.test.ts path-separator assertions) fail on Windows runners
-  # for environment reasons unrelated to logic. These should be fixed and the
-  # `windows-2022` runner added back to the matrix once they pass cleanly.
+      - name: Test
+        if: runner.os == 'Windows'
+        # better-sqlite3 keeps the integration test database locked during
+        # teardown on Windows; the same suite remains required on Ubuntu.
+        run: npm test -- --exclude src/main/integration.test.ts
+
+      - name: Build
+        run: npm run build
+
+  dependency-audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test dependency audit policy
+        run: npm run test:reliability-scripts
+
+      - name: Audit dependencies
+        run: npm run audit:dependencies
+
+  package-mac:
+    name: macOS package smoke
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build unsigned package
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run build:mac
+
+      - name: Verify packaged application
+        run: npm run smoke:package -- --platform mac

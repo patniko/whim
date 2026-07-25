@@ -818,23 +818,15 @@ export function createPage(workspaceRoot: string, folder: string, pageName: stri
 
 /** Read a child page's content. */
 export function readPage(workspaceRoot: string, folder: string, pageName: string): { content: string } | { error: string } {
-  const slug = sanitizePageName(pageName);
-  if (!slug) return { error: 'Invalid page name' };
-
-  const folderRoot = resolveSpaceFolder(workspaceRoot, folder);
-  const pagePath = path.join(folderRoot, `${slug}.md`);
-
-  const resolved = path.resolve(pagePath);
-  if (!resolved.startsWith(path.resolve(folderRoot) + path.sep) && resolved !== path.resolve(folderRoot)) {
-    return { error: 'Invalid page path' };
-  }
+  const resolvedPage = resolvePagePath(workspaceRoot, folder, pageName);
+  if ('error' in resolvedPage) return resolvedPage;
+  const pagePath = resolvedPage.path;
 
   if (!fs.existsSync(pagePath)) return { error: 'Page not found' };
   return { content: fs.readFileSync(pagePath, 'utf-8') };
 }
 
-/** Write content to a child page. */
-export function writePage(workspaceRoot: string, folder: string, pageName: string, content: string): { success: boolean } | { error: string } {
+export function resolvePagePath(workspaceRoot: string, folder: string, pageName: string): { path: string } | { error: string } {
   const slug = sanitizePageName(pageName);
   if (!slug) return { error: 'Invalid page name' };
 
@@ -846,7 +838,15 @@ export function writePage(workspaceRoot: string, folder: string, pageName: strin
     return { error: 'Invalid page path' };
   }
 
-  fs.writeFileSync(pagePath, content, 'utf-8');
+  return { path: pagePath };
+}
+
+/** Write content to a child page. */
+export function writePage(workspaceRoot: string, folder: string, pageName: string, content: string): { success: boolean } | { error: string } {
+  const resolvedPage = resolvePagePath(workspaceRoot, folder, pageName);
+  if ('error' in resolvedPage) return resolvedPage;
+
+  fs.writeFileSync(resolvedPage.path, content, 'utf-8');
   return { success: true };
 }
 

@@ -26,6 +26,7 @@ import { hostDecorationPlugin, decorationPluginKey } from './plugins/decoration-
 import { commentPlugin } from './plugins/comment-plugin';
 import { presencePlugin, SET_PRESENCE } from './plugins/presence-plugin';
 import { MilkdownEditor, type MilkdownEditorHandle } from './MilkdownEditor';
+import { mergeDirtyRawExternalChange } from '../MarkdownCanvas';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -142,6 +143,17 @@ describe('canvas editor — autosave wiring (regression)', () => {
     expect(listeners.markdownUpdates.at(-1)).toContain('Hello world!');
 
     editor.destroy();
+  });
+
+  describe('canvas editor — raw external changes', () => {
+    it('preserves dirty raw edits while merging non-overlapping disk changes', () => {
+      const base = '# Title\n\nBody\n';
+      const local = '# Local title\n\nBody\n';
+      const disk = '# Title\n\nBody from disk\n';
+
+      expect(mergeDirtyRawExternalChange(base, local, disk))
+        .toBe('# Local title\n\nBody from disk\n');
+    });
   });
 });
 

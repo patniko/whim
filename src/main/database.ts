@@ -177,6 +177,11 @@ function createSchema(database: Database.Database): void {
       quoted_text TEXT,
       comment_thread_id TEXT,
       run_location TEXT NOT NULL DEFAULT 'local',
+      cca_job_id TEXT,
+      cca_repository TEXT,
+      cca_effective_repository TEXT,
+      cca_fallback_json TEXT,
+      cca_result_json TEXT,
       yolo_mode INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -568,19 +573,29 @@ export function createAgentSession(session: AgentSession): void {
     quoted_text: session.quoted_text,
     comment_thread_id: session.comment_thread_id ?? null,
     run_location: session.run_location,
+    cca_job_id: session.cca_job_id ?? null,
+    cca_repository: session.cca_repository ?? null,
+    cca_effective_repository: session.cca_effective_repository ?? null,
+    cca_fallback_json: session.cca_fallback_json ?? null,
+    cca_result_json: session.cca_result_json ?? null,
     yolo_mode: session.yolo_mode ?? false,
     created_at: session.created_at,
     updated_at: session.updated_at,
   });
 
   db.prepare(
-    `INSERT INTO agent_sessions (id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, yolo_mode, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO agent_sessions (id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, cca_job_id, cca_repository, cca_effective_repository, cca_fallback_json, cca_result_json, yolo_mode, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     session.id, session.session_id, session.space_id, session.prompt,
     session.status, session.summary, session.working_dir, session.source,
     session.persona_handle, session.quoted_text, session.comment_thread_id ?? null,
     session.run_location ?? 'local',
+    session.cca_job_id ?? null,
+    session.cca_repository ?? null,
+    session.cca_effective_repository ?? null,
+    session.cca_fallback_json ?? null,
+    session.cca_result_json ?? null,
     session.yolo_mode ? 1 : 0,
     session.created_at, session.updated_at,
   );
@@ -599,6 +614,13 @@ export function updateAgentSessionStatus(id: string, status: string, summary?: s
   }
 }
 
+export function updateAgentSessionCcaResult(id: string, result: string): void {
+  const now = new Date().toISOString();
+  appendEvent(logRoot, 'agent_session.cca_result', { id, cca_result_json: result, updated_at: now });
+  db.prepare('UPDATE agent_sessions SET cca_result_json = ?, updated_at = ? WHERE id = ?')
+    .run(result, now, id);
+}
+
 /** Persist the per-session yolo (auto-approve) flag so it survives app restart. */
 export function updateAgentSessionYolo(id: string, enabled: boolean): void {
   const now = new Date().toISOString();
@@ -609,7 +631,7 @@ export function updateAgentSessionYolo(id: string, enabled: boolean): void {
 
 export function getAgentSession(id: string): AgentSession | null {
   const row = db.prepare(
-    `SELECT id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, yolo_mode, created_at, updated_at
+    `SELECT id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, cca_job_id, cca_repository, cca_effective_repository, cca_fallback_json, cca_result_json, yolo_mode, created_at, updated_at
      FROM agent_sessions WHERE id = ?`
   ).get(id) as (Omit<AgentSession, 'yolo_mode'> & { yolo_mode: number }) | undefined;
   if (!row) return null;
@@ -618,7 +640,7 @@ export function getAgentSession(id: string): AgentSession | null {
 
 export function listAgentSessions(): AgentSession[] {
   const rows = db.prepare(
-    `SELECT id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, yolo_mode, created_at, updated_at
+    `SELECT id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, cca_job_id, cca_repository, cca_effective_repository, cca_fallback_json, cca_result_json, yolo_mode, created_at, updated_at
      FROM agent_sessions ORDER BY created_at DESC`
   ).all() as Array<Omit<AgentSession, 'yolo_mode'> & { yolo_mode: number }>;
   return rows.map((r) => ({ ...r, yolo_mode: !!r.yolo_mode }));

@@ -97,6 +97,11 @@ export function startCliExitMonitor(): void {
 
         // Update agent status
         try {
+          const session = persistence.getSession(agentId);
+          if (session && session.status !== 'running' && session.status !== 'waiting-approval') {
+            console.log(`[agent-service] Ignoring late CLI exit for stopped session: ${agentId}`);
+            continue;
+          }
           persistence.updateSessionStatus(agentId, 'completed', 'CLI session ended');
         } catch { /* DB may not be ready */ }
 

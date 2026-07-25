@@ -64,15 +64,31 @@ describe('cli-electron-shim', () => {
   });
 
   describe('getCliShimPath', () => {
-    it('returns null on non-Windows platforms', () => {
+    it('writes a shim for JavaScript entrypoints on non-Windows platforms', () => {
       Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
-      expect(getCliShimPath('/usr/bin/copilot/index.js')).toBeNull();
-      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expect(getCliShimPath('/usr/lib/copilot/index.js'))
+        .toBe('/mock/userData/cli-shim/cli-electron-shim.js');
+      expect(mockWriteFileSync).toHaveBeenCalledWith(
+        '/mock/userData/cli-shim/cli-electron-shim.js',
+        expect.stringContaining('/usr/lib/copilot/index.js'),
+        'utf8',
+      );
+      expect(mockWriteFileSync).toHaveBeenCalledWith(
+        '/mock/userData/cli-shim/package.json',
+        '{"type":"commonjs"}\n',
+        'utf8',
+      );
     });
 
     it('returns null when realCliPath is empty', () => {
       Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
       expect(getCliShimPath('')).toBeNull();
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it('returns null for native executables', () => {
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      expect(getCliShimPath('C:\\ProgramData\\npm\\node_modules\\@github\\copilot-win32-x64\\copilot.exe')).toBeNull();
       expect(mockWriteFileSync).not.toHaveBeenCalled();
     });
 
@@ -88,8 +104,8 @@ describe('cli-electron-shim', () => {
         'C:\\Users\\test\\AppData\\Roaming\\whim\\cli-shim',
         { recursive: true },
       );
-      expect(mockWriteFileSync).toHaveBeenCalledOnce();
-      const writeCall = mockWriteFileSync.mock.calls[0];
+      expect(mockWriteFileSync).toHaveBeenCalledTimes(2);
+      const writeCall = mockWriteFileSync.mock.calls[1];
       expect(writeCall[0]).toBe('C:\\Users\\test\\AppData\\Roaming\\whim\\cli-shim\\cli-electron-shim.js');
       expect(writeCall[1]).toContain('delete process.versions.electron');
       expect(writeCall[1]).toContain('1.0.57-3');
@@ -116,9 +132,9 @@ describe('cli-electron-shim', () => {
       getCliShimPath('C:\\copilot\\v1\\index.js');
       getCliShimPath('C:\\copilot\\v2\\index.js');
 
-      expect(mockWriteFileSync).toHaveBeenCalledTimes(2);
-      expect(mockWriteFileSync.mock.calls[0][1]).toContain('v1');
-      expect(mockWriteFileSync.mock.calls[1][1]).toContain('v2');
+      expect(mockWriteFileSync).toHaveBeenCalledTimes(4);
+      expect(mockWriteFileSync.mock.calls[1][1]).toContain('v1');
+      expect(mockWriteFileSync.mock.calls[3][1]).toContain('v2');
     });
   });
 });

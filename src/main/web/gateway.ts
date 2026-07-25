@@ -4,7 +4,6 @@ import * as path from 'path';
 import {
   assignSpaceFolder,
   createSpace,
-  deleteAgentSession,
   getSpace,
   isInitialized,
   listSpaceEvents,
@@ -112,11 +111,9 @@ const HANDLERS: Record<WebRemoteCommandChannel, Handler> = {
     await abortAgent(expectString(args, 0, 'agentId'));
   },
   'agent:delete-session': async (args) => {
-    const { abortAgent, forgetAgent } = await import('../agent-service');
+    const { deleteAgent } = await import('../agent-service');
     const agentId = expectString(args, 0, 'agentId');
-    try { await abortAgent(agentId); } catch { /* already stopped */ }
-    deleteAgentSession(agentId);
-    forgetAgent(agentId);
+    await deleteAgent(agentId);
     return { ok: true };
   },
   'chat:send-message': async (args) => {
@@ -472,56 +469,15 @@ async function launchCloudAgent(
   personaHandle: string | null,
   options?: { quotedText?: string; threadId?: string | null },
 ): Promise<unknown> {
-  const { getWorkspaceRepo, getGitHubToken, launchCloudAgentWithFallback } = await import('../cloud-agent');
-  const repoInfo = await getWorkspaceRepo(workspace);
-  if (!repoInfo) return { error: 'Could not determine repository from workspace. Ensure a git remote is configured.' };
-
-  const token = await getGitHubToken();
-  if (!token) return { error: 'No GitHub token found. Run `gh auth login` or set GITHUB_TOKEN.' };
-
-  const launch = await launchCloudAgentWithFallback(repoInfo.owner, repoInfo.repo, prompt, token);
-  if ('error' in launch) return launch;
-  const { result, fallback } = launch;
-
-  const { v4: uuid } = await import('uuid');
-  const agentId = uuid();
-  const now = new Date().toISOString();
-  const effective = fallback
-    ? { owner: fallback.effectiveOwner, repo: fallback.effectiveRepo }
-    : repoInfo;
-  const summary = fallback
-    ? `Cloud job ${result.jobId} on fork ${fallback.effectiveOwner}/${fallback.effectiveRepo} (upstream ${fallback.upstream.owner}/${fallback.upstream.repo} blocked by SSO)`
-    : `Cloud job ${result.jobId}`;
-  const { createAgentSession } = await import('../database');
-  createAgentSession({
-    id: agentId,
-    session_id: result.sessionId,
-    space_id: spaceId,
-    prompt,
-    status: 'running',
-    summary,
-    working_dir: workspace,
-    source: 'cca' as any,
-    persona_handle: personaHandle,
-    quoted_text: options?.quotedText ?? null,
-    comment_thread_id: options?.threadId ?? null,
-    run_location: 'cloud',
-    created_at: now,
-    updated_at: now,
-  });
-
-  const { startCloudJobPoller } = await import('../cloud-agent-poller');
-  startCloudJobPoller(agentId, effective.owner, effective.repo, result.jobId, token);
-  notifyAllWindows('agent:status-changed', {
-    agentId,
-    status: 'running',
-    summary,
-    fallback,
+  const { launchTrackedCloudAgent } = await import('../cloud-agent-poller');
+  return launchTrackedCloudAgent({
     spaceId,
-    threadId: options?.threadId ?? null,
+    prompt,
+    workspace,
+    personaHandle,
+    quotedText: options?.quotedText,
+    threadId: options?.threadId,
   });
-
-  return { agentId, sessionId: result.sessionId, jobId: result.jobId, fallback };
 }
 
 function invalidArg(message: string): GatewayError {

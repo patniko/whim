@@ -66,6 +66,11 @@ function createSchema(db: Database.Database): void {
       quoted_text TEXT,
       comment_thread_id TEXT,
       run_location TEXT NOT NULL DEFAULT 'local',
+      cca_job_id TEXT,
+      cca_repository TEXT,
+      cca_effective_repository TEXT,
+      cca_fallback_json TEXT,
+      cca_result_json TEXT,
       yolo_mode INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -556,6 +561,57 @@ describe('replayLog', () => {
       expect(() => replayLog(logRoot, db)).not.toThrow();
       expect(allSpaces()).toHaveLength(0);
     });
+
+    it('restores CCA metadata while defaulting legacy snapshot fields to null', () => {
+      const base = {
+        session_id: 'sid',
+        space_id: null,
+        prompt: 'p',
+        status: 'running',
+        summary: '',
+        working_dir: '/ws',
+        source: 'cca',
+        persona_handle: null,
+        quoted_text: null,
+        run_location: 'cloud',
+        created_at: '2024-01-01T00:00:00.000Z',
+        updated_at: '2024-01-01T00:00:00.000Z',
+      };
+      writeLog([{
+        ts: '2024-01-01T00:00:00.000Z',
+        op: 'snapshot',
+        data: {
+          agent_sessions: [
+            {
+              ...base,
+              id: 'cca-full',
+              cca_job_id: 'job-1',
+              cca_repository: 'upstream/repo',
+              cca_effective_repository: 'fork/repo',
+              cca_fallback_json: '{"reason":"sso_blocked"}',
+              cca_result_json: '{"status":"running"}',
+            },
+            { ...base, id: 'cca-legacy', source: 'cloud' },
+          ],
+        },
+      }]);
+
+      replayLog(logRoot, db);
+      const full = db.prepare('SELECT * FROM agent_sessions WHERE id = ?').get('cca-full') as any;
+      expect(full.cca_job_id).toBe('job-1');
+      expect(full.cca_repository).toBe('upstream/repo');
+      expect(full.cca_effective_repository).toBe('fork/repo');
+      expect(full.cca_fallback_json).toContain('sso_blocked');
+      expect(full.cca_result_json).toContain('running');
+
+      const legacy = db.prepare('SELECT * FROM agent_sessions WHERE id = ?').get('cca-legacy') as any;
+      expect(legacy.source).toBe('cca');
+      expect(legacy.cca_job_id).toBeNull();
+      expect(legacy.cca_repository).toBeNull();
+      expect(legacy.cca_effective_repository).toBeNull();
+      expect(legacy.cca_fallback_json).toBeNull();
+      expect(legacy.cca_result_json).toBeNull();
+    });
   });
 
   // ── Corruption tolerance ──────────────────────────────
@@ -849,6 +905,45 @@ describe('replayLog', () => {
       replayLog(logRoot, db);
       const sess = db.prepare('SELECT * FROM agent_sessions WHERE id = ?').get('as3') as any;
       expect(sess.run_location).toBe('local');
+      expect(sess.cca_job_id).toBeNull();
+      expect(sess.cca_repository).toBeNull();
+      expect(sess.cca_effective_repository).toBeNull();
+      expect(sess.cca_fallback_json).toBeNull();
+      expect(sess.cca_result_json).toBeNull();
+    });
+
+    it('replays CCA recovery metadata and subsequent result updates', () => {
+      writeLog([
+        {
+          ts: '2024-01-01T00:00:00.000Z',
+          op: 'agent_session.created',
+          data: {
+            id: 'cca1', session_id: 'sid-cca', prompt: 'Cloud event', status: 'running',
+            source: 'cca', run_location: 'cloud', cca_job_id: 'job-1',
+            cca_repository: 'upstream/repo', cca_effective_repository: 'fork/repo',
+            cca_fallback_json: '{"reason":"sso_blocked"}',
+            cca_result_json: '{"status":"queued"}',
+            created_at: '2024-01-01T00:00:00.000Z',
+            updated_at: '2024-01-01T00:00:00.000Z',
+          },
+        },
+        {
+          ts: '2024-01-01T00:01:00.000Z',
+          op: 'agent_session.cca_result',
+          data: {
+            id: 'cca1',
+            cca_result_json: '{"status":"completed"}',
+            updated_at: '2024-01-01T00:01:00.000Z',
+          },
+        },
+      ]);
+
+      replayLog(logRoot, db);
+      const sess = db.prepare('SELECT * FROM agent_sessions WHERE id = ?').get('cca1') as any;
+      expect(sess.cca_job_id).toBe('job-1');
+      expect(sess.cca_repository).toBe('upstream/repo');
+      expect(sess.cca_effective_repository).toBe('fork/repo');
+      expect(sess.cca_result_json).toBe('{"status":"completed"}');
     });
 
     it('persists run_location="cloud" when present on the event', () => {

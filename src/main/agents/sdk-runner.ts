@@ -55,11 +55,12 @@ export async function waitForCloudSessionStart(
   timeoutMs = 60_000,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    let off: (() => void) | undefined;
     const timer = setTimeout(() => {
-      try { (off as any)?.(); } catch { /* ignore */ }
+      try { off?.(); } catch { /* ignore */ }
       reject(new Error(`Cloud session did not emit session.start within ${timeoutMs}ms`));
     }, timeoutMs);
-    const off = (session as any).on('session.start', (event: any) => {
+    off = (session as any).on('session.start', (event: any) => {
       const data = event?.data ?? event;
       // For cloud sessions, the runtime emits session.start ONLY when the
       // remote copilot-agent worker has connected (producer: "copilot-agent",
@@ -69,7 +70,7 @@ export async function waitForCloudSessionStart(
         `(producer=${data?.producer ?? '?'}, remoteSteerable=${data?.remoteSteerable ?? '?'})`,
       );
       clearTimeout(timer);
-      try { (off as any)?.(); } catch { /* ignore */ }
+      try { off?.(); } catch { /* ignore */ }
       resolve();
     });
   });
@@ -122,6 +123,131 @@ export function initSdkRunner(deps: {
   persistence = deps.persistence;
   broker = deps.broker;
   subagentTracker = deps.subagentTracker;
+}
+
+interface InitialPromptOptions {
+  prompt: string;
+  attachments?: Array<{ type: 'file'; path: string; displayName: string }>;
+  waitForCloud?: boolean;
+  logLabel: string;
+}
+
+function launchStillWanted(record: AgentRecord): boolean {
+  return !record.aborted && registry.get(record.agentId) === record;
+}
+
+async function disconnectLaunchSession(session: CopilotSession, preserveOnAbortFailure = false): Promise<boolean> {
+  try {
+    await session.abort();
+  } catch {
+    if (preserveOnAbortFailure) return false;
+  }
+  try { await session.disconnect(); } catch { /* best-effort cleanup */ }
+  return true;
+}
+
+async function failInitialLaunch(
+  session: CopilotSession,
+  record: AgentRecord,
+  error: unknown,
+): Promise<void> {
+  const stopped = await disconnectLaunchSession(session, record.runLocation === 'cloud');
+  if (record.aborted) return;
+
+  const message = error instanceof Error ? error.message : String(error || 'Unknown error');
+  if (!stopped && record.runLocation === 'cloud') {
+    record.phase = 'active';
+    record.summary = `Initial launch failed and the cloud worker could not be stopped: ${message}. Retry abort before deleting it.`;
+    broker.clearPendingInteractions(record);
+    if (!record.ephemeral) persistence.updateStatus(record);
+    notifier.notifyRenderer('agent:status-changed', {
+      agentId: record.agentId,
+      status: record.status,
+      summary: record.summary,
+      spaceId: record.spaceId,
+      threadId: record.commentContext?.threadId,
+      trackingError: true,
+    });
+    notifier.notifyRenderer(`chat:event:${record.agentId}`, {
+      type: 'session.error',
+      message: record.summary,
+    });
+    return;
+  }
+  record.aborted = true;
+  record.status = 'failed';
+  record.summary = `Error: ${message}`;
+  broker.clearPendingInteractions(record);
+  if (!record.ephemeral) persistence.updateStatus(record);
+  notifier.notifyRenderer('agent:status-changed', {
+    agentId: record.agentId,
+    status: 'failed',
+    summary: record.summary,
+    spaceId: record.spaceId,
+    threadId: record.commentContext?.threadId,
+  });
+  notifier.notifyRenderer(`chat:event:${record.agentId}`, {
+    type: 'session.error',
+    message,
+  });
+  if (record.commentContext) {
+    notifier.notifyRenderer('agent:presence-ended', {
+      agentId: record.agentId,
+      spaceId: record.spaceId,
+    });
+  }
+  if (record.sandbox) {
+    const { cleanupSandboxConfigs } = require('../ai');
+    cleanupSandboxConfigs(record.agentId);
+  }
+}
+
+/**
+ * Submit the first prompt for a newly-created session. Launch callers only
+ * report success after the runtime accepts this request.
+ */
+export async function sendInitialPrompt(
+  session: CopilotSession,
+  record: AgentRecord,
+  options: InitialPromptOptions,
+): Promise<string> {
+  try {
+    if (options.waitForCloud) {
+      await waitForCloudSessionStart(session, record.agentId);
+    }
+    if (!launchStillWanted(record)) {
+      await disconnectLaunchSession(session);
+      throw new Error('Agent launch cancelled');
+    }
+
+    console.log(
+      `[sdk-send] ${options.logLabel} agent=${record.agentId.slice(0, 8)} ` +
+      `session.send promptLen=${options.prompt.length}`,
+    );
+    const messageId = await session.send({
+      prompt: options.prompt,
+      ...(options.attachments ? { attachments: options.attachments } : {}),
+    });
+    if (!launchStillWanted(record)) {
+      throw new Error('Agent launch cancelled');
+    }
+    record.phase = 'active';
+    console.log(
+      `[sdk-send] ${options.logLabel} agent=${record.agentId.slice(0, 8)} ` +
+      `session.send resolved messageId=${messageId ?? '<undefined>'}`,
+    );
+    return messageId;
+  } catch (error) {
+    if (!record.aborted) {
+      console.error(
+        `[sdk-send] ${options.logLabel} agent=${record.agentId.slice(0, 8)} ` +
+        `initial send failed:`,
+        error instanceof Error ? error.message : error,
+      );
+      await failInitialLaunch(session, record, error);
+    }
+    throw error;
+  }
 }
 
 function shouldEnableWhimTools(spaceId?: string | null): boolean {
@@ -255,6 +381,7 @@ export async function launchAgent(
       agentId,
       sessionId,
       session,
+      phase: 'starting',
       spaceId,
       selectedText,
       anchor,
@@ -312,23 +439,10 @@ export async function launchAgent(
       cwd: workingDir,
     });
 
-    // Fire-and-forget: return agentId immediately so the renderer can subscribe
-    // before events start flowing. Errors are handled by the session.error listener.
-    console.log(`[sdk-send] launchAgent agent=${agentId.slice(0, 8)} calling session.send`);
-    session.send({
+    await sendInitialPrompt(session, record, {
       prompt: selectedText,
       attachments: [{ type: 'file' as const, path: path.join(workingDir, 'canvas.md'), displayName: 'canvas.md' }],
-    })
-      .then((mid: any) => { console.log(`[sdk-send] launchAgent agent=${agentId.slice(0, 8)} resolved messageId=${mid ?? '<undefined>'}`); })
-      .catch((err: any) => {
-      console.error(`[sdk-send] launchAgent agent=${agentId.slice(0, 8)} REJECTED:`, err?.message ?? err);
-      record.status = 'failed';
-      record.summary = `Error: ${err.message || 'Unknown'}`;
-      persistence.updateStatus(record);
-      notifier.notifyRenderer(`chat:event:${agentId}`, {
-        type: 'session.error',
-        message: err.message || 'Failed to process message',
-      });
+      logLabel: 'selection-agent',
     });
 
     return { agentId, sessionId };
@@ -468,6 +582,7 @@ export async function launchQuickAgent(
       agentId,
       sessionId,
       session,
+      phase: 'starting',
       spaceId: '__workspace__',
       selectedText: prompt,
       anchor: { quote: '', prefix: '', suffix: '' },
@@ -517,29 +632,11 @@ export async function launchQuickAgent(
       });
     }
 
-    // before events start flowing. Errors are handled by the session.error listener.
-    // Cloud sessions: wait for the remote worker's session.start event before
-    // sending — otherwise the runtime swallows the prompt silently (see
-    // waitForCloudSessionStart helper for details).
-    console.log(`[sdk-send] agent=${agentId.slice(0, 8)} calling session.send promptLen=${prompt.length}${isCloudSandbox ? ' (after cloud start)' : ''}`);
-    const readyPromise = isCloudSandbox
-      ? waitForCloudSessionStart(session, agentId)
-      : Promise.resolve();
-    readyPromise
-      .then(() => session.send({ prompt }))
-      .then((messageId: any) => {
-        console.log(`[sdk-send] agent=${agentId.slice(0, 8)} session.send resolved messageId=${messageId ?? '<undefined>'}`);
-      })
-      .catch((err: any) => {
-        console.error(`[sdk-send] agent=${agentId.slice(0, 8)} session.send REJECTED:`, err?.message ?? err);
-        record.status = 'failed';
-        record.summary = `Error: ${err.message || 'Unknown'}`;
-        if (!record.ephemeral) persistence.updateStatus(record);
-        notifier.notifyRenderer(`chat:event:${agentId}`, {
-          type: 'session.error',
-          message: err.message || 'Failed to process message',
-        });
-      });
+    await sendInitialPrompt(session, record, {
+      prompt,
+      waitForCloud: isCloudSandbox,
+      logLabel: 'quick-agent',
+    });
 
     return { agentId, sessionId };
   } catch (err: any) {
@@ -693,6 +790,7 @@ ${cliToolsPrompt}`;
       agentId,
       sessionId,
       session,
+      phase: 'starting',
       spaceId,
       selectedText: documentContent,
       anchor: { quote: '', prefix: '', suffix: '' },
@@ -761,23 +859,12 @@ ${cliToolsPrompt}`;
       cwd: workingDir,
     });
 
-    const readyPromise = isCloudSandbox
-      ? waitForCloudSessionStart(session, agentId)
-      : Promise.resolve();
-    readyPromise
-      .then(() => session.send({
-        prompt: runPrompt,
-        attachments: [{ type: 'file' as const, path: canvasPath, displayName: 'canvas.md' }],
-      }))
-      .catch((err: any) => {
-        record.status = 'failed';
-        record.summary = `Error: ${err.message || 'Unknown'}`;
-        persistence.updateStatus(record);
-        notifier.notifyRenderer(`chat:event:${agentId}`, {
-          type: 'session.error',
-          message: err.message || 'Failed to process message',
-        });
-      });
+    await sendInitialPrompt(session, record, {
+      prompt: runPrompt,
+      attachments: [{ type: 'file' as const, path: canvasPath, displayName: 'canvas.md' }],
+      waitForCloud: isCloudSandbox,
+      logLabel: 'document-agent',
+    });
 
     return { agentId, sessionId };
   } catch (err: any) {
@@ -1055,6 +1142,37 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
     // catch it means the remote side was unreachable, so there is no
     // live worker to orphan.
     return restartExpiredSession(agentId, persisted, workingDir);
+  }
+}
+
+export function isCloudSessionGone(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /session (?:was )?not found|not found:.*session|session .*expired|session .*deleted/i.test(message);
+}
+
+export async function abortRestoredCloudAgent(agentId: string): Promise<'aborted' | 'missing' | 'retry'> {
+  const persisted = persistence.getSession(agentId);
+  if (!persisted || persisted.source !== 'sdk' || persisted.run_location !== 'cloud') return 'retry';
+
+  const client = getCopilotClient();
+  if (!client) return 'retry';
+
+  try {
+    await (client as any).rpc.sessions.connect({ sessionId: persisted.session_id });
+    const session = await client.resumeSession(persisted.session_id, {
+      workingDirectory: persisted.working_dir || getConfig().workspace || undefined,
+    });
+    await session.abort();
+    try {
+      await session.disconnect();
+    } catch (error) {
+      console.warn(`[sdk-runner] Cloud agent ${agentId} aborted but disconnect failed:`, error);
+    }
+    return 'aborted';
+  } catch (error) {
+    if (isCloudSessionGone(error)) return 'missing';
+    console.warn(`[sdk-runner] Failed to reconnect and abort cloud agent ${agentId}:`, error);
+    return 'retry';
   }
 }
 
@@ -1396,24 +1514,8 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   const agentId = record.agentId;
   const chatChannel = `chat:event:${agentId}`;
 
-  // TEMP DIAGNOSTIC: log every event received by this session so we can
-  // diagnose silent agents after the SDK link. Remove once cloud + local
-  // sessions are confirmed working with the new SDK.
   session.on((event: any) => {
-    try {
-      const t = event?.type ?? '?';
-      // For warning/error/info events, also dump the payload so we can see
-      // what the runtime is complaining about (e.g. 'no model available').
-      if (t === 'session.warning' || t === 'session.error' || t === 'session.info' || t === 'session.start') {
-        let data: string;
-        try { data = JSON.stringify(event?.data ?? event, null, 0).slice(0, 500); }
-        catch { data = String(event?.data ?? event); }
-        console.log(`[sdk-event] agent=${agentId.slice(0, 8)} type=${t} data=${data}`);
-      } else {
-        console.log(`[sdk-event] agent=${agentId.slice(0, 8)} type=${t}`);
-      }
-    } catch { /* never let logging break dispatch */ }
-
+    if (record.aborted) return;
     // Persist meaningful events to the chat transcript so we can replay
     // them into a fresh session if the original session is unreachable
     // later (e.g. cloud worker expired, SDK runtime restarted with
@@ -1441,12 +1543,14 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
 
   // SDK events wrap payloads in event.data; fall back to top-level for compat
   session.on('assistant.message_delta', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     const delta = d.deltaContent ?? d.delta ?? '';
     notifier.notifyRenderer(chatChannel, { type: 'assistant.message_delta', delta });
   });
 
   session.on('assistant.message', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     const content = d.content || d.message || '';
     record.summary = truncate(content || 'Agent responded', 100);
@@ -1458,6 +1562,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('assistant.reasoning_delta', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     notifier.notifyRenderer(chatChannel, {
       type: 'assistant.reasoning_delta',
@@ -1467,6 +1572,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('assistant.reasoning', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     notifier.notifyRenderer(chatChannel, {
       type: 'assistant.reasoning',
@@ -1476,6 +1582,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('tool.execution_start', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     record.summary = `Using ${d.toolName || 'tool'}...`;
     notifier.notifyRenderer('agent:status-changed', {
@@ -1494,6 +1601,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('tool.execution_progress', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     notifier.notifyRenderer(chatChannel, {
       type: 'tool.progress',
@@ -1503,6 +1611,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('tool.execution_complete', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     // SDK result is { content, detailedContent? } — flatten to string
     const rawResult = d.result;
@@ -1530,6 +1639,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('session.idle', () => {
+    if (record.aborted) return;
     // A newly-created session can emit an idle event before its initial prompt
     // has been submitted. Comment launches keep phase='starting' until send()
     // is accepted so that startup idle cannot falsely complete the worker.
@@ -1584,6 +1694,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   session.on('session.error', (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     record.status = 'failed';
     record.summary = `Error: ${d.message || 'Unknown error'}`;
@@ -1618,6 +1729,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
 
   // Remote steering state changes
   session.on('session.remote_steerable_changed' as any, (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     const remoteSteerable = !!d.remoteSteerable;
     if (record.remote) {
@@ -1638,6 +1750,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   // the URL so the renderer can surface a shareable link without the user
   // having to call enableRemoteControl first.
   session.on('session.info' as any, (event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     if (d?.infoType !== 'remote' || !d?.url) return;
     const url: string = d.url;
@@ -1667,6 +1780,7 @@ function installSubagentSubscription(session: CopilotSession, record: AgentRecor
   const chatChannel = `chat:event:${parentAgentId}`;
 
   (session as any).on((event: any) => {
+    if (record.aborted) return;
     const d = event.data ?? event;
     const type = event.type ?? d.type;
 

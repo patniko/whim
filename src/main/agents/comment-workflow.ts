@@ -9,7 +9,7 @@ import type { AgentRecord } from './agent-registry';
 import { AgentNotifier } from './agent-notifier';
 import { AgentPersistence } from './agent-persistence';
 import { InteractionBroker } from './interaction-broker';
-import { buildCliToolsPrompt, waitForCloudSessionStart, enableRemoteControl } from './sdk-runner';
+import { buildCliToolsPrompt, sendInitialPrompt, enableRemoteControl } from './sdk-runner';
 import { buildSandboxLaunchSetup } from './sandbox-launch';
 import { SANDBOX_SYSTEM_PROMPT } from './sandbox-policies';
 import { getWorkspaceRepo } from '../cloud-agent';
@@ -140,6 +140,42 @@ export async function launchCommentAgent(
 
   const launchStillWanted = () => !record.aborted && registry.get(agentId) === record;
   let session: any;
+  const stopCancelledCloudSession = async (): Promise<void> => {
+    const sessionId = session?.sessionId || agentId;
+    record.sessionId = sessionId;
+    record.session = session;
+    persistence.updateSessionId(agentId, sessionId);
+    try {
+      await session.abort();
+      try { await session.disconnect?.(); } catch { /* best-effort cleanup */ }
+      record.session = undefined;
+      record.status = 'failed';
+      record.summary = 'Aborted by user';
+      persistence.updateStatus(record);
+      notifier.notifyRenderer('agent:status-changed', {
+        agentId,
+        status: 'failed',
+        summary: record.summary,
+        spaceId,
+        threadId,
+      });
+    } catch (error) {
+      record.aborted = false;
+      record.phase = 'active';
+      record.summary = 'Could not stop this cloud agent after startup. It may still be running; retry before deleting it.';
+      persistence.updateStatus(record);
+      setupListeners(session, record);
+      notifier.notifyRenderer('agent:status-changed', {
+        agentId,
+        status: record.status,
+        summary: record.summary,
+        spaceId,
+        threadId,
+        trackingError: true,
+      });
+      console.warn(`[comment-workflow] Failed to abort cancelled cloud launch ${agentId}:`, error);
+    }
+  };
 
   try {
     const cliToolsPrompt = buildCliToolsPrompt();
@@ -211,7 +247,8 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
       },
     });
     if (!launchStillWanted()) {
-      try { await (session as any).abort?.(); } catch { /* best-effort */ }
+      if (isCloudSandbox) await stopCancelledCloudSession();
+      else try { await (session as any).abort?.(); } catch { /* best-effort */ }
       return { error: 'Agent launch cancelled' };
     }
 
@@ -244,7 +281,8 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
       }
     }
     if (!launchStillWanted()) {
-      try { await (session as any).abort?.(); } catch { /* best-effort */ }
+      if (isCloudSandbox) await stopCancelledCloudSession();
+      else try { await (session as any).abort?.(); } catch { /* best-effort */ }
       return { error: 'Agent launch cancelled' };
     }
 
@@ -281,30 +319,35 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
       threadId,
     });
 
-    // Cloud sessions: wait for the remote worker's `session.start` event
-    // before sending — otherwise the runtime silently swallows the prompt
-    // (see waitForCloudSessionStart docs). Mirrors the gating
-    // launchQuickAgent applies for the workers-tab @cloud path so canvas
-    // @mentions/comments behave the same way.
-    console.log(`[sdk-send] comment-agent agent=${agentId.slice(0, 8)} session.send promptLen=${commentBody.length}${isCloudSandbox ? ' (after cloud start)' : ''}`);
-    if (isCloudSandbox) await waitForCloudSessionStart(session, agentId);
-    if (!launchStillWanted()) {
-      try { await session.abort?.(); } catch { /* best-effort */ }
-      return { error: 'Agent launch cancelled' };
-    }
-
-    // Do not report a successful launch until the runtime accepts the initial
-    // prompt. Otherwise a rejected send looks like an agent that never started.
-    record.phase = 'active';
-    const messageId = await session.send({
+    await sendInitialPrompt(session, record, {
       prompt: commentBody,
       attachments: [{ type: 'file' as const, path: canvasPath, displayName: documentDisplayName }],
+      waitForCloud: isCloudSandbox,
+      logLabel: 'comment-agent',
     });
-    console.log(`[sdk-send] comment-agent agent=${agentId.slice(0, 8)} session.send resolved messageId=${messageId ?? '<undefined>'}`);
 
     return { agentId, sessionId };
   } catch (err: any) {
-    if (!record.aborted) {
+    if (record.aborted && !session) {
+      record.status = 'failed';
+      record.summary = 'Launch cancelled before the cloud session started';
+      persistence.updateStatus(record);
+      notifier.notifyRenderer('agent:status-changed', {
+        agentId,
+        status: 'failed',
+        summary: record.summary,
+        spaceId,
+        threadId,
+      });
+    } else if (
+      isCloudSandbox
+      && record.status === 'running'
+      && record.phase === 'active'
+      && record.session === session
+    ) {
+      // sendInitialPrompt preserved this session because the cloud worker
+      // could not be aborted. Keep it connected and retryable.
+    } else if (!record.aborted && record.status !== 'failed') {
       try { await session?.abort?.(); } catch { /* best-effort cleanup */ }
       try { await session?.disconnect?.(); } catch { /* best-effort cleanup */ }
       record.status = 'failed';

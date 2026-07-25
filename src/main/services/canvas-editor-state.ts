@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { updateCanvasContent } from '../database';
-import { markSelfWrite } from '../canvas-watcher';
+import { clearSelfWrite, markSelfWrite } from '../canvas-watcher';
 import { notifyAllWindows } from '../notify';
 import { resolveSpaceFolder, writeCanvas } from '../workspace';
 import { merge3 } from '../../shared/text-merge';
@@ -14,18 +14,50 @@ const CANVAS_FILE = 'canvas.md';
  */
 const lastEditorContent = new Map<string, string>();
 
-export function rememberCanvasEditorContent(spaceId: string, content: string): void {
-  lastEditorContent.set(spaceId, content);
+export function rememberCanvasEditorContent(editorId: string, content: string): void {
+  lastEditorContent.set(editorId, content);
 }
 
-export function forgetCanvasEditorContent(spaceId: string): void {
-  lastEditorContent.delete(spaceId);
+export function forgetCanvasEditorContent(editorId: string): void {
+  lastEditorContent.delete(editorId);
 }
 
-export interface MainCanvasWriteResult {
-  success: true;
+export interface CanvasWriteResult {
+  success: boolean;
   /** Present when disk/editor content was merged and differs from the caller's input. */
   content?: string;
+  error?: string;
+}
+
+export function writeEditorFileWithMerge(
+  editorId: string,
+  filePath: string,
+  content: string,
+  write: (contentToWrite: string) => void,
+): CanvasWriteResult {
+  let contentToWrite = content;
+
+  try {
+    const diskContent = fs.readFileSync(filePath, 'utf-8');
+    const lastKnown = lastEditorContent.get(editorId);
+    if (lastKnown !== undefined && diskContent !== lastKnown && diskContent !== content) {
+      contentToWrite = merge3(lastKnown, content, diskContent).merged;
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return { success: false, error: 'read_failed' };
+    }
+  }
+
+  try {
+    markSelfWrite(editorId, contentToWrite);
+    write(contentToWrite);
+    lastEditorContent.set(editorId, contentToWrite);
+    return { success: true, content: contentToWrite !== content ? contentToWrite : undefined };
+  } catch {
+    clearSelfWrite(editorId);
+    return { success: false, error: 'write_failed' };
+  }
 }
 
 export function writeMainCanvasWithMerge(
@@ -33,27 +65,13 @@ export function writeMainCanvasWithMerge(
   spaceId: string,
   folder: string,
   content: string,
-): MainCanvasWriteResult {
+): CanvasWriteResult {
   const canvasPath = path.join(resolveSpaceFolder(workspace, folder), CANVAS_FILE);
-  let contentToWrite = content;
-
-  try {
-    const diskContent = fs.readFileSync(canvasPath, 'utf-8');
-    const lastKnown = lastEditorContent.get(spaceId);
-    if (lastKnown !== undefined && diskContent !== lastKnown && diskContent !== content) {
-      contentToWrite = merge3(lastKnown, content, diskContent).merged;
+  return writeEditorFileWithMerge(spaceId, canvasPath, content, (contentToWrite) => {
+    writeCanvas(workspace, folder, contentToWrite);
+    const titleUpdate = updateCanvasContent(spaceId, contentToWrite);
+    if (titleUpdate?.titleChanged) {
+      notifyAllWindows('space:title-updated', { spaceId, title: titleUpdate.title });
     }
-  } catch {
-    // File may not exist yet; proceed with editor content.
-  }
-
-  markSelfWrite(spaceId, contentToWrite);
-  writeCanvas(workspace, folder, contentToWrite);
-  const titleUpdate = updateCanvasContent(spaceId, contentToWrite);
-  if (titleUpdate?.titleChanged) {
-    notifyAllWindows('space:title-updated', { spaceId, title: titleUpdate.title });
-  }
-  lastEditorContent.set(spaceId, contentToWrite);
-
-  return { success: true, content: contentToWrite !== content ? contentToWrite : undefined };
+  });
 }

@@ -1,6 +1,6 @@
 import React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { MarkdownCanvas, type MarkdownCanvasHandle, type AgentPersona, type MentionEvent } from './MarkdownCanvas';
+import { MarkdownCanvas, type MarkdownCanvasHandle, type AgentPersona, type MentionEvent, type CanvasSaveResult } from './MarkdownCanvas';
 import type { CanvasAgentInteraction, CanvasPresence, CanvasUser, CanvasDecoration, CanvasThreadAgentStatus } from './types';
 
 let root: Root | null = null;
@@ -55,24 +55,27 @@ export function mountCanvas(container: HTMLElement, options: MountCanvasOptions)
   );
 }
 
-export async function unmountCanvas(): Promise<void> {
-  if (canvasRef.current) {
-    await canvasRef.current.saveNow();
+export async function unmountCanvas(save = true): Promise<CanvasSaveResult> {
+  if (save && canvasRef.current) {
+    const result = await canvasRef.current.saveNow();
+    if (!result.success) return result;
   }
   if (root) {
     root.unmount();
     root = null;
   }
+  return { success: true };
 }
 
 export function getCanvasContent(): string {
   return canvasRef.current?.getContent() ?? '';
 }
 
-export async function saveCanvas(): Promise<void> {
+export async function saveCanvas(): Promise<CanvasSaveResult> {
   if (canvasRef.current) {
-    await canvasRef.current.saveNow();
+    return canvasRef.current.saveNow();
   }
+  return { success: true };
 }
 
 export function updateCanvasPresence(presence: CanvasPresence[]): void {

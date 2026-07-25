@@ -196,9 +196,15 @@ describe('compactOldSegments', () => {
       status: 'completed',
       summary: 'done',
       working_dir: null,
-      source: 'sdk',
+      source: 'cca',
       persona_handle: null,
       quoted_text: null,
+      run_location: 'cloud',
+      cca_job_id: 'job-compact',
+      cca_repository: 'upstream/repo',
+      cca_effective_repository: 'fork/repo',
+      cca_fallback_json: '{"reason":"sso_blocked"}',
+      cca_result_json: '{"status":"completed"}',
       created_at: '2024-01-01T00:00:00.000Z',
       updated_at: '2024-01-01T00:00:00.000Z',
     };
@@ -257,7 +263,14 @@ describe('compactOldSegments', () => {
     initDatabase(dbPath, logRoot);
     expect(listSpaces().find((s) => s.id === space.id)).toBeDefined();
     expect(listCanvasAgents(space.id)).toHaveLength(1);
-    expect(listAgentSessions().find((s) => s.id === 'as-1')).toBeDefined();
+    const restoredSession = listAgentSessions().find((s) => s.id === 'as-1');
+    expect(restoredSession).toMatchObject({
+      cca_job_id: 'job-compact',
+      cca_repository: 'upstream/repo',
+      cca_effective_repository: 'fork/repo',
+      cca_fallback_json: '{"reason":"sso_blocked"}',
+      cca_result_json: '{"status":"completed"}',
+    });
     expect(listSubagentRecords('parent-1')).toHaveLength(1);
     expect(listSubagentToolCalls('sa-1')).toHaveLength(1);
   });
