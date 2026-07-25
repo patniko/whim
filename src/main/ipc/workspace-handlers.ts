@@ -1,4 +1,4 @@
-import { ipcMain, BrowserWindow, dialog, shell } from 'electron';
+import { ipcMain, BrowserWindow, shell } from 'electron';
 import * as fs from 'fs';
 import { isInitialized, closeDatabase } from '../database';
 import { launchSession, getActiveSessionIntentIds } from '../session';
@@ -15,6 +15,7 @@ import { startSkillWatcher, stopSkillWatcher } from '../skill-watcher';
 import { destroySettingsWindow, destroyCanvasWindow } from '../window-manager';
 import { mirrorRendererEvent } from '../web/event-hub';
 import type { GitSyncStatus, ProfilesState } from '../../shared/ipc-contract';
+import { showOpenDialog } from './dialog-utils';
 
 // ── Git sync polling ────────────────────────────────────
 const GIT_SYNC_POLL_MS = 60_000;
@@ -165,9 +166,7 @@ async function pickDirectory(event: Electron.IpcMainInvokeEvent): Promise<string
       properties: ['openDirectory'] as Array<'openDirectory'>,
       defaultPath: getConfigValue('workspace') || undefined,
     };
-    const result = win
-      ? await dialog.showOpenDialog(win, dialogOpts)
-      : await dialog.showOpenDialog(dialogOpts);
+    const result = await showOpenDialog(win, dialogOpts);
 
     if (!result.canceled && result.filePaths.length > 0) {
       return result.filePaths[0];
