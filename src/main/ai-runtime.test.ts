@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -7,12 +7,22 @@ vi.mock('electron', () => ({
   app: { getPath: () => path.join(os.tmpdir(), 'whim-ai-runtime-test') },
 }));
 
+// Every CopilotClient construction is one CLI process spawn (and on macOS one
+// potential keychain prompt), so tests assert on the spawn count directly.
+const spawned: { opts: Record<string, unknown>; started: number }[] = [];
+
 // Identifiable connection stubs so tests can assert how the SDK was configured.
 vi.mock('@github/copilot-sdk', () => ({
   CopilotClient: class {
-    async start(): Promise<void> {}
+    private record: { opts: Record<string, unknown>; started: number };
+    constructor(opts: Record<string, unknown>) {
+      this.record = { opts, started: 0 };
+      spawned.push(this.record);
+    }
+    async start(): Promise<void> { this.record.started++; }
     async stop(): Promise<Error[]> { return []; }
     async listModels(): Promise<unknown[]> { return []; }
+    async createSession(): Promise<unknown> { return { disconnect: async () => {} }; }
   },
   CopilotSession: class {},
   RuntimeConnection: {
@@ -49,7 +59,18 @@ vi.mock('./session', () => ({
   },
 }));
 
-import { resolveRuntimeConnection, getRuntimeStatus } from './ai';
+import {
+  resolveRuntimeConnection,
+  getRuntimeStatus,
+  initCopilot,
+  reinitCopilot,
+  shutdownCopilot,
+  scheduleCopilotReinit,
+  ensureEphemeralCopilotClient,
+  getEphemeralCopilotClient,
+  getCopilotClient,
+  testRuntimeConnection,
+} from './ai';
 import { getConfigValue } from './config';
 import { resolveAutoDetectedCliPath, resolveConfiguredCliPath, probeCliVersion } from './session';
 
@@ -155,5 +176,105 @@ describe('getRuntimeStatus', () => {
     expect(s.version).toBeNull();
     expect(s.compatible).toBe(true);
     expect(probeCliVersion).not.toHaveBeenCalled();
+  });
+});
+
+describe('client lifecycle', () => {
+  beforeEach(async () => {
+    await shutdownCopilot();
+    vi.clearAllMocks();
+    resetSessionMocks();
+    withConfig({});
+    spawned.length = 0;
+  });
+
+  it('spawns exactly one runtime on init and does not start the ephemeral client', async () => {
+    await initCopilot();
+    expect(spawned).toHaveLength(1);
+    expect(getCopilotClient()).not.toBeNull();
+    expect(getEphemeralCopilotClient()).toBeNull();
+  });
+
+  it('coalesces concurrent initCopilot() calls into one spawn', async () => {
+    await Promise.all([initCopilot(), initCopilot(), initCopilot()]);
+    expect(spawned).toHaveLength(1);
+  });
+
+  it('starts the ephemeral client lazily and reuses it afterwards', async () => {
+    await initCopilot();
+    const a = await ensureEphemeralCopilotClient();
+    const b = await ensureEphemeralCopilotClient();
+    expect(a).toBe(b);
+    expect(spawned).toHaveLength(2);
+  });
+
+  it('coalesces concurrent ephemeral starts into one spawn', async () => {
+    await initCopilot();
+    const [a, b] = await Promise.all([ensureEphemeralCopilotClient(), ensureEphemeralCopilotClient()]);
+    expect(a).toBe(b);
+    expect(spawned).toHaveLength(2);
+  });
+
+  it('skips reinit when the resolved runtime is unchanged', async () => {
+    await initCopilot();
+    await reinitCopilot();
+    expect(spawned).toHaveLength(1);
+  });
+
+  it('reinits when the resolved runtime changes', async () => {
+    await initCopilot();
+    withConfig({ cliSource: 'path', cliPath: '/other/copilot' });
+    await reinitCopilot();
+    expect(spawned).toHaveLength(2);
+    expect(getCopilotClient()).not.toBeNull();
+  });
+
+  it('reinits when forced even if the runtime is unchanged', async () => {
+    await initCopilot();
+    await reinitCopilot(true);
+    expect(spawned).toHaveLength(2);
+  });
+
+  it('reuses the live client for a connection test on the active runtime', async () => {
+    await initCopilot();
+    const result = await testRuntimeConnection(5_000);
+    expect(result.ok).toBe(true);
+    expect(spawned).toHaveLength(1);
+  });
+
+  it('spawns a throwaway client when testing a runtime that is not live', async () => {
+    await initCopilot();
+    withConfig({ cliSource: 'server', cliServerUrl: 'http://localhost:9001' });
+    const result = await testRuntimeConnection(5_000);
+    expect(result.ok).toBe(true);
+    expect(spawned).toHaveLength(2);
+  });
+});
+
+describe('scheduleCopilotReinit', () => {
+  beforeEach(async () => {
+    await shutdownCopilot();
+    resetSessionMocks();
+    withConfig({});
+    spawned.length = 0;
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('collapses a burst of settings writes into a single respawn', async () => {
+    await initCopilot();
+    expect(spawned).toHaveLength(1);
+
+    // Mimics the settings UI writing cliPath then cliSource back to back.
+    scheduleCopilotReinit();
+    withConfig({ cliSource: 'path', cliPath: '/other/copilot' });
+    const pending = scheduleCopilotReinit();
+
+    await vi.advanceTimersByTimeAsync(600);
+    await pending;
+    expect(spawned).toHaveLength(2);
   });
 });

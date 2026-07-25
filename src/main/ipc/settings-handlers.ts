@@ -1,7 +1,7 @@
 import { ipcMain, globalShortcut } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
-import { setAIModel, listAvailableModels, reinitCopilot, previewSandboxConfig, getRuntimeStatus, testRuntimeConnection } from '../ai';
+import { setAIModel, listAvailableModels, scheduleCopilotReinit, previewSandboxConfig, getRuntimeStatus, testRuntimeConnection } from '../ai';
 import { resolveCopilotCliPath, invalidateCliPath, checkCliCompatibility, resolveCommandOnPath, resolveCmdToJs, isCliMxcCapable } from '../session';
 import { getConfigValue, setConfigValue, getConfig, getResolvedHotkeys, DEFAULT_PERSONAS, DEFAULT_HOTKEYS, HOTKEY_LABELS, rotateWebRemoteToken, normalizeWebRemotePort, normalizeWebRemoteBindAddresses, listWebRemoteInterfaces, type AgentPersona, type CliRuntime, type CliSource, type HotkeyConfig } from '../config';
 import { listDiscoveredMcpServers } from '../mcp';
@@ -47,24 +47,26 @@ export function registerSettingsHandlers(): void {
       }
       setConfigValue('cliPath', resolved);
       invalidateCliPath();
-      // Reinitialize the SDK so it picks up the new CLI
-      await reinitCopilot();
+      // Reinitialize the SDK so it picks up the new CLI. Deliberately not
+      // awaited: the settings UI writes cliPath and cliSource back to back, and
+      // awaiting here would defeat the debounce and respawn the CLI twice.
+      void scheduleCopilotReinit();
       return resolved;
     } else if (key === 'cli_source') {
       const allowed: CliSource[] = ['bundled', 'auto', 'path', 'server'];
       const next = (allowed as string[]).includes(value) ? (value as CliSource) : 'bundled';
       setConfigValue('cliSource', next);
       invalidateCliPath();
-      await reinitCopilot();
+      void scheduleCopilotReinit();
       return next;
     } else if (key === 'cli_server_url') {
       const url = (value || '').trim() || null;
       setConfigValue('cliServerUrl', url);
-      await reinitCopilot();
+      void scheduleCopilotReinit();
       return url;
     } else if (key === 'cli_server_token') {
       setConfigValue('cliServerToken', (value || '').trim() || null);
-      await reinitCopilot();
+      void scheduleCopilotReinit();
     } else if (key === 'auto_hide_side_pane') {
       const enabled = value === 'true';
       setConfigValue('autoHideSidePane', enabled);

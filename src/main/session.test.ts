@@ -123,7 +123,8 @@ describe('session', () => {
       expect(result).toBe('/home/user/.npm-global/bin/copilot');
     });
   });
-
+
+
   // ── findLatestSelfUpdatedCli ──────────────────────────
 
   describe('findLatestSelfUpdatedCli', () => {
@@ -499,6 +500,22 @@ describe('session', () => {
     it('returns null when the probe fails', () => {
       mockExecSync.mockImplementation(() => { throw new Error('spawn failed'); });
       expect(probeCliVersion('/missing/copilot')).toBeNull();
+    });
+
+    it('caches per path so a repeat probe does not respawn the CLI', () => {
+      mockExecSync.mockReturnValue(Buffer.from('GitHub Copilot CLI 1.0.62.\n'));
+      expect(probeCliVersion('/cached/copilot')).toBe('1.0.62');
+      expect(probeCliVersion('/cached/copilot')).toBe('1.0.62');
+      expect(mockExecSync).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-probes after invalidateCliPath()', () => {
+      mockExecSync.mockReturnValue(Buffer.from('GitHub Copilot CLI 1.0.62.\n'));
+      expect(probeCliVersion('/invalidated/copilot')).toBe('1.0.62');
+
+      invalidateCliPath();
+      mockExecSync.mockReturnValue(Buffer.from('GitHub Copilot CLI 1.0.71.\n'));
+      expect(probeCliVersion('/invalidated/copilot')).toBe('1.0.71');
     });
   });
 
