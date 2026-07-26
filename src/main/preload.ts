@@ -218,6 +218,11 @@ export interface WhimAPI {
 
   // ── Settings popout window ──────────────────────────────
   openSettingsWindow(): void;
+  /** Fired on the settings window when it's re-shown, so it can reload
+   *  every setting instead of displaying state cached at app start. */
+  onSettingsRefresh(callback: () => void): void;
+  /** Fired on every window when the hotkey config changes. */
+  onHotkeysChanged(callback: () => void): void;
 
   // ── Window / workspace events ────────────────────────────
   onWindowShown(callback: (data: { side: 'left' | 'right'; expanded: boolean }) => void): void;
@@ -548,6 +553,12 @@ const api: WhimAPI = {
 
   // ── Settings popout window ──────────────────────────────
   openSettingsWindow: () => ipcRenderer.send('settings-window:open'),
+  onSettingsRefresh: (callback) => {
+    ipcRenderer.on('settings-window:refresh', () => callback());
+  },
+  onHotkeysChanged: (callback) => {
+    ipcRenderer.on('hotkeys:changed', () => callback());
+  },
 
   // ── Window / workspace events ────────────────────────────
   onWindowShown: (callback) => {

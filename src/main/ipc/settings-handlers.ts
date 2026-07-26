@@ -6,7 +6,7 @@ import { resolveCopilotCliPath, invalidateCliPath, checkCliCompatibility, resolv
 import { getConfigValue, setConfigValue, getConfig, getResolvedHotkeys, DEFAULT_PERSONAS, DEFAULT_HOTKEYS, HOTKEY_LABELS, rotateWebRemoteToken, normalizeWebRemotePort, normalizeWebRemoteBindAddresses, listWebRemoteInterfaces, type AgentPersona, type CliRuntime, type CliSource, type HotkeyConfig } from '../config';
 import { listDiscoveredMcpServers } from '../mcp';
 import { validateMcpServers, validateCliTools, validateSandboxPolicy } from '../validators';
-import { onAutoHideSidePaneChanged } from '../window-manager';
+import { onAutoHideSidePaneChanged, broadcastHotkeysChanged } from '../window-manager';
 import { setAutoDownload } from '../update-service';
 import { getWebRemoteState, restartWebRemoteServer, syncWebRemoteServer } from '../web/server';
 
@@ -442,6 +442,7 @@ export function registerSettingsHandlers(): void {
       }
     }
 
+    broadcastHotkeysChanged();
     return { ok: true as const };
   });
 
@@ -467,6 +468,7 @@ export function registerSettingsHandlers(): void {
       registerToggleShortcut(DEFAULT_HOTKEYS.toggleWindow);
     }
 
+    broadcastHotkeysChanged();
     return { ok: true as const, hotkeys: getResolvedHotkeys() };
   });
 }
