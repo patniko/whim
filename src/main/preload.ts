@@ -65,7 +65,9 @@ export interface WhimAPI {
   checkCliMxcCapable(): Promise<IpcCommandResult<'cli:check-mxc-capable'>>;
   getCliRuntimeStatus(): Promise<IpcCommandResult<'cli:runtime-status'>>;
   testCliConnection(): Promise<IpcCommandResult<'cli:test-connection'>>;
+  discoverClis(): Promise<IpcCommandResult<'cli:discover'>>;
   listModels(): Promise<IpcCommandResult<'models:list'>>;
+  listModelsDetailed(): Promise<IpcCommandResult<'models:list-detailed'>>;
 
   // ── Personas ─────────────────────────────────────────────
   listPersonas(): Promise<IpcCommandResult<'personas:list'>>;
@@ -322,7 +324,9 @@ const api: WhimAPI = {
   checkCliMxcCapable: () => ipcRenderer.invoke('cli:check-mxc-capable'),
   getCliRuntimeStatus: () => ipcRenderer.invoke('cli:runtime-status'),
   testCliConnection: () => ipcRenderer.invoke('cli:test-connection'),
+  discoverClis: () => ipcRenderer.invoke('cli:discover'),
   listModels: () => ipcRenderer.invoke('models:list'),
+  listModelsDetailed: () => ipcRenderer.invoke('models:list-detailed'),
 
   // ── Personas ─────────────────────────────────────────────
   listPersonas: () => ipcRenderer.invoke('personas:list'),

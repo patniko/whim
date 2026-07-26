@@ -451,6 +451,16 @@ body {
   font-family: inherit;
 }
 
+.welcome-cli-select {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  background: white;
+  font-size: var(--fs-label);
+}
+
 
 #welcome-model-select {
   padding: 6px 10px;
@@ -534,6 +544,12 @@ body.dark .welcome-cli-input:focus {
 
 body.dark .welcome-cli-input::placeholder {
   color: rgba(255, 255, 255, 0.45);
+}
+
+body.dark .welcome-cli-select {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: inherit;
 }
 
 
