@@ -260,6 +260,8 @@ interface WhimAPI {
   listPages(spaceId: string): Promise<{ pages: string[]; error?: string }>;
   openPageWindow(target: { kind: 'page'; spaceId: string; page: string; title: string }): void;
   openSettingsWindow(): void;
+  onSettingsRefresh(callback: () => void): void;
+  onHotkeysChanged(callback: () => void): void;
   onWindowShown(callback: (data: { side: 'left' | 'right'; expanded: boolean }) => void): void;
   onWindowToggle(callback: () => void): void;
   onRequestHide(callback: () => void): void;
@@ -1713,14 +1715,30 @@ function renderAgentEditor(persona: AgentPersona): void {
     const emoji = selectedEmoji;
     const cliRuntime = runtimeSelect.value;
 
-    // For @agent, save sandbox policy to global default as well
+    // For @agent, save sandbox policy to global default as well.
+    // ensurePolicyForm() is materialized lazily (and its callers don't await
+    // it), so read through it here — otherwise a quick check-then-save would
+    // see personaPolicyApi === null and silently drop the policy.
     let sandboxOverride: SandboxPolicy | undefined;
-    if (isDefault && sandboxed && personaPolicyApi) {
-      const policy = personaPolicyApi.getPolicy();
-      await whimAPI.saveSandboxDefaultPolicy(policy);
-      sandboxOverride = undefined; // @agent uses the global default
-    } else if (sandboxed && !inheritCheck.checked && personaPolicyApi) {
-      sandboxOverride = personaPolicyApi.getPolicy();
+    if (sandboxed) {
+      if (isDefault) {
+        await ensurePolicyForm();
+        if (personaPolicyApi) {
+          await whimAPI.saveSandboxDefaultPolicy(personaPolicyApi.getPolicy());
+        }
+        sandboxOverride = undefined; // @agent uses the global default
+      } else if (!inheritCheck.checked) {
+        await ensurePolicyForm();
+        // Fall back to the persona's stored override rather than wiping it
+        // if the form still couldn't be built.
+        sandboxOverride = personaPolicyApi
+          ? personaPolicyApi.getPolicy()
+          : persona.sandboxPolicyOverride;
+      }
+    } else if (!isDefault) {
+      // Sandboxing is off — main drops sandboxPolicyOverride in that case,
+      // so leave it undefined here to stay in sync with what's persisted.
+      sandboxOverride = undefined;
     }
 
     if (!isDefault && !HANDLE_RE.test(rawHandle)) {
@@ -1759,7 +1777,17 @@ function renderAgentEditor(persona: AgentPersona): void {
       : p
     );
 
-    await whimAPI.savePersonas(personas);
+    const result = await whimAPI.savePersonas(personas);
+    if (result && 'error' in result) {
+      errorEl.textContent = result.error;
+      errorEl.className = 'persona-form-error';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    // Adopt the persisted list. Main-side validation normalizes fields and
+    // silently drops incomplete entries (e.g. an untouched "+ Add" draft), so
+    // keeping the optimistic array would leave ghost rows in the sidebar.
+    personas = await whimAPI.listPersonas() || [];
     personaStore.setPersonas(personas);
     renderAgentsSidebar();
     // Show animated save confirmation
@@ -1780,6 +1808,7 @@ function renderAgentEditor(persona: AgentPersona): void {
     if (isDefault) return;
     personas = personas.filter(p => p.id !== persona.id);
     await whimAPI.savePersonas(personas);
+    personas = await whimAPI.listPersonas() || [];
     personaStore.setPersonas(personas);
     selectedAgentId = null;
     renderAgentsSidebar();
@@ -2257,6 +2286,7 @@ function createMcpCard(server: DiscoveredMcpServer | CustomMcpServer, isDiscover
     delBtn.addEventListener('click', async () => {
       customMcpServers = customMcpServers.filter(s => s.name !== (server as CustomMcpServer).name);
       await whimAPI.saveCustomMcp(customMcpServers);
+      customMcpServers = await whimAPI.listCustomMcp() || [];
       renderCustomMcpServers();
     });
     card.appendChild(delBtn);
@@ -2266,7 +2296,9 @@ function createMcpCard(server: DiscoveredMcpServer | CustomMcpServer, isDiscover
 }
 
 function showMcpForm(): void {
-  const prev = mcpCustomList.querySelector('.mcp-form');
+  // The form is rendered with class `persona-form` — matching on `.mcp-form`
+  // here never hit, so repeated "+ Add" clicks stacked duplicate forms.
+  const prev = mcpCustomList.querySelector('.persona-form');
   if (prev) prev.remove();
 
   const form = document.createElement('div');
@@ -2367,7 +2399,17 @@ function showMcpForm(): void {
     };
 
     customMcpServers.push(entry);
-    await whimAPI.saveCustomMcp(customMcpServers);
+    const result = await whimAPI.saveCustomMcp(customMcpServers);
+    if (result && 'error' in result) {
+      customMcpServers = customMcpServers.filter(s => s !== entry);
+      errorEl.textContent = result.error;
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    // Adopt the persisted list — main-side validation may normalize or drop
+    // entries, and keeping the optimistic copy would show rows that aren't
+    // actually saved.
+    customMcpServers = await whimAPI.listCustomMcp() || [];
     renderCustomMcpServers();
   });
 
@@ -2445,6 +2487,7 @@ function createCliToolCard(tool: CliToolDefinition): HTMLElement {
   delBtn.addEventListener('click', async () => {
     cliTools = cliTools.filter(t => t.name !== tool.name);
     await whimAPI.saveCliTools(cliTools);
+    cliTools = await whimAPI.listCliTools() || [];
     renderCliTools();
   });
 
@@ -2513,10 +2556,15 @@ function showCliToolForm(existing?: CliToolDefinition): void {
     if (existing) {
       cliTools = cliTools.map(t => t.name === existing.name ? { name, description } : t);
     } else {
-      cliTools.push({ name, description });
+      cliTools = [...cliTools, { name, description }];
     }
 
-    await whimAPI.saveCliTools(cliTools);
+    const result = await whimAPI.saveCliTools(cliTools);
+    if (result && 'error' in result) {
+      errorEl.textContent = result.error;
+      errorEl.classList.remove('hidden');
+    }
+    cliTools = await whimAPI.listCliTools() || [];
     renderCliTools();
   });
 
@@ -4570,12 +4618,6 @@ const cliPathInput = document.getElementById('cli-path-input') as HTMLInputEleme
 const cliPathClear = document.getElementById('cli-path-clear') as HTMLButtonElement;
 const cliPathDetected = document.getElementById('cli-path-detected') as HTMLSpanElement;
 
-async function loadCliPathSetting(): Promise<void> {
-  await loadCliPathInputSync();
-  await loadRuntimeSourceSettings();
-  await runCliPathChecks();
-}
-
 /**
  * Synchronous-ish part of CLI path setup — just sets the input value and
  * paints a "checking…" detected-label placeholder. Cheap enough to run
@@ -5320,8 +5362,10 @@ hotkeysResetAll.addEventListener('click', async () => {
   renderHotkeysTab();
 });
 
-// Load hotkeys on init
+// Load hotkeys on init, and follow changes made from any other window
+// (e.g. the settings popout) so renderer-level shortcuts don't go stale.
 loadHotkeys();
+whimAPI.onHotkeysChanged(() => { void loadHotkeys(); });
 
 /**
  * Check if a KeyboardEvent matches an Electron accelerator string from the hotkey config.
@@ -8677,7 +8721,7 @@ if (isSettingsMode) {
   // immediately; the actual CLI subprocess probes (checkCliVersion +
   // checkCliMxcCapable, each spawns the CLI binary) are deferred below
   // so the General tab is interactive without waiting on them.
-  Promise.allSettled([
+  const loadAllSettings = () => Promise.allSettled([
     loadModels(),
     loadWorkspaceSetting(),
     loadThemeSetting(),
@@ -8690,9 +8734,14 @@ if (isSettingsMode) {
     loadRuntimes(),
     loadExportDestinations(),
     loadCliPathInputSync(),
+    loadRuntimeSourceSettings(),
     loadMcpServers(),
     loadCliTools(),
+    loadHotkeys(),
+    refreshProfiles(),
   ]);
+
+  loadAllSettings();
 
   // Defer the CLI subprocess probes to idle so they don't block first
   // paint. requestIdleCallback isn't on the WebKit type lib by default,
@@ -8704,6 +8753,14 @@ if (isSettingsMode) {
   } else {
     setTimeout(runChecks, 0);
   }
+
+  // The settings window is hidden (not destroyed) on close and pre-warmed at
+  // app start, so without this its controls would keep showing whatever was
+  // loaded when the process started. Main re-sends this every time the window
+  // is shown.
+  whimAPI.onSettingsRefresh(() => {
+    void loadAllSettings().then(runChecks);
+  });
 
   // Close button closes the window
   settingsClose.addEventListener('click', () => window.close());

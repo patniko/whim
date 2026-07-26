@@ -552,6 +552,13 @@ export function registerWindowIpcHandlers(preloadPath: string): void {
     if (settingsWindow && !settingsWindow.isDestroyed()) {
       if (!settingsWindow.isVisible()) settingsWindow.show();
       settingsWindow.focus();
+      // The window is hidden (not destroyed) on close and pre-warmed at app
+      // start, so its renderer state is as old as the last load. Ask it to
+      // re-read every setting before the user sees it. Skipped while the
+      // bundle is still loading — the renderer's own init load covers that.
+      if (!settingsWindow.webContents.isLoading()) {
+        settingsWindow.webContents.send('settings-window:refresh');
+      }
     } else {
       settingsWindow = createSettingsWindow(preloadPath);
       settingsWindow.once('ready-to-show', () => {
@@ -940,6 +947,21 @@ function createSettingsWindow(preloadPath: string): BrowserWindow {
   });
 
   return win;
+}
+
+/**
+ * Broadcast a hotkey config change to every live window. Renderers cache the
+ * resolved hotkey map for their own key handling, so an edit made in the
+ * settings popout would otherwise leave every other window on stale bindings
+ * until the app restarts.
+ */
+export function broadcastHotkeysChanged(): void {
+  const targets = [mainWindow, settingsWindow, ...canvasWindows];
+  for (const win of targets) {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('hotkeys:changed');
+    }
+  }
 }
 
 /**
