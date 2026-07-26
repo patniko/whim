@@ -66,7 +66,7 @@ Three specialized sessions: **Parse** (extract title/client/dates), **Recurrence
 
 Any source that can't be satisfied falls back to the bundled CLI. `getRuntimeStatus()` reports the effective source/version/compatibility; `testRuntimeConnection()` spins up a throwaway client and runs a real handshake (bounded by a timeout) for the Settings "Test connection" button.
 
-**session.ts — CLI discovery.** `findLatestSelfUpdatedCli()` scans every self-update cache cross-platform and picks the newest fully-extracted bundle; `autoDetectCopilotCli()` adds well-known install paths (`~/.local/bin`, Homebrew, npm-global), PATH augmentation for GUI launches, a login-shell fallback for version-manager installs, and newest-by-probed-version selection. `MIN_CLI_VERSION` gates compatibility.
+**session.ts — CLI discovery.** `findLatestSelfUpdatedCli()` scans every self-update cache cross-platform and picks the newest fully-extracted bundle (built on `findSelfUpdatedClis()`, which returns them all, newest first); `autoDetectCopilotCli()` adds well-known install paths (`~/.local/bin`, Homebrew, npm-global), PATH augmentation for GUI launches, a login-shell fallback for version-manager installs, and newest-by-probed-version selection. `discoverCopilotClis()` enumerates *every* install found across all of those sources with its probed version, origin label and compatibility — it backs the CLI pickers in onboarding and Settings so the user can override a bad auto-pick. `MIN_CLI_VERSION` gates compatibility.
 
 ### agent-service.ts — Local Agent Lifecycle
 
