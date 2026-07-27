@@ -1,10 +1,15 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DESKTOP_ONLY_EVENT_CHANNELS,
   currentEventSequence,
   mirrorRendererEvent,
+  mirroredEventChannels,
   replayEventsSince,
   resetWebRemoteEventState,
   subscribeWebRemoteEvents,
+  type WebRemoteEvent,
 } from './event-hub';
 
 beforeEach(() => {
@@ -127,6 +132,58 @@ describe('web remote event hub', () => {
       expect(recent.kind).toBe('events');
       if (recent.kind !== 'events') return;
       expect(recent.events.map((event) => event.seq)).toEqual([600]);
+    });
+  });
+});
+
+describe('event channel classification', () => {
+  /**
+   * The API surface is the single definition of what the renderer listens to.
+   * Scanning it here means adding an event to whim-api.ts forces a decision
+   * about whether the web remote should see it — the alternative is a
+   * hand-kept list that silently stops matching reality, which is exactly the
+   * failure this branch exists to fix.
+   */
+  const surface = readFileSync(join(__dirname, '..', '..', 'shared', 'whim-api.ts'), 'utf-8');
+
+  const subscribedChannels = [
+    ...new Set([...surface.matchAll(/ipcRenderer\.on\(\s*'([^']+)'/g)].map((m) => m[1])),
+  ].sort();
+
+  it('finds the channels the renderer actually subscribes to', () => {
+    // A regex that silently matches nothing would make every case below pass.
+    expect(subscribedChannels.length).toBeGreaterThan(30);
+    expect(subscribedChannels).toContain('agent:status-changed');
+  });
+
+  it('classifies every subscribed channel as mirrored or desktop-only', () => {
+    const mirrored = mirroredEventChannels();
+    const unclassified = subscribedChannels.filter(
+      (channel) => !mirrored.has(channel) && !DESKTOP_ONLY_EVENT_CHANNELS.has(channel),
+    );
+    expect(unclassified).toEqual([]);
+  });
+
+  it('never classifies a channel as both', () => {
+    const mirrored = mirroredEventChannels();
+    const both = [...DESKTOP_ONLY_EVENT_CHANNELS].filter((channel) => mirrored.has(channel));
+    expect(both).toEqual([]);
+  });
+
+  it('replays the original channel and arguments alongside the flattened view', () => {
+    resetWebRemoteEventState();
+    const received: WebRemoteEvent[] = [];
+    const unsubscribe = subscribeWebRemoteEvents((event) => received.push(event));
+
+    mirrorRendererEvent('chat:event:agent-7', { type: 'assistant.message' });
+    unsubscribe();
+
+    // The lightweight client reads the flattened form...
+    expect(received[0].channel).toBe('chat:event');
+    // ...while the full renderer needs the channel it actually subscribed to.
+    expect(received[0].source).toEqual({
+      channel: 'chat:event:agent-7',
+      args: [{ type: 'assistant.message' }],
     });
   });
 });
