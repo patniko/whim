@@ -35,6 +35,64 @@ const webOptions = {
   outfile: path.join(__dirname, '..', 'dist', 'web', 'app.js'),
 };
 
+/**
+ * The loader that lets the *desktop* renderer run in a browser. It installs a
+ * web-backed `window.whimAPI` and then pulls in the unmodified renderer
+ * bundle, so there is no second copy of the UI to keep in step.
+ */
+const desktopBootOptions = {
+  ...rendererOptions,
+  entryPoints: [path.join(__dirname, '..', 'src', 'web', 'desktop', 'boot.ts')],
+  outfile: path.join(__dirname, '..', 'dist', 'web', 'desktop', 'boot.js'),
+};
+
+/**
+ * Assemble /desktop from the renderer's own build output.
+ *
+ * Two edits to the renderer's HTML: a <base> so its relative asset URLs
+ * resolve under the subdirectory, and removal of the <script> tag for app.js.
+ * The bundle must not evaluate until boot.js has installed the API bridge, so
+ * boot.js injects it instead.
+ */
+function assembleDesktopBundle() {
+  const rendererDist = path.join(__dirname, '..', 'dist', 'renderer');
+  const target = path.join(__dirname, '..', 'dist', 'web', 'desktop');
+  const source = path.join(__dirname, '..', 'src', 'renderer');
+  if (!fs.existsSync(path.join(rendererDist, 'app.js'))) return;
+
+  fs.mkdirSync(target, { recursive: true });
+  fs.copyFileSync(path.join(rendererDist, 'app.js'), path.join(target, 'app.js'));
+  for (const asset of ['styles.css', 'copilot.png']) {
+    fs.copyFileSync(path.join(source, asset), path.join(target, asset));
+  }
+
+  let html = fs.readFileSync(path.join(source, 'index.html'), 'utf-8');
+  html = html.replace(/<script src="app\.js"><\/script>\s*/, '');
+  // Rewrite the renderer's relative asset URLs to absolute /desktop/ paths.
+  // A <base> tag would be the obvious fix, but the web remote sends
+  // `base-uri 'none'`, which silently neutralises it — and weakening a CSP to
+  // save a string replace is a bad trade.
+  html = html.replace(/(src|href)="(?!https?:|\/\/|\/|data:|#)([^"]+)"/g, '$1="/desktop/$2"');
+  html = html.replace('</head>', '  <link rel="stylesheet" href="/desktop/boot.css">\n  <script src="/desktop/boot.js" defer></script>\n</head>');
+  assertDesktopBundleSane(html);
+  fs.writeFileSync(path.join(target, 'index.html'), html);
+  fs.copyFileSync(path.join(__dirname, '..', 'src', 'web', 'desktop', 'boot.css'), path.join(target, 'boot.css'));
+}
+
+/**
+ * The renderer's HTML is authored for Electron, where it loads from a file
+ * path. Guard the assumptions this rewrite depends on so a future edit to
+ * index.html fails the build instead of producing a subtly broken page.
+ */
+function assertDesktopBundleSane(html) {
+  if (/(src|href)="(?!https?:|\/\/|\/|data:|#)/.test(html)) {
+    throw new Error('dist/web/desktop/index.html still contains relative asset URLs');
+  }
+  if (html.includes('src="/desktop/app.js"')) {
+    throw new Error('app.js must be injected by boot.js, not referenced in HTML');
+  }
+}
+
 function copyWebAssets() {
   const srcDir = path.join(__dirname, '..', 'src', 'web');
   const distDir = path.join(__dirname, '..', 'dist', 'web');
@@ -120,7 +178,12 @@ async function main() {
     copyWebAssets();
     const rendererCtx = await esbuild.context(rendererOptions);
     const webCtx = await esbuild.context(webOptions);
-    await Promise.all([rendererCtx.watch(), webCtx.watch()]);
+    const desktopCtx = await esbuild.context(desktopBootOptions);
+    await Promise.all([rendererCtx.watch(), webCtx.watch(), desktopCtx.watch()]);
+    assembleDesktopBundle();
+    for (const asset of ['index.html', 'styles.css']) {
+      fs.watchFile(path.join(__dirname, '..', 'src', 'renderer', asset), { interval: 300 }, assembleDesktopBundle);
+    }
     for (const asset of ['index.html', 'styles.css', 'manifest.webmanifest', 'sw.js']) {
       fs.watchFile(path.join(__dirname, '..', 'src', 'web', asset), { interval: 300 }, copyWebAssets);
     }
@@ -129,9 +192,12 @@ async function main() {
     await Promise.all([
       esbuild.build(rendererOptions),
       esbuild.build(webOptions),
+      esbuild.build(desktopBootOptions),
     ]);
     copyWebAssets();
     fingerprintWebAssets();
+    // After fingerprinting, which only rewrites the lightweight client's HTML.
+    assembleDesktopBundle();
   }
 }
 
