@@ -168,6 +168,8 @@ export interface AppConfig {
   webRemoteDevices: WebRemoteDeviceRecord[];  // browsers holding a session cookie, individually revocable
   webRemoteLockouts: WebRemoteLockoutRecord[]; // auth lockouts, persisted so a restart doesn't clear them
   hotkeys: Partial<HotkeyConfig>;   // user hotkey overrides (missing keys fall back to DEFAULT_HOTKEYS)
+  quickStartCompleted: boolean;     // true once the hotkey/tray quick-start tour has been finished or skipped
+  onboardingTipsSeen: boolean;      // true once the shortcuts coach overlay has been dismissed
   commentTrigger: 'hover-or-caret' | 'caret'; // how the canvas surfaces comment threads
   profiles: WorkspaceProfile[];     // saved workspace profiles (work / personal / …)
   activeProfileId: string | null;   // id of the currently-open profile in `profiles`
@@ -358,6 +360,8 @@ const DEFAULT_CONFIG: AppConfig = {
   webRemoteDevices: [],
   webRemoteLockouts: [],
   hotkeys: {},
+  quickStartCompleted: false,
+  onboardingTipsSeen: false,
   commentTrigger: 'caret',
   profiles: [],
   activeProfileId: null,

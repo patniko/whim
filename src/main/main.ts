@@ -22,6 +22,12 @@ import { syncWebRemoteServer, stopWebRemoteServer, refreshWebRemoteBindings } fr
 import { restoreActiveCloudPollers, stopAllCloudPollers } from './cloud-agent-poller';
 
 let currentToggleAccelerator: string | null = null;
+let toggleShortcutRegistered = false;
+
+/** Whether the OS currently has the global toggle shortcut bound to whim. */
+export function isToggleShortcutRegistered(): boolean {
+  return toggleShortcutRegistered;
+}
 
 // Windows toast notifications require an AppUserModelId to be properly
 // associated with the app in the notification center.
@@ -65,14 +71,17 @@ export function registerToggleShortcut(accelerator: string): boolean {
   if (currentToggleAccelerator) {
     globalShortcut.unregister(currentToggleAccelerator);
   }
-  const registered = globalShortcut.register(accelerator, toggleWindow);
+  const registered = globalShortcut.register(accelerator, () => toggleWindow('hotkey'));
   if (registered) {
     currentToggleAccelerator = accelerator;
+    toggleShortcutRegistered = true;
   } else {
     console.warn(`[main] Failed to register global shortcut "${accelerator}" — another process may be holding it`);
     // Attempt to restore the previous shortcut
     if (currentToggleAccelerator) {
-      globalShortcut.register(currentToggleAccelerator, toggleWindow);
+      toggleShortcutRegistered = globalShortcut.register(currentToggleAccelerator, () => toggleWindow('hotkey'));
+    } else {
+      toggleShortcutRegistered = false;
     }
   }
   return registered;
@@ -224,7 +233,7 @@ app.whenReady().then(async () => {
   // command. Otherwise the page can finish loading while startup is awaiting
   // recovery, causing this one-shot event to be missed.
   mainWin.webContents.once('did-finish-load', () => {
-    toggleWindow();
+    toggleWindow('startup');
 
     if (workspace && fs.existsSync(workspace)) {
       setTimeout(() => {

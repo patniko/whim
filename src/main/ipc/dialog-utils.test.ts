@@ -12,11 +12,13 @@ vi.mock('electron', () => {
     destroyed = false;
     ignoredMouse = false;
     shownInactive = false;
+    loadedUrl = '';
     constructor(opts: any) {
       this.opts = opts;
       createdWindows.push(this);
     }
     setIgnoreMouseEvents(v: boolean): void { this.ignoredMouse = v; }
+    loadURL(url: string): Promise<void> { this.loadedUrl = url; return Promise.resolve(); }
     showInactive(): void { this.shownInactive = true; }
     destroy(): void { this.destroyed = true; }
   }
@@ -84,6 +86,11 @@ describe('showOpenDialog', () => {
     expect(anchor.opts.y + anchor.opts.height).toBeLessThanOrEqual(1080);
     expect(anchor.opts.transparent).toBe(true);
     expect(anchor.opts.frame).toBe(false);
+    // Must never paint a visible surface behind the sheet.
+    expect(anchor.opts.backgroundColor).toBe('#00000000');
+    expect(anchor.opts.roundedCorners).toBe(false);
+    expect(anchor.opts.hasShadow).toBe(false);
+    expect(anchor.loadedUrl).toContain('background%3Atransparent');
     expect(anchor.shownInactive).toBe(true);
     expect(mockShowOpenDialog).toHaveBeenCalledWith(anchor, { properties: ['openDirectory'] });
   });

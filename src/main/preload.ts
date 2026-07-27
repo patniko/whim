@@ -68,6 +68,7 @@ export interface WhimAPI {
   getHotkeys(): Promise<IpcCommandResult<'hotkeys:get'>>;
   setHotkey(key: string, accelerator: string): Promise<IpcCommandResult<'hotkeys:set'>>;
   resetHotkeys(key?: string): Promise<IpcCommandResult<'hotkeys:reset'>>;
+  getToggleShortcutStatus(): Promise<IpcCommandResult<'hotkeys:toggle-status'>>;
 
   // ── CLI / Models ─────────────────────────────────────────
   resolveCliPath(): Promise<IpcCommandResult<'cli:resolve-path'>>;
@@ -237,8 +238,8 @@ export interface WhimAPI {
   onHotkeysChanged(callback: () => void): void;
 
   // ── Window / workspace events ────────────────────────────
-  onWindowShown(callback: (data: { side: 'left' | 'right'; expanded: boolean }) => void): void;
-  onWindowToggle(callback: () => void): void;
+  onWindowShown(callback: (data: IpcEventPayload<'window:shown'>) => void): void;
+  onWindowToggle(callback: (data: IpcEventPayload<'window:toggle'>) => void): void;
   onRequestHide(callback: () => void): void;
   onWorkspaceCommitted(callback: () => void): void;
   onWorkspaceChanged(callback: (path: string | null) => void): void;
@@ -333,6 +334,7 @@ const api: WhimAPI = {
   getHotkeys: () => ipcRenderer.invoke('hotkeys:get'),
   setHotkey: (key, accelerator) => ipcRenderer.invoke('hotkeys:set', key, accelerator),
   resetHotkeys: (key) => ipcRenderer.invoke('hotkeys:reset', key),
+  getToggleShortcutStatus: () => ipcRenderer.invoke('hotkeys:toggle-status'),
 
   // ── CLI / Models ─────────────────────────────────────────
   resolveCliPath: () => ipcRenderer.invoke('cli:resolve-path'),
@@ -577,10 +579,10 @@ const api: WhimAPI = {
 
   // ── Window / workspace events ────────────────────────────
   onWindowShown: (callback) => {
-    ipcRenderer.on('window:shown', (_event: unknown, data: { side: 'left' | 'right'; expanded: boolean }) => callback(data));
+    ipcRenderer.on('window:shown', (_event: unknown, data: IpcEventPayload<'window:shown'>) => callback(data));
   },
   onWindowToggle: (callback) => {
-    ipcRenderer.on('window:toggle', callback);
+    ipcRenderer.on('window:toggle', (_event: unknown, data: IpcEventPayload<'window:toggle'>) => callback(data));
   },
   onRequestHide: (callback) => {
     ipcRenderer.on('window:request-hide', callback);

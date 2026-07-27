@@ -30,6 +30,8 @@ export function registerSettingsHandlers(): void {
       auto_download_updates: 'autoDownloadUpdates',
       remoteAutoEnable: 'remoteAutoEnable',
       comment_trigger: 'commentTrigger',
+      quick_start_completed: 'quickStartCompleted',
+      onboarding_tips_seen: 'onboardingTipsSeen',
     };
     const configKey = configKeyMap[key];
     if (configKey) return getConfigValue(configKey);
@@ -85,6 +87,10 @@ export function registerSettingsHandlers(): void {
       const next = value === 'hover-or-caret' ? 'hover-or-caret' : 'caret';
       setConfigValue('commentTrigger', next);
       return next;
+    } else if (key === 'quick_start_completed') {
+      setConfigValue('quickStartCompleted', value === 'true' || value === '1');
+    } else if (key === 'onboarding_tips_seen') {
+      setConfigValue('onboardingTipsSeen', value === 'true' || value === '1');
     }
   });
 
@@ -456,6 +462,15 @@ export function registerSettingsHandlers(): void {
   // ── Hotkeys ─────────────────────────────────────────────
   ipcMain.handle('hotkeys:get', () => {
     return getResolvedHotkeys();
+  });
+
+  // Whether the OS actually accepted the global toggle shortcut. The quick-start
+  // tour asks the user to press it, so it needs to warn up front (and offer a
+  // rebind) when another app is already holding the combo.
+  ipcMain.handle('hotkeys:toggle-status', () => {
+    const accelerator = getResolvedHotkeys().toggleWindow;
+    const { isToggleShortcutRegistered } = require('../main');
+    return { accelerator, registered: isToggleShortcutRegistered() as boolean };
   });
 
   ipcMain.handle('hotkeys:set', (_event, key: string, accelerator: string) => {

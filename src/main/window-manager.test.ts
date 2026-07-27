@@ -169,9 +169,9 @@ describe('window-manager', () => {
       mockWindow.isVisible.mockReturnValue(true);
       mockWindow.isFocused.mockReturnValue(true);
 
-      toggleWindow();
+      toggleWindow('hotkey');
 
-      expect(mockWebContents.send).toHaveBeenCalledWith('window:toggle');
+      expect(mockWebContents.send).toHaveBeenCalledWith('window:toggle', { source: 'hotkey' });
     });
 
     it('shows window when hidden (autoHide mode)', () => {
@@ -184,7 +184,19 @@ describe('window-manager', () => {
       expect(mockWindow.focus).toHaveBeenCalled();
       expect(mockWebContents.send).toHaveBeenCalledWith(
         'window:shown',
-        expect.objectContaining({ expanded: false }),
+        expect.objectContaining({ expanded: false, source: 'other' }),
+      );
+    });
+
+    it('reports the tray as the source when the toggle came from the tray icon', () => {
+      setConfigValue('autoHideSidePane', true);
+      mockWindow.isVisible.mockReturnValue(false);
+
+      toggleWindow('tray');
+
+      expect(mockWebContents.send).toHaveBeenCalledWith(
+        'window:shown',
+        expect.objectContaining({ source: 'tray' }),
       );
     });
 
@@ -195,7 +207,7 @@ describe('window-manager', () => {
 
       toggleWindow();
 
-      expect(mockWebContents.send).toHaveBeenCalledWith('window:toggle');
+      expect(mockWebContents.send).toHaveBeenCalledWith('window:toggle', { source: 'other' });
     });
 
     it('focuses window when visible but not focused (non-autoHide mode)', () => {
@@ -206,7 +218,7 @@ describe('window-manager', () => {
       toggleWindow();
 
       expect(mockWindow.focus).toHaveBeenCalled();
-      expect(mockWebContents.send).not.toHaveBeenCalledWith('window:toggle');
+      expect(mockWebContents.send).not.toHaveBeenCalledWith('window:toggle', expect.anything());
     });
 
     it('shows window when hidden (non-autoHide mode)', () => {
