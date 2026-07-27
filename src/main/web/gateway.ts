@@ -36,6 +36,7 @@ export const WEB_REMOTE_COMMAND_ALLOWLIST = [
   'agent:approve',
   'agent:respond-user-input',
   'agent:respond-elicitation',
+  'agent:resolve-sandbox',
   'agent:quick-launch',
   'agent:launch-cloud',
   'agent:launch',
@@ -153,6 +154,15 @@ const HANDLERS: Record<WebRemoteCommandChannel, Handler> = {
       action,
       expectOptionalRecord(args[3]),
     );
+  },
+  'agent:resolve-sandbox': async (args) => {
+    const decision = expectString(args, 2, 'decision');
+    if (decision !== 'allow-once' && decision !== 'allow-for-session' && decision !== 'disable') {
+      throw invalidArg('decision must be allow-once, allow-for-session, or disable');
+    }
+    const { resolveSandboxBlock } = await import('../agent-service');
+    await resolveSandboxBlock(expectString(args, 0, 'agentId'), expectString(args, 1, 'requestId'), decision);
+    return { ok: true };
   },
   'agent:quick-launch': quickLaunchFromArgs,
   'agent:launch-cloud': launchCloudFromArgs,

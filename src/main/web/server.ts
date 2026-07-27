@@ -357,6 +357,11 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
       return;
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/attachment') {
+      await serveAttachment(res, url);
+      return;
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/invoke') {
       const body = await readJsonBody(req);
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -506,6 +511,54 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, url: U
   headers['Content-Length'] = String(stats.size);
   res.writeHead(200, headers);
   fs.createReadStream(filePath).pipe(res);
+}
+
+/**
+ * Canvas markdown references attachments by a workspace-relative path
+ * (`attachments/shot.png`). The desktop resolves those through
+ * `canvas:resolve-attachment`, but the web server only ever served its own
+ * bundle directory — so every image in every canvas 404'd in the browser.
+ */
+async function serveAttachment(res: http.ServerResponse, url: URL): Promise<void> {
+  const spaceId = url.searchParams.get('spaceId');
+  const relativePath = url.searchParams.get('path');
+  if (!spaceId || !relativePath) {
+    sendJson(res, 400, { ok: false, error: { code: 'invalid_request', message: 'spaceId and path are required.' } });
+    return;
+  }
+
+  const workspace = getConfigValue('workspace');
+  const { getSpace, isInitialized } = await import('../database');
+  if (!workspace || !isInitialized()) {
+    sendJson(res, 503, { ok: false, error: { code: 'no_workspace', message: 'No workspace is open.' } });
+    return;
+  }
+
+  const space = getSpace(spaceId);
+  if (!space?.folder) {
+    sendJson(res, 404, { ok: false, error: { code: 'not_found', message: 'Space not found.' } });
+    return;
+  }
+
+  // resolveAttachmentPath contains the traversal check: it refuses any path
+  // that escapes the space folder.
+  const { getMimeType, resolveAttachmentPath } = await import('../workspace');
+  const absolute = resolveAttachmentPath(workspace, space.folder, relativePath);
+  if (!absolute) {
+    sendJson(res, 404, { ok: false, error: { code: 'not_found', message: 'Attachment not found.' } });
+    return;
+  }
+
+  const stats = fs.statSync(absolute);
+  res.writeHead(200, {
+    ...securityHeaders(),
+    'Content-Type': getMimeType(absolute),
+    'Content-Length': String(stats.size),
+    // Attachments are immutable in practice but scoped to a session, so keep
+    // them private to this browser rather than allowing shared caches.
+    'Cache-Control': 'private, max-age=3600',
+  });
+  fs.createReadStream(absolute).pipe(res);
 }
 
 /** Content-hashed filenames (`app.<hash>.js`) can be cached indefinitely. */

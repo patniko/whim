@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'fs';
 import * as http from 'http';
+import * as os from 'os';
+import * as path from 'path';
 import type { AddressInfo } from 'net';
 
 const TOKEN = 'test-token-0123456789';
@@ -39,6 +42,19 @@ vi.mock('./gateway', async () => {
 
 vi.mock('./event-hub', () => ({
   subscribeWebRemoteEvents: () => () => {},
+}));
+
+const space: { id: string; folder: string } | null = { id: 'sp1', folder: 'space-one' };
+let attachmentPath: string | null = null;
+
+vi.mock('../database', () => ({
+  isInitialized: () => true,
+  getSpace: (id: string) => (space && space.id === id ? space : null),
+}));
+
+vi.mock('../workspace', () => ({
+  resolveAttachmentPath: () => attachmentPath,
+  getMimeType: () => 'image/png',
 }));
 
 vi.mock('qrcode', () => ({
@@ -114,6 +130,7 @@ function request(
 }
 
 beforeEach(async () => {
+  attachmentPath = null;
   config.webRemotePort = 0;
   config.webRemoteBindSelections = [{ kind: 'address', address: '127.0.0.1' }];
   await startWebRemoteServer();
@@ -346,6 +363,49 @@ describe('web remote server', () => {
       const state = await getWebRemoteState();
       expect(state.running).toBe(false);
       expect(state.bindings.map((binding) => binding.state)).toEqual(['listening', 'pending']);
+    });
+  });
+  describe('attachment route', () => {
+    it('requires spaceId and path', async () => {
+      const res = await request('/api/attachment', { headers: { Authorization: `Bearer ${TOKEN}` } });
+      expect(res.status).toBe(400);
+    });
+
+    it('requires authentication', async () => {
+      const res = await request('/api/attachment?spaceId=sp1&path=a.png');
+      expect(res.status).toBe(401);
+    });
+
+    it('404s when the attachment escapes or is missing', async () => {
+      attachmentPath = null;
+      const res = await request('/api/attachment?spaceId=sp1&path=../../etc/passwd', {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it('404s for an unknown space', async () => {
+      const res = await request('/api/attachment?spaceId=nope&path=a.png', {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it('serves the file with a private cache policy', async () => {
+      const file = path.join(os.tmpdir(), `whim-attachment-${Date.now()}.png`);
+      fs.writeFileSync(file, 'pixels');
+      attachmentPath = file;
+      try {
+        const res = await request('/api/attachment?spaceId=sp1&path=a.png', {
+          headers: { Authorization: `Bearer ${TOKEN}` },
+        });
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toBe('image/png');
+        expect(res.headers['cache-control']).toBe('private, max-age=3600');
+        expect(res.body).toBe('pixels');
+      } finally {
+        fs.unlinkSync(file);
+      }
     });
   });
 });
