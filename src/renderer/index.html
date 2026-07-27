@@ -8,6 +8,91 @@
 </head>
 <body>
   <div id="app">
+    <!-- Quick start tour (shown before setup on a fresh install) -->
+    <div id="tour-view" class="tour-view hidden">
+      <div class="tour-content">
+        <div class="tour-header">
+          <span class="tour-icon"><img src="copilot.png" width="40" height="40" alt="whim"></span>
+          <h1>Quick start</h1>
+          <p class="tour-subtitle">whim is a side pane that hides until you need it. Two things to learn first — it takes about 20 seconds.</p>
+          <div class="tour-progress" id="tour-progress" role="progressbar" aria-valuemin="1" aria-valuemax="2" aria-valuenow="1" aria-label="Quick start progress">
+            <span class="tour-dot active" data-tour-dot="hotkey"></span>
+            <span class="tour-dot" data-tour-dot="tray"></span>
+          </div>
+        </div>
+
+        <!-- Step 1: the global shortcut -->
+        <section class="tour-step" id="tour-step-hotkey" aria-labelledby="tour-step-hotkey-title">
+          <div class="tour-step-eyebrow">Step 1 of 2</div>
+          <h2 class="tour-step-title" id="tour-step-hotkey-title">Summon and dismiss whim</h2>
+          <p class="tour-step-text">One shortcut slides whim in from the edge of your screen — and slides it away again. It works from any app.</p>
+
+          <div class="tour-keycap-row">
+            <button type="button" id="tour-hotkey-chip" class="tour-keycap" title="Click to record a different shortcut" aria-label="Toggle whim shortcut — click to change">…</button>
+            <button type="button" id="tour-hotkey-reset" class="tour-link-btn hidden">Reset to default</button>
+          </div>
+          <div class="tour-hint" id="tour-hotkey-hint">Prefer a different combo? Click the shortcut above and press the keys you want.</div>
+
+          <ol class="tour-checks">
+            <li class="tour-check" id="tour-check-hide">
+              <span class="tour-check-mark" aria-hidden="true"></span>
+              <span class="tour-check-text">Press it once — whim slides away</span>
+            </li>
+            <li class="tour-check" id="tour-check-show">
+              <span class="tour-check-mark" aria-hidden="true"></span>
+              <span class="tour-check-text">Press it again — whim comes back</span>
+            </li>
+          </ol>
+
+          <div class="tour-actions">
+            <button type="button" id="tour-hotkey-next" class="tour-primary-btn" disabled>Next</button>
+            <button type="button" id="tour-hotkey-skip" class="tour-link-btn">Skip this step</button>
+          </div>
+        </section>
+
+        <!-- Step 2: the tray / menu bar icon -->
+        <section class="tour-step hidden" id="tour-step-tray" aria-labelledby="tour-step-tray-title">
+          <div class="tour-step-eyebrow">Step 2 of 2</div>
+          <h2 class="tour-step-title" id="tour-step-tray-title">whim also lives in your menu bar</h2>
+          <p class="tour-step-text" id="tour-tray-text">Forget the shortcut? Click the whim icon in the menu bar and the pane comes right back.</p>
+
+          <div class="tour-tray-illustration" id="tour-tray-illustration">
+            <div class="tour-tray-arrow" id="tour-tray-arrow" aria-hidden="true">↑</div>
+            <div class="tour-tray-bar" aria-hidden="true">
+              <span class="tour-tray-blob"></span>
+              <span class="tour-tray-blob"></span>
+              <span class="tour-tray-blob"></span>
+              <span class="tour-tray-mark"><img src="copilot.png" width="16" height="16" alt=""></span>
+            </div>
+            <div class="tour-tray-caption" id="tour-tray-caption">Look for it at the top-right of your screen.</div>
+          </div>
+
+          <ol class="tour-checks">
+            <li class="tour-check" id="tour-check-tray-hide">
+              <span class="tour-check-mark" aria-hidden="true"></span>
+              <span class="tour-check-text">Hide whim with <span class="tour-inline-keys" id="tour-tray-keys">…</span></span>
+            </li>
+            <li class="tour-check" id="tour-check-tray-click">
+              <span class="tour-check-mark" aria-hidden="true"></span>
+              <span class="tour-check-text">Click the whim icon to bring it back</span>
+            </li>
+          </ol>
+
+          <button type="button" id="tour-tray-hide-fallback" class="tour-secondary-btn hidden">Hide whim for me</button>
+
+          <div class="tour-actions">
+            <button type="button" id="tour-tray-next" class="tour-primary-btn">Continue to setup</button>
+            <button type="button" id="tour-tray-skip" class="tour-link-btn">Skip this step</button>
+          </div>
+        </section>
+
+        <div class="tour-footer">
+          <span class="tour-footer-note">You can reopen this from <kbd>?</kbd> in the header.</span>
+          <button type="button" id="tour-skip-all" class="tour-link-btn">Skip quick start</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Welcome / setup view (shown when no workspace) -->
     <div id="welcome-view" class="welcome-view hidden">
       <div class="welcome-content">
@@ -161,7 +246,14 @@
             <span class="help-tip-icon" aria-hidden="true">⌨️</span>
             <div class="help-tip-body">
               <div class="help-tip-title">Summon whim from anywhere</div>
-              <div class="help-tip-text">Press <kbd class="kbd-mod"></kbd><kbd>Shift</kbd><kbd>Space</kbd> to pop whim open, capture a thought, and dismiss.</div>
+              <div class="help-tip-text">Press <span class="help-keys" data-toggle-hotkey></span> to pop whim open, capture a thought, and dismiss.</div>
+            </div>
+          </li>
+          <li class="help-tip">
+            <span class="help-tip-icon" aria-hidden="true">🖱️</span>
+            <div class="help-tip-body">
+              <div class="help-tip-title">Or use the tray icon</div>
+              <div class="help-tip-text">whim always sits in the menu bar / system tray — click its icon any time to bring the pane back.</div>
             </div>
           </li>
           <li class="help-tip">
@@ -190,7 +282,7 @@
         <div class="help-shortcuts">
           <div class="help-shortcuts-title">Keyboard shortcuts</div>
           <div class="help-shortcuts-grid">
-            <div class="help-sc"><span>Toggle whim</span><span class="help-keys"><kbd class="kbd-mod"></kbd><kbd>Shift</kbd><kbd>Space</kbd></span></div>
+            <div class="help-sc"><span>Toggle whim</span><span class="help-keys" data-toggle-hotkey></span></div>
             <div class="help-sc"><span>Save / open canvas</span><span class="help-keys"><kbd>Enter</kbd></span></div>
             <div class="help-sc"><span>Expanded canvas</span><span class="help-keys"><kbd class="kbd-mod"></kbd><kbd>Enter</kbd></span></div>
             <div class="help-sc"><span>Search spaces</span><span class="help-keys"><kbd>Shift</kbd><kbd>Tab</kbd></span></div>
@@ -201,7 +293,10 @@
           </div>
         </div>
 
-        <button id="help-got-it" class="help-cta">Got it</button>
+        <div class="help-footer">
+          <button id="help-replay-tour" class="help-secondary">Replay quick start</button>
+          <button id="help-got-it" class="help-cta">Got it</button>
+        </div>
       </div>
     </div>
 

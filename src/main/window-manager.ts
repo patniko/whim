@@ -4,6 +4,7 @@ import { getConfigValue, setConfigValue, type SnapPosition } from './config';
 import { getSpace } from './database';
 import * as fs from 'fs';
 import * as nodePath from 'path';
+import type { WindowToggleSource } from '../shared/ipc-contract';
 
 function getWindowIconPath(): string | undefined {
   if (process.platform === 'darwin') return undefined;
@@ -271,8 +272,12 @@ export function onAutoHideSidePaneChanged(): void {
   applyStackingPolicy();
 }
 
-/** Toggle the main window: show (full-height edge strip) or delegate hide to renderer. */
-export function toggleWindow(): void {
+/**
+ * Toggle the main window: show (full-height edge strip) or delegate hide to renderer.
+ * `source` records what triggered the toggle so the renderer's quick-start tour can
+ * tell a global-hotkey press apart from a tray click.
+ */
+export function toggleWindow(source: WindowToggleSource = 'other'): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
   const autoHide = getConfigValue('autoHideSidePane');
@@ -282,7 +287,7 @@ export function toggleWindow(): void {
     if (mainWindow.isVisible()) {
       if (mainWindow.isFocused()) {
         // Visible and focused — hide via renderer slide-out
-        mainWindow.webContents.send('window:toggle');
+        mainWindow.webContents.send('window:toggle', { source });
       } else {
         // Visible but behind other windows — bring to front
         if (mainWindow.isMinimized()) mainWindow.restore();
@@ -304,14 +309,14 @@ export function toggleWindow(): void {
       mainWindow.show();
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
-      mainWindow.webContents.send('window:shown', { side: isLeft ? 'left' : 'right', expanded: false });
+      mainWindow.webContents.send('window:shown', { side: isLeft ? 'left' : 'right', expanded: false, source });
     }
     return;
   }
 
   if (mainWindow.isVisible()) {
     // Let the renderer decide: navigate back to list or hide
-    mainWindow.webContents.send('window:toggle');
+    mainWindow.webContents.send('window:toggle', { source });
   } else {
     const cursorPoint = screen.getCursorScreenPoint();
     const display = screen.getDisplayNearestPoint(cursorPoint);
@@ -329,7 +334,7 @@ export function toggleWindow(): void {
     setMainBounds(mainWindow, { x: winX, y: winY, width: winWidth, height: winHeight }, false);
     mainWindow.show();
     mainWindow.focus();
-    mainWindow.webContents.send('window:shown', { side: isLeft ? 'left' : 'right', expanded: false });
+    mainWindow.webContents.send('window:shown', { side: isLeft ? 'left' : 'right', expanded: false, source });
   }
 }
 

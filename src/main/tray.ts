@@ -129,7 +129,7 @@ export function createTray(): void {
   tray = new Tray(icon);
   tray.setToolTip('whim');
   tray.setContextMenu(buildContextMenu());
-  tray.on('click', () => toggleWindow());
+  tray.on('click', () => toggleWindow('tray'));
 
   // Keep the menu fresh as workers and canvases come and go.
   unsubscribers.push(onAgentListChanged(scheduleRebuild));

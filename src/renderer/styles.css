@@ -271,6 +271,319 @@ body {
   transition: none !important;
 }
 
+/* ── Quick start tour (pre-setup hotkey + tray coach) ──── */
+
+.tour-view {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px 16px;
+}
+
+.tour-view.hidden {
+  display: none;
+}
+
+.tour-content {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 360px;
+  width: 100%;
+}
+
+.tour-header {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.tour-icon {
+  display: inline-flex;
+  opacity: 0.9;
+}
+.tour-header h1 {
+  font-family: 'Fraunces', Georgia, serif;
+  font-style: italic;
+  font-weight: 500;
+  font-size: var(--fs-section);
+  color: var(--text-strong);
+}
+.tour-subtitle {
+  font-size: var(--fs-label);
+  line-height: var(--lh-body);
+  color: var(--text-muted);
+}
+
+.tour-progress {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.tour-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--card-inner-bg);
+  box-shadow: inset 0 0 0 1px var(--color-accent-border);
+  transition: background var(--motion-base) var(--ease-standard);
+}
+.tour-dot.active { background: var(--color-accent); }
+.tour-dot.done { background: var(--color-accent); opacity: 0.5; }
+
+.tour-step {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  border-radius: var(--card-radius);
+  background: var(--card-inner-bg);
+  border: var(--card-inner-border);
+}
+.tour-step.hidden { display: none; }
+
+.tour-step-eyebrow {
+  font-size: var(--fs-caption);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+.tour-step-title {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--text-strong);
+}
+.tour-step-text {
+  font-size: var(--fs-label);
+  line-height: var(--lh-body);
+  color: var(--text-muted);
+}
+
+.tour-keycap-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.tour-keycap {
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-strong);
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--card-bg, rgba(255, 255, 255, 0.7));
+  border: 1px solid var(--color-accent-border);
+  box-shadow: 0 2px 0 var(--color-accent-border);
+  cursor: pointer;
+  transition: transform var(--motion-fast) var(--ease-standard),
+              box-shadow var(--motion-fast) var(--ease-standard);
+}
+.tour-keycap:hover { transform: translateY(-1px); }
+.tour-keycap:active { transform: translateY(1px); box-shadow: none; }
+.tour-keycap.recording {
+  color: var(--color-accent-text);
+  border-style: dashed;
+  animation: tourPulse 1.2s ease-in-out infinite;
+}
+
+.tour-hint {
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+  color: var(--text-faint);
+}
+.tour-hint.warn { color: var(--color-warning, #d29922); }
+
+.tour-checks {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 0;
+}
+.tour-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-label);
+  color: var(--text-muted);
+}
+.tour-check-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  color: transparent;
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--color-accent-border);
+  transition: background var(--motion-base) var(--ease-standard),
+              color var(--motion-base) var(--ease-standard);
+}
+.tour-check.done { color: var(--text-default); }
+.tour-check.done .tour-check-mark {
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  box-shadow: none;
+}
+.tour-check.done .tour-check-mark::after { content: '✓'; }
+.tour-check.done .tour-check-text { text-decoration: line-through; opacity: 0.7; }
+.tour-check.active .tour-check-mark { animation: tourPulse 1.4s ease-in-out infinite; }
+
+.tour-inline-keys {
+  font-weight: 600;
+  color: var(--text-default);
+}
+
+.tour-tray-illustration {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 0 4px;
+}
+.tour-view.tray-bottom .tour-tray-illustration { flex-direction: column-reverse; }
+.tour-tray-arrow {
+  font-size: 16px;
+  color: var(--color-accent-text);
+  animation: tourNudge 1.6s ease-in-out infinite;
+}
+.tour-tray-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--card-bg, rgba(255, 255, 255, 0.7));
+  border: var(--card-inner-border);
+}
+.tour-tray-blob {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--text-faint);
+  opacity: 0.35;
+}
+.tour-tray-mark {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 6px;
+  box-shadow: 0 0 0 2px var(--color-accent);
+  animation: tourPulse 1.6s ease-in-out infinite;
+}
+.tour-tray-caption {
+  font-size: var(--fs-caption);
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.tour-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.tour-primary-btn {
+  width: 100%;
+  padding: 10px 16px;
+  font-family: inherit;
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--color-accent-contrast);
+  background: var(--color-accent);
+  border: none;
+  border-radius: var(--btn-radius);
+  cursor: pointer;
+  transition: background var(--motion-base) var(--ease-standard),
+              opacity var(--motion-base) var(--ease-standard);
+}
+.tour-primary-btn:hover:not(:disabled) { background: var(--color-accent-hover); }
+.tour-primary-btn:disabled { opacity: 0.4; cursor: default; }
+
+.tour-secondary-btn {
+  width: 100%;
+  padding: 8px 14px;
+  font-family: inherit;
+  font-size: var(--fs-label);
+  color: var(--text-default);
+  background: transparent;
+  border: var(--card-inner-border);
+  border-radius: var(--btn-radius);
+  cursor: pointer;
+}
+.tour-secondary-btn:hover { background: var(--card-inner-bg); }
+.tour-secondary-btn.hidden { display: none; }
+
+.tour-link-btn {
+  font-family: inherit;
+  font-size: var(--fs-caption);
+  color: var(--text-faint);
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.tour-link-btn:hover { color: var(--text-default); }
+.tour-link-btn.hidden { display: none; }
+
+.tour-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.tour-footer-note {
+  font-size: var(--fs-caption);
+  color: var(--text-faint);
+}
+.tour-footer-note kbd {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 4px;
+  font-family: inherit;
+  font-weight: 600;
+  text-align: center;
+  background: var(--card-inner-bg);
+  border: var(--card-inner-border);
+  border-radius: 4px;
+}
+
+@keyframes tourPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@keyframes tourNudge {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+.tour-view.tray-bottom .tour-tray-arrow { animation: tourNudgeDown 1.6s ease-in-out infinite; }
+@keyframes tourNudgeDown {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(4px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-keycap.recording,
+  .tour-check.active .tour-check-mark,
+  .tour-tray-mark,
+  .tour-tray-arrow { animation: none; }
+}
+
 /* ── Welcome / Onboarding View ─────────────────────────── */
 
 .welcome-view {
@@ -4163,6 +4476,28 @@ body.dark .help-modal { background: rgba(32, 32, 38, 0.96); }
   color: var(--text-muted);
 }
 .help-keys { display: inline-flex; gap: 3px; flex: none; }
+
+.help-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-7);
+}
+.help-footer .help-cta { margin-top: 0; flex: 1; }
+
+.help-secondary {
+  flex: none;
+  padding: var(--space-4) var(--space-5);
+  font-family: inherit;
+  font-size: var(--fs-label);
+  color: var(--text-default);
+  background: transparent;
+  border: var(--card-inner-border);
+  border-radius: var(--btn-radius);
+  cursor: pointer;
+  transition: background var(--motion-base) var(--ease-standard);
+}
+.help-secondary:hover { background: var(--card-inner-bg); }
 
 .help-cta {
   margin-top: var(--space-7);
