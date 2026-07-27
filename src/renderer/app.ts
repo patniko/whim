@@ -112,13 +112,29 @@ interface DiscoveredMcpServer {
   url?: string;
 }
 
+type InterfaceScope = 'loopback' | 'private' | 'vpn' | 'public';
+
 interface WebRemoteInterface {
   name: string;
   address: string;
   family: 'IPv4' | 'IPv6';
   internal: boolean;
-  tailscale: boolean;
+  scope: InterfaceScope;
   label: string;
+}
+
+type WebRemoteBindSelection =
+  | { kind: 'interface'; interfaceName: string; family: 'IPv4' | 'IPv6' }
+  | { kind: 'address'; address: string }
+  | { kind: 'all'; family: 'IPv4' | 'IPv6' };
+
+interface WebRemoteBindingStatus {
+  selection: WebRemoteBindSelection;
+  label: string;
+  scope: InterfaceScope;
+  state: 'listening' | 'pending' | 'failed';
+  addresses: string[];
+  detail: string | null;
 }
 
 interface WebRemoteState {
@@ -126,7 +142,8 @@ interface WebRemoteState {
   running: boolean;
   port: number;
   token: string;
-  bindAddresses: string[];
+  selections: WebRemoteBindSelection[];
+  bindings: WebRemoteBindingStatus[];
   interfaces: WebRemoteInterface[];
   urls: string[];
   qrDataUrl: string | null;
@@ -153,7 +170,7 @@ interface WhimAPI {
   setSetting(key: string, value: string): Promise<string | null | undefined>;
   getWebRemoteState(): Promise<WebRemoteState>;
   setWebRemoteEnabled(enabled: boolean): Promise<WebRemoteState>;
-  setWebRemoteConfig(config: { port?: number; bindAddresses?: string[] }): Promise<WebRemoteState | { error: string }>;
+  setWebRemoteConfig(config: { port?: number; selections?: WebRemoteBindSelection[] }): Promise<WebRemoteState | { error: string }>;
   regenerateWebRemoteToken(): Promise<WebRemoteState>;
   listWebRemoteInterfaces(): Promise<WebRemoteInterface[]>;
   getHotkeys(): Promise<Record<string, string>>;
@@ -4805,19 +4822,81 @@ function setWebRemoteStatus(message: string, error = false): void {
   webRemoteStatus.classList.toggle('web-remote-error', error);
 }
 
-function selectedWebRemoteAddresses(): string[] {
-  if (!webRemoteInterfaceList) return [];
-  return Array.from(webRemoteInterfaceList.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked'))
-    .map(input => input.value);
+const SCOPE_WARNINGS: Record<InterfaceScope, string> = {
+  loopback: 'Only reachable from this machine.',
+  private: 'Reachable by any device on this local network.',
+  vpn: 'Reachable by devices on this VPN or tunnel.',
+  public: 'Warning: this address may be reachable from the public internet.',
+};
+
+const BINDING_STATE_LABELS: Record<WebRemoteBindingStatus['state'], string> = {
+  listening: 'Listening',
+  pending: 'Waiting for interface',
+  failed: 'Failed',
+};
+
+/**
+ * Selections are keyed by a stable string so the checkbox list can round-trip
+ * them without smuggling raw addresses through the DOM. Addresses change; the
+ * user's intent shouldn't.
+ */
+function selectionKey(selection: WebRemoteBindSelection): string {
+  switch (selection.kind) {
+    case 'interface': return `i:${selection.interfaceName}:${selection.family}`;
+    case 'address': return `a:${selection.address}`;
+    case 'all': return `*:${selection.family}`;
+  }
 }
 
+let webRemoteSelectionIndex = new Map<string, WebRemoteBindSelection>();
+
+function selectedWebRemoteSelections(): WebRemoteBindSelection[] {
+  if (!webRemoteInterfaceList) return [];
+  return Array.from(webRemoteInterfaceList.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked'))
+    .map(input => webRemoteSelectionIndex.get(input.value))
+    .filter((selection): selection is WebRemoteBindSelection => selection !== undefined);
+}
+
+/**
+ * Build the option list from the union of live interfaces and saved selections,
+ * so an interface that is currently down still shows up (checked, pending)
+ * rather than silently vanishing from the user's configuration.
+ */
 function renderWebRemoteInterfaces(state: WebRemoteState): void {
   if (!webRemoteInterfaceList) return;
   webRemoteInterfaceList.innerHTML = '';
+  webRemoteSelectionIndex = new Map();
 
-  const selected = new Set(state.bindAddresses);
-  const interfaces = state.interfaces.filter(iface => iface.family === 'IPv4');
-  if (interfaces.length === 0) {
+  const bindingByKey = new Map(state.bindings.map(binding => [selectionKey(binding.selection), binding]));
+  const selectedKeys = new Set(state.selections.map(selectionKey));
+
+  type Option = { key: string; selection: WebRemoteBindSelection; label: string; scope: InterfaceScope };
+  const options: Option[] = [];
+  const seen = new Set<string>();
+
+  const push = (selection: WebRemoteBindSelection, label: string, scope: InterfaceScope) => {
+    const key = selectionKey(selection);
+    if (seen.has(key)) return;
+    seen.add(key);
+    options.push({ key, selection, label, scope });
+  };
+
+  for (const iface of state.interfaces) {
+    if (iface.family !== 'IPv4') continue;
+    const selection: WebRemoteBindSelection = iface.scope === 'loopback'
+      ? { kind: 'address', address: iface.address }
+      : { kind: 'interface', interfaceName: iface.name, family: iface.family };
+    push(selection, iface.label, iface.scope);
+  }
+
+  for (const selection of state.selections) {
+    const binding = bindingByKey.get(selectionKey(selection));
+    push(selection, binding?.label ?? describeSelection(selection), binding?.scope ?? 'private');
+  }
+
+  push({ kind: 'all', family: 'IPv4' }, 'All IPv4 interfaces (0.0.0.0)', 'public');
+
+  if (options.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'settings-hint';
     empty.textContent = 'No network interfaces detected.';
@@ -4825,23 +4904,42 @@ function renderWebRemoteInterfaces(state: WebRemoteState): void {
     return;
   }
 
-  for (const iface of interfaces) {
+  for (const option of options) {
+    webRemoteSelectionIndex.set(option.key, option.selection);
+
     const label = document.createElement('label');
     label.className = 'settings-checkbox-label web-remote-interface-option';
 
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
-    checkbox.value = iface.address;
-    checkbox.checked = selected.has(iface.address);
+    checkbox.value = option.key;
+    checkbox.checked = selectedKeys.has(option.key);
     label.appendChild(checkbox);
 
     const text = document.createElement('span');
-    text.textContent = iface.label;
-    if (!iface.internal && !iface.tailscale) {
-      text.title = 'Plain HTTP on raw LAN. Prefer Tailscale unless you trust this network.';
-    }
+    text.textContent = option.label;
+    text.title = SCOPE_WARNINGS[option.scope];
     label.appendChild(text);
+
+    const binding = bindingByKey.get(option.key);
+    if (binding && state.enabled) {
+      const status = document.createElement('span');
+      status.className = `web-remote-binding-state web-remote-binding-${binding.state}`;
+      status.textContent = binding.state === 'listening' && binding.addresses.length > 0
+        ? `${BINDING_STATE_LABELS[binding.state]} on ${binding.addresses.join(', ')}:${state.port}`
+        : `${BINDING_STATE_LABELS[binding.state]} — ${binding.detail}`;
+      label.appendChild(status);
+    }
+
     webRemoteInterfaceList.appendChild(label);
+  }
+}
+
+function describeSelection(selection: WebRemoteBindSelection): string {
+  switch (selection.kind) {
+    case 'interface': return `${selection.interfaceName} (${selection.family}, not currently available)`;
+    case 'address': return selection.address;
+    case 'all': return `All ${selection.family} interfaces`;
   }
 }
 
@@ -4875,6 +4973,14 @@ function renderWebRemoteState(state: WebRemoteState): void {
     setWebRemoteStatus('Remote web access is off.');
   } else if (state.running) {
     setWebRemoteStatus('Remote web access is running. Scan the QR code from your phone.');
+  } else if (state.bindings.some(binding => binding.state === 'listening')) {
+    // Partially bound: serving on what's up, still waiting on the rest.
+    const waiting = state.bindings.filter(binding => binding.state !== 'listening');
+    setWebRemoteStatus(
+      `Running, but ${waiting.length} selected interface${waiting.length === 1 ? '' : 's'} not yet bound: `
+        + waiting.map(binding => `${binding.label} — ${binding.detail}`).join('; '),
+      true,
+    );
   } else {
     setWebRemoteStatus(state.error || 'Remote web access is enabled but not running.', true);
   }
@@ -4904,9 +5010,13 @@ if (webRemoteEnabledCb) {
 if (webRemoteSaveBtn) {
   webRemoteSaveBtn.addEventListener('click', async () => {
     const port = Number(webRemotePortInput?.value || 0);
-    const bindAddresses = selectedWebRemoteAddresses();
+    const selections = selectedWebRemoteSelections();
+    if (selections.length === 0) {
+      setWebRemoteStatus('Select at least one network interface.', true);
+      return;
+    }
     setWebRemoteStatus('Saving remote web settings…');
-    const result = await whimAPI.setWebRemoteConfig({ port, bindAddresses });
+    const result = await whimAPI.setWebRemoteConfig({ port, selections });
     if ('error' in result) {
       setWebRemoteStatus(result.error, true);
       return;

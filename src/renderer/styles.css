@@ -1639,7 +1639,20 @@ body.dark .sandbox-block-banner-btn:hover {
 
 .web-remote-interface-option {
   white-space: normal;
+  flex-wrap: wrap;
 }
+
+.web-remote-binding-state {
+  flex-basis: 100%;
+  margin-left: 22px;
+  font-size: var(--fs-caption, 11px);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  opacity: 0.85;
+}
+
+.web-remote-binding-listening { color: #157f3b; }
+.web-remote-binding-pending { color: #9a6a00; }
+.web-remote-binding-failed { color: #b91414; }
 
 .web-remote-token-row {
   align-items: stretch;
@@ -7014,6 +7027,9 @@ body.dark .settings-row select option { background: #1c1c20; color: #e0e0e0; }
 body.dark .web-remote-settings { background: rgba(124, 102, 220, 0.08); border-color: rgba(124, 102, 220, 0.18); }
 body.dark .web-remote-url { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.78); }
 body.dark .web-remote-error { color: #ff9c9c; }
+body.dark .web-remote-binding-listening { color: #6ee7a0; }
+body.dark .web-remote-binding-pending { color: #f0c46a; }
+body.dark .web-remote-binding-failed { color: #ff9c9c; }
 body.dark .workspace-path { color: rgba(255, 255, 255, 0.6); }
 body.dark .workspace-path.clickable:hover { color: rgba(255, 255, 255, 0.85); }
 

@@ -8,6 +8,7 @@ import type {
   SandboxPolicy,
   HotkeyConfig,
   WebRemoteInterface,
+  WebRemoteBindSelection,
   WebRemoteState,
 } from '../shared/ipc-contract';
 import type { ChatEvent } from '../shared/chat-types';
@@ -50,7 +51,7 @@ export interface WhimAPI {
   setSetting(key: string, value: string): Promise<IpcCommandResult<'settings:set'>>;
   getWebRemoteState(): Promise<WebRemoteState>;
   setWebRemoteEnabled(enabled: boolean): Promise<WebRemoteState>;
-  setWebRemoteConfig(config: { port?: number; bindAddresses?: string[] }): Promise<WebRemoteState | { error: string }>;
+  setWebRemoteConfig(config: { port?: number; selections?: WebRemoteBindSelection[] }): Promise<WebRemoteState | { error: string }>;
   regenerateWebRemoteToken(): Promise<WebRemoteState>;
   listWebRemoteInterfaces(): Promise<WebRemoteInterface[]>;
 

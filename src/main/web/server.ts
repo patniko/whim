@@ -6,14 +6,15 @@ import * as path from 'path';
 import type { Duplex } from 'stream';
 import * as QRCode from 'qrcode';
 import { WebSocket, WebSocketServer } from 'ws';
-import type { WebRemoteState } from '../../shared/ipc-contract';
+import type {
+  WebRemoteBindingStatus,
+  WebRemoteBindSelection,
+  WebRemoteState,
+} from '../../shared/ipc-contract';
 import {
-  defaultWebRemoteBindAddresses,
   ensureWebRemoteToken,
   getConfig,
   getConfigValue,
-  listWebRemoteInterfaces,
-  normalizeWebRemoteBindAddresses,
   normalizeWebRemotePort,
 } from '../config';
 import {
@@ -22,14 +23,10 @@ import {
   getRemoteAddress,
   WebRemoteAuthenticator,
 } from './auth';
+import { WebRemoteBinder, type BoundListener } from './binder';
+import { listWebRemoteInterfaces, normalizeBindSelections, resolveBindSelections } from './interfaces';
 import { GatewayError, invokeWebRemoteCommand } from './gateway';
 import { subscribeWebRemoteEvents } from './event-hub';
-
-interface Binding {
-  address: string;
-  server: http.Server;
-  wss: WebSocketServer;
-}
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -42,11 +39,29 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 const MAX_BODY_BYTES = 1_000_000;
+
+/**
+ * Slowloris / half-open socket protection. Without these a stalled client can
+ * hold a connection open indefinitely.
+ */
+const HEADERS_TIMEOUT_MS = 20_000;
+const REQUEST_TIMEOUT_MS = 60_000;
+const KEEP_ALIVE_TIMEOUT_MS = 30_000;
+
 const clients = new Set<WebSocket>();
-let bindings: Binding[] = [];
 let lastError: string | null = null;
 
 const authenticator = new WebRemoteAuthenticator(() => getConfigValue('webRemoteToken'));
+
+const binder = new WebRemoteBinder({
+  listen: (address, port) => startListener(address, port),
+  onChange: () => {
+    const failed = binder.status().filter((entry) => entry.state === 'failed');
+    lastError = failed.length > 0
+      ? failed.map((entry) => `${entry.label}: ${entry.detail}`).join('; ')
+      : null;
+  },
+});
 
 export async function syncWebRemoteServer(): Promise<WebRemoteState> {
   if (getConfigValue('webRemoteEnabled')) {
@@ -69,8 +84,6 @@ export async function restartWebRemoteServer(): Promise<WebRemoteState> {
 }
 
 export async function startWebRemoteServer(): Promise<void> {
-  await stopWebRemoteServer();
-
   const workspace = getConfigValue('workspace');
   if (!workspace) {
     throw new Error('Select a workspace before enabling web remote access.');
@@ -83,23 +96,27 @@ export async function startWebRemoteServer(): Promise<void> {
 
   const config = getConfig();
   const port = normalizeWebRemotePort(config.webRemotePort);
-  const addresses = normalizeWebRemoteBindAddresses(config.webRemoteBindAddresses);
-  const bindAddresses = addresses.length > 0 ? addresses : defaultWebRemoteBindAddresses();
-  const errors: string[] = [];
+  const selections = normalizeBindSelections(config.webRemoteBindSelections);
 
-  for (const address of bindAddresses) {
-    try {
-      bindings.push(await startBinding(address, port, bindAddresses));
-    } catch (err) {
-      errors.push(`${address}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+  lastError = null;
+  if (binder.isActive()) {
+    await binder.update(selections, port);
+  } else {
+    await binder.start(selections, port);
   }
 
-  if (bindings.length === 0) {
-    throw new Error(errors.length ? errors.join('; ') : 'No bind addresses are available.');
+  // Nothing bound at all is a hard failure. A *partially* bound state is not:
+  // the remaining interfaces may simply not be up yet, and the binder will
+  // attach to them as soon as they appear. That case is reported through
+  // per-selection status rather than by refusing to run.
+  if (binder.boundAddresses().length === 0) {
+    const unbound = binder.status().filter((entry) => entry.state !== 'listening');
+    throw new Error(
+      unbound.length > 0
+        ? unbound.map((entry) => `${entry.label}: ${entry.detail}`).join('; ')
+        : 'No bind addresses are available.',
+    );
   }
-
-  lastError = errors.length ? errors.join('; ') : null;
 }
 
 export async function stopWebRemoteServer(): Promise<void> {
@@ -108,23 +125,30 @@ export async function stopWebRemoteServer(): Promise<void> {
     client.terminate();
   }
   clients.clear();
+  await binder.stop();
+}
 
-  const closing = bindings.map(({ server, wss }) => new Promise<void>((resolve) => {
-    wss.close(() => {
-      server.close(() => resolve());
-    });
-  }));
-  bindings = [];
-  await Promise.all(closing);
+/** Live listeners, exposed for diagnostics and tests. */
+export function listWebRemoteListeners(): BoundListener[] {
+  return binder.listening();
+}
+
+/**
+ * Force an immediate re-resolve of selections against the current network.
+ * Called on wake from sleep, where interfaces routinely change while the
+ * poll timer was suspended.
+ */
+export async function refreshWebRemoteBindings(): Promise<void> {
+  await binder.refresh();
 }
 
 export async function getWebRemoteState(): Promise<WebRemoteState> {
   const config = getConfig();
   const token = ensureWebRemoteToken();
-  const bindAddresses = config.webRemoteBindAddresses.length > 0
-    ? config.webRemoteBindAddresses
-    : defaultWebRemoteBindAddresses();
-  const urls = buildRemoteUrls(bindAddresses, config.webRemotePort, token);
+  const selections = normalizeBindSelections(config.webRemoteBindSelections);
+  const bindings = binder.isActive() ? binder.status() : previewStatus(selections);
+
+  const urls = buildRemoteUrls(bindings, config.webRemotePort, token);
   const qrUrl = urls.find((url) => !url.includes('127.0.0.1') && !url.includes('[::1]')) ?? urls[0] ?? null;
 
   let qrDataUrl: string | null = null;
@@ -138,10 +162,12 @@ export async function getWebRemoteState(): Promise<WebRemoteState> {
 
   return {
     enabled: config.webRemoteEnabled,
-    running: bindings.length > 0,
+    // Honest: partially-bound is not "running".
+    running: binder.isActive() && binder.isFullyBound(),
     port: config.webRemotePort,
     token,
-    bindAddresses,
+    selections,
+    bindings,
     interfaces: listWebRemoteInterfaces(),
     urls,
     qrDataUrl,
@@ -149,18 +175,36 @@ export async function getWebRemoteState(): Promise<WebRemoteState> {
   };
 }
 
-function startBinding(address: string, port: number, allowedHosts: string[]): Promise<Binding> {
+/** Status shown while the server is stopped: what *would* be bound. */
+function previewStatus(selections: WebRemoteBindSelection[]): WebRemoteBindingStatus[] {
+  return resolveBindSelections(selections).map((entry) => ({
+    selection: entry.selection,
+    label: entry.label,
+    scope: entry.scope,
+    state: 'pending' as const,
+    addresses: entry.addresses,
+    detail: entry.addresses.length > 0
+      ? 'Not started.'
+      : 'Interface is not currently available.',
+  }));
+}
+
+function startListener(address: string, port: number): Promise<BoundListener> {
   const wss = new WebSocketServer({ noServer: true });
   const server = http.createServer((req, res) => {
-    void handleHttp(req, res, allowedHosts).catch((err) => {
+    void handleHttp(req, res).catch((err) => {
       const status = err instanceof GatewayError ? err.status : 500;
       const message = err instanceof Error ? err.message : 'Internal server error';
       sendJson(res, status, { ok: false, error: { code: 'request_failed', message } });
     });
   });
 
+  server.headersTimeout = HEADERS_TIMEOUT_MS;
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
+  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
+
   server.on('upgrade', (req, socket, head) => {
-    void handleUpgrade(req, socket, head, wss, allowedHosts);
+    void handleUpgrade(req, socket, head, wss);
   });
 
   wss.on('connection', (ws) => {
@@ -171,14 +215,12 @@ function startBinding(address: string, port: number, allowedHosts: string[]): Pr
         ws.send(JSON.stringify({ type: 'event', event }));
       }
     });
-    ws.on('close', () => {
+    const cleanup = () => {
       unsubscribe();
       clients.delete(ws);
-    });
-    ws.on('error', () => {
-      unsubscribe();
-      clients.delete(ws);
-    });
+    };
+    ws.on('close', cleanup);
+    ws.on('error', cleanup);
   });
 
   return new Promise((resolve, reject) => {
@@ -189,7 +231,16 @@ function startBinding(address: string, port: number, allowedHosts: string[]): Pr
     const onListening = () => {
       server.off('error', onError);
       server.on('error', (err) => console.warn('[web-remote] Server error:', err));
-      resolve({ address, server, wss });
+      resolve({
+        address,
+        port,
+        server,
+        close: () => new Promise<void>((resolveClose) => {
+          wss.close(() => {
+            server.close(() => resolveClose());
+          });
+        }),
+      });
     };
     server.once('error', onError);
     server.once('listening', onListening);
@@ -197,9 +248,9 @@ function startBinding(address: string, port: number, allowedHosts: string[]): Pr
   });
 }
 
-async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse, allowedHosts: string[]): Promise<void> {
+async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const url = requestUrl(req);
-  if (!isAllowedHost(req.headers.host, allowedHosts)) {
+  if (!isAllowedHost(req.headers.host)) {
     sendJson(res, 403, { ok: false, error: { code: 'host_not_allowed', message: 'Host header is not allowed.' } });
     return;
   }
@@ -242,10 +293,9 @@ async function handleUpgrade(
   socket: Duplex,
   head: Buffer,
   wss: WebSocketServer,
-  allowedHosts: string[],
 ): Promise<void> {
   const url = requestUrl(req);
-  if (url.pathname !== '/api/events' || !isAllowedHost(req.headers.host, allowedHosts)) {
+  if (url.pathname !== '/api/events' || !isAllowedHost(req.headers.host)) {
     socket.destroy();
     return;
   }
@@ -339,18 +389,24 @@ function requestUrl(req: http.IncomingMessage): URL {
   return new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 }
 
-function buildRemoteUrls(bindAddresses: string[], port: number, token: string): string[] {
-  return bindAddresses.map((address) => {
-    const host = address.includes(':') ? `[${address}]` : address;
-    return `http://${host}:${port}/?token=${encodeURIComponent(token)}`;
-  });
+function buildRemoteUrls(bindings: WebRemoteBindingStatus[], port: number, token: string): string[] {
+  const urls: string[] = [];
+  for (const binding of bindings) {
+    for (const address of binding.addresses) {
+      if (address === '0.0.0.0' || address === '::') continue;
+      const host = address.includes(':') ? `[${address}]` : address;
+      urls.push(`http://${host}:${port}/?token=${encodeURIComponent(token)}`);
+    }
+  }
+  return [...new Set(urls)];
 }
 
-function isAllowedHost(hostHeader: string | undefined, bindAddresses: string[]): boolean {
+function isAllowedHost(hostHeader: string | undefined): boolean {
   if (!hostHeader) return true;
   const host = parseHostHeader(hostHeader);
   const hostname = os.hostname().toLowerCase();
   const shortHostname = hostname.split('.')[0];
+  const bound = binder.boundAddresses();
   const allowed = new Set([
     'localhost',
     '127.0.0.1',
@@ -358,12 +414,11 @@ function isAllowedHost(hostHeader: string | undefined, bindAddresses: string[]):
     hostname,
     shortHostname,
     `${shortHostname}.local`,
-    ...bindAddresses.map((address) => address.toLowerCase()),
+    ...bound.map((address) => address.toLowerCase()),
   ]);
 
   if (allowed.has(host)) return true;
-  if (host.endsWith('.ts.net')) return true;
-  return net.isIP(host) !== 0 && bindAddresses.includes(host);
+  return net.isIP(host) !== 0 && bound.includes(host);
 }
 
 function parseHostHeader(hostHeader: string): string {

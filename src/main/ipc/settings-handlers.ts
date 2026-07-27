@@ -3,12 +3,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { setAIModel, listAvailableModels, scheduleCopilotReinit, previewSandboxConfig, getRuntimeStatus, testRuntimeConnection } from '../ai';
 import { resolveCopilotCliPath, invalidateCliPath, checkCliCompatibility, resolveCommandOnPath, resolveCmdToJs, isCliMxcCapable } from '../session';
-import { getConfigValue, setConfigValue, getConfig, getResolvedHotkeys, DEFAULT_PERSONAS, DEFAULT_HOTKEYS, HOTKEY_LABELS, rotateWebRemoteToken, normalizeWebRemotePort, normalizeWebRemoteBindAddresses, listWebRemoteInterfaces, type AgentPersona, type CliRuntime, type CliSource, type HotkeyConfig } from '../config';
+import { getConfigValue, setConfigValue, getConfig, getResolvedHotkeys, DEFAULT_PERSONAS, DEFAULT_HOTKEYS, HOTKEY_LABELS, rotateWebRemoteToken, normalizeWebRemotePort, type AgentPersona, type CliRuntime, type CliSource, type HotkeyConfig } from '../config';
 import { listDiscoveredMcpServers } from '../mcp';
 import { validateMcpServers, validateCliTools, validateSandboxPolicy } from '../validators';
 import { onAutoHideSidePaneChanged } from '../window-manager';
 import { setAutoDownload } from '../update-service';
 import { getWebRemoteState, restartWebRemoteServer, syncWebRemoteServer } from '../web/server';
+import { listWebRemoteInterfaces, normalizeBindSelections } from '../web/interfaces';
 
 const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -98,7 +99,7 @@ export function registerSettingsHandlers(): void {
       return { error: 'invalid payload' };
     }
 
-    const raw = next as { port?: unknown; bindAddresses?: unknown };
+    const raw = next as { port?: unknown; selections?: unknown };
     if (raw.port !== undefined) {
       const port = normalizeWebRemotePort(raw.port);
       if (port !== Number(raw.port)) {
@@ -107,12 +108,13 @@ export function registerSettingsHandlers(): void {
       setConfigValue('webRemotePort', port);
     }
 
-    if (raw.bindAddresses !== undefined) {
-      const bindAddresses = normalizeWebRemoteBindAddresses(raw.bindAddresses);
-      if (bindAddresses.length === 0) {
+    if (raw.selections !== undefined) {
+      if (!Array.isArray(raw.selections) || raw.selections.length === 0) {
         return { error: 'Select at least one network interface.' };
       }
-      setConfigValue('webRemoteBindAddresses', bindAddresses);
+      // Shape validation only — a selected interface that happens to be down
+      // right now is still a valid choice and must be preserved.
+      setConfigValue('webRemoteBindSelections', normalizeBindSelections(raw.selections));
     }
 
     return restartWebRemoteServer();

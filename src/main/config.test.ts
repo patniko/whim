@@ -9,7 +9,7 @@ vi.mock('electron', () => ({
   },
 }));
 
-import { loadConfig, getConfig, getConfigValue, setConfigValue, getSessionId, setSessionId, removeSession, saveConfig, DEFAULT_WEB_REMOTE_PORT, isTailscaleAddress, DEFAULT_HOTKEYS, getProfiles, getActiveProfile, getActiveProfileId, getProfileById, upsertProfileForPath, updateProfile, removeProfileById, setActiveProfile, getNextProfile, generateProfileId, getExportDestinations, setExportDestinations, validateExportDestinations, getExportDestinationById, generateExportDestinationId } from './config';
+import { loadConfig, getConfig, getConfigValue, setConfigValue, getSessionId, setSessionId, removeSession, saveConfig, DEFAULT_WEB_REMOTE_PORT, DEFAULT_HOTKEYS, getProfiles, getActiveProfile, getActiveProfileId, getProfileById, upsertProfileForPath, updateProfile, removeProfileById, setActiveProfile, getNextProfile, generateProfileId, getExportDestinations, setExportDestinations, validateExportDestinations, getExportDestinationById, generateExportDestinationId } from './config';
 
 const CONFIG_PATH = path.join('/tmp/space-test-config', 'config.json');
 
@@ -47,10 +47,31 @@ describe('config', () => {
       expect(config.mcpServers).toEqual([]);
     });
 
-    it('detects Tailscale interface addresses', () => {
-      expect(isTailscaleAddress('100.64.0.1')).toBe(true);
-      expect(isTailscaleAddress('100.127.255.254')).toBe(true);
-      expect(isTailscaleAddress('192.168.1.10')).toBe(false);
+    it('defaults web remote bind selections to loopback', () => {
+      const config = loadConfig();
+      expect(config.webRemoteBindSelections).toEqual([{ kind: 'address', address: '127.0.0.1' }]);
+    });
+
+    it('migrates legacy bind addresses into durable selections', () => {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify({
+        webRemoteBindAddresses: ['127.0.0.1', '203.0.113.9'],
+      }));
+      const config = loadConfig();
+      expect(config.webRemoteBindSelections).toEqual([
+        { kind: 'address', address: '127.0.0.1' },
+        { kind: 'address', address: '203.0.113.9' },
+      ]);
+      expect((config as Record<string, unknown>).webRemoteBindAddresses).toBeUndefined();
+    });
+
+    it('preserves saved selections for interfaces that are not currently up', () => {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify({
+        webRemoteBindSelections: [{ kind: 'interface', interfaceName: 'utun99', family: 'IPv4' }],
+      }));
+      const config = loadConfig();
+      expect(config.webRemoteBindSelections).toEqual([
+        { kind: 'interface', interfaceName: 'utun99', family: 'IPv4' },
+      ]);
     });
 
     it('loads existing config and merges with defaults', () => {

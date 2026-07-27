@@ -193,21 +193,52 @@ export interface DiscoveredMcpServer {
   url?: string;
 }
 
+/**
+ * Security scope of a network interface. This — not the vendor or product that
+ * created the interface — is what determines the exposure of binding to it.
+ */
+export type InterfaceScope = 'loopback' | 'private' | 'vpn' | 'public';
+
 export interface WebRemoteInterface {
   name: string;
   address: string;
   family: 'IPv4' | 'IPv6';
   internal: boolean;
-  tailscale: boolean;
+  scope: InterfaceScope;
   label: string;
+}
+
+/**
+ * A persisted "where should this be exposed" choice. Stored as interface
+ * identity rather than a literal address, because addresses change (DHCP,
+ * VPN reconnect, roaming) while the user's intent does not.
+ */
+export type WebRemoteBindSelection =
+  | { kind: 'interface'; interfaceName: string; family: 'IPv4' | 'IPv6' }
+  | { kind: 'address'; address: string }
+  | { kind: 'all'; family: 'IPv4' | 'IPv6' };
+
+export type WebRemoteBindingState = 'listening' | 'pending' | 'failed';
+
+/** Per-selection status, so the UI can explain exactly what is and isn't up. */
+export interface WebRemoteBindingStatus {
+  selection: WebRemoteBindSelection;
+  label: string;
+  scope: InterfaceScope;
+  state: WebRemoteBindingState;
+  addresses: string[];
+  /** Populated when state is 'pending' or 'failed'. */
+  detail: string | null;
 }
 
 export interface WebRemoteState {
   enabled: boolean;
+  /** True only when every selected interface is actually listening. */
   running: boolean;
   port: number;
   token: string;
-  bindAddresses: string[];
+  selections: WebRemoteBindSelection[];
+  bindings: WebRemoteBindingStatus[];
   interfaces: WebRemoteInterface[];
   urls: string[];
   qrDataUrl: string | null;
@@ -292,7 +323,7 @@ export interface IpcCommands {
   'web-remote:get-state': { args: []; result: WebRemoteState };
   'web-remote:set-enabled': { args: [enabled: boolean]; result: WebRemoteState };
   'web-remote:set-config': {
-    args: [config: { port?: number; bindAddresses?: string[] }];
+    args: [config: { port?: number; selections?: WebRemoteBindSelection[] }];
     result: WebRemoteState | { error: string };
   };
   'web-remote:regenerate-token': { args: []; result: WebRemoteState };
