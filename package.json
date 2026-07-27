@@ -17,8 +17,8 @@
     "release:preflight": "node scripts/release-preflight.js",
     "smoke:package": "node scripts/verify-package.js",
     "postinstall": "node -e \"if(process.platform==='darwin'){require('child_process').execSync('bash scripts/codesign-dev.sh',{stdio:'inherit'})}else{console.log('[codesign] Skipping — not macOS')}\"",
-    "rebuild:electron": "node -e \"const v=require('electron/package.json').version; const fs=require('fs'); const p=require('path'); const marker=p.join('node_modules','better-sqlite3','.electron-target'); if(fs.existsSync(marker)&&fs.readFileSync(marker,'utf8')===v+'_'+process.arch){console.log('[rebuild] better-sqlite3 already built for Electron '+v+', skipping');process.exit(0)} const {execSync}=require('child_process'); process.stdout.write('[rebuild] Rebuilding better-sqlite3 for Electron '+v+'...'); execSync('npx --yes node-gyp rebuild --target='+v+' --arch='+process.arch+' --dist-url=https://electronjs.org/headers --runtime=electron', {cwd:'node_modules/better-sqlite3', stdio:'pipe'}); fs.writeFileSync(marker,v+'_'+process.arch); console.log(' done')\"",
-    "rebuild:node": "node -e \"const fs=require('fs');const cp=require('child_process');const m=require('path').join('node_modules','better-sqlite3','.electron-target');try{if(fs.existsSync(m))fs.unlinkSync(m)}catch(e){console.warn('[rebuild:node] unlink marker:',e.message)}try{cp.execSync('npm rebuild better-sqlite3',{stdio:'pipe'})}catch(e){console.warn('[rebuild:node] rebuild failed (likely a running Electron app holding better_sqlite3.node — stop it and re-run): '+(e.stderr?.toString()||e.message).split('\\n').slice(0,3).join(' '))}\"",
+    "rebuild:electron": "node scripts/ensure-native.js electron",
+    "rebuild:node": "node scripts/ensure-native.js node",
     "pretest": "npm run rebuild:node",
     "start": "npm run build && npm run rebuild:electron && electron .",
     "dev": "npm run build && npm run rebuild:electron && (tsc -p tsconfig.main.json -w --preserveWatchOutput --declaration false --sourceMap false & node scripts/build-renderer.js --watch & node scripts/watch-assets.js & electronmon .)",
@@ -39,7 +39,7 @@
     },
     "files": [
       "dist/**/*",
-      "!node_modules/better-sqlite3/.electron-target"
+      "!node_modules/.cache/whim-native/**"
     ],
     "asarUnpack": [
       "node_modules/@github/copilot/**",
