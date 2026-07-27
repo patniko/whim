@@ -42,6 +42,11 @@ function createSheetAnchor(win: BrowserWindow): BrowserWindow | null {
       show: false,
       frame: false,
       transparent: true,
+      // Without an explicit fully-transparent background the anchor paints as an
+      // opaque rounded rectangle behind the sheet, which is exactly what users see
+      // as a "weird modal" behind the folder picker.
+      backgroundColor: '#00000000',
+      roundedCorners: false,
       hasShadow: false,
       skipTaskbar: true,
       // Deliberately focusable: AppKit expects a sheet's parent to be able to
@@ -55,6 +60,8 @@ function createSheetAnchor(win: BrowserWindow): BrowserWindow | null {
       webPreferences: { nodeIntegration: false, contextIsolation: true },
     });
     anchor.setIgnoreMouseEvents(true);
+    // Give the window a transparent document so it never paints a default surface.
+    void anchor.loadURL('data:text/html,%3Cbody%20style%3D%22background%3Atransparent%22%3E');
     anchor.showInactive();
     return anchor;
   } catch {
