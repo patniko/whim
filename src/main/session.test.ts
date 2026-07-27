@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const { mockExistsSync, mockStatSync, mockMkdirSync, mockExecSync, mockReaddirSync } = vi.hoisted(() => ({
   mockExistsSync: vi.fn<(p: unknown) => boolean>(),
@@ -7,9 +7,8 @@ const { mockExistsSync, mockStatSync, mockMkdirSync, mockExecSync, mockReaddirSy
   mockExecSync: vi.fn(),
   mockReaddirSync: vi.fn<(p: unknown) => string[]>(),
 }));
-
 vi.mock('electron', () => ({
-  app: { getPath: () => '/mock/space-test' },
+  app: { getPath: () => '/mock/space-test', getAppPath: () => '/mock/app' },
 }));
 
 vi.mock('fs', async () => {
@@ -19,7 +18,16 @@ vi.mock('fs', async () => {
 
 vi.mock('child_process', async () => {
   const actual = await vi.importActual<typeof import('child_process')>('child_process');
-  return { ...actual, execSync: mockExecSync };
+  // Route async exec() through the same mock as execSync so tests only have to
+  // describe command behaviour once.
+  const exec = (cmd: string, _opts: unknown, cb: (e: Error | null, stdout: string) => void): void => {
+    try {
+      cb(null, String(mockExecSync(cmd)));
+    } catch (err) {
+      cb(err as Error, '');
+    }
+  };
+  return { ...actual, execSync: mockExecSync, exec };
 });
 
 vi.mock('./config', () => ({
@@ -38,7 +46,7 @@ vi.mock('./workspace', () => ({
   createSpaceFolder: vi.fn(),
 }));
 
-import { resolveCopilotCliPath, invalidateCliPath, checkCopilotCli, launchSession, parseCliVersion, compareVersions, getCopilotCliVersion, checkCliCompatibility, resolveCmdToJs, isCliMxcCapable, invalidateMxcCapability, findLatestSelfUpdatedCli, probeCliVersion, resolveAutoDetectedCliPath, MIN_CLI_VERSION } from './session';
+import { resolveCopilotCliPath, invalidateCliPath, checkCopilotCli, launchSession, parseCliVersion, compareVersions, getCopilotCliVersion, checkCliCompatibility, resolveCmdToJs, isCliMxcCapable, invalidateMxcCapability, findLatestSelfUpdatedCli, findSelfUpdatedClis, discoverCopilotClis, probeCliVersion, resolveAutoDetectedCliPath, MIN_CLI_VERSION } from './session';
 import { getConfigValue } from './config';
 
 const mockGetConfigValue = vi.mocked(getConfigValue);
@@ -234,6 +242,180 @@ describe('session', () => {
       mockStatSync.mockReturnValue({ isDirectory: () => true });
 
       expect(findLatestSelfUpdatedCli()).toBeNull();
+    });
+  });
+
+  // ── findSelfUpdatedClis / discoverCopilotClis ─────────
+
+  describe('findSelfUpdatedClis', () => {
+    const originalPlatform = process.platform;
+    const originalEnv = { ...process.env };
+
+    beforeEach(() => {
+      Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+      process.env.HOME = '/Users/test';
+      delete process.env.COPILOT_CACHE_HOME;
+      delete process.env.COPILOT_HOME;
+      delete process.env.LOCALAPPDATA;
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+      process.env = { ...originalEnv };
+    });
+
+    it('returns every complete bundle, newest first', () => {
+      const base = `/Users/test/.copilot/pkg/darwin-${process.arch}`;
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s === base) return true;
+        return s.endsWith('index.js') || s.endsWith('app.js');
+      });
+      mockReaddirSync.mockImplementation((p: unknown) =>
+        String(p) === base ? ['1.0.58', '1.0.75', '1.0.60'] : []);
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+
+      expect(findSelfUpdatedClis()).toEqual([
+        { path: `${base}/1.0.75/index.js`, version: '1.0.75' },
+        { path: `${base}/1.0.60/index.js`, version: '1.0.60' },
+        { path: `${base}/1.0.58/index.js`, version: '1.0.58' },
+      ]);
+    });
+
+    it('skips half-extracted bundles missing app.js', () => {
+      const base = `/Users/test/.copilot/pkg/darwin-${process.arch}`;
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s === base) return true;
+        if (s === `${base}/1.0.75/index.js`) return true;
+        return s === `${base}/1.0.60/index.js` || s === `${base}/1.0.60/app.js`;
+      });
+      mockReaddirSync.mockImplementation((p: unknown) =>
+        String(p) === base ? ['1.0.75', '1.0.60'] : []);
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+
+      expect(findSelfUpdatedClis()).toEqual([
+        { path: `${base}/1.0.60/index.js`, version: '1.0.60' },
+      ]);
+    });
+
+    it('returns an empty list when no caches exist', () => {
+      mockExistsSync.mockReturnValue(false);
+      expect(findSelfUpdatedClis()).toEqual([]);
+    });
+  });
+
+  describe('discoverCopilotClis', () => {
+    const originalPlatform = process.platform;
+    const originalEnv = { ...process.env };
+
+    beforeEach(() => {
+      Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+      process.env.HOME = '/Users/test';
+      delete process.env.COPILOT_CACHE_HOME;
+      delete process.env.COPILOT_HOME;
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+      process.env = { ...originalEnv };
+    });
+
+    it('lists every install with its version, origin and compatibility', async () => {
+      const cacheBase = `/Users/test/.copilot/pkg/darwin-${process.arch}`;
+      const selfUpdated = `${cacheBase}/1.0.75/index.js`;
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s === cacheBase) return true;
+        if (s.startsWith(cacheBase)) return s.endsWith('index.js') || s.endsWith('app.js');
+        return s === '/opt/homebrew/bin/copilot';
+      });
+      mockReaddirSync.mockImplementation((p: unknown) =>
+        String(p) === cacheBase ? ['1.0.75'] : []);
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+      mockExecSync.mockImplementation((cmd: unknown) => {
+        const s = String(cmd);
+        if (s.includes('which -a') || s.includes('command -v')) throw new Error('not found');
+        if (s.includes(selfUpdated)) return Buffer.from('GitHub Copilot CLI 1.0.75');
+        if (s.includes('/opt/homebrew/bin/copilot')) return Buffer.from('GitHub Copilot CLI 1.0.20');
+        throw new Error('unexpected');
+      });
+
+      const result = await discoverCopilotClis();
+      const paths = result.map(r => r.path);
+      expect(paths).toContain(selfUpdated);
+      expect(paths).toContain('/opt/homebrew/bin/copilot');
+
+      const cache = result.find(r => r.path === selfUpdated)!;
+      expect(cache).toMatchObject({ version: '1.0.75', origin: 'Self-updated', source: 'path', compatible: true });
+
+      const brew = result.find(r => r.path === '/opt/homebrew/bin/copilot')!;
+      expect(brew).toMatchObject({ version: '1.0.20', origin: 'Homebrew', compatible: false });
+    });
+
+    it('collapses duplicate builds of the same self-updated version', async () => {
+      const cacheBase = `/Users/test/.copilot/pkg/darwin-${process.arch}`;
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s === cacheBase) return true;
+        return s.startsWith(cacheBase) && (s.endsWith('index.js') || s.endsWith('app.js'));
+      });
+      mockReaddirSync.mockImplementation((p: unknown) =>
+        String(p) === cacheBase ? ['1.0.75', '1.0.75-2', '1.0.75-1'] : []);
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+      mockExecSync.mockImplementation(() => { throw new Error('not found'); });
+
+      const cacheEntries = (await discoverCopilotClis()).filter(r => r.origin === 'Self-updated');
+      expect(cacheEntries).toEqual([
+        expect.objectContaining({ path: `${cacheBase}/1.0.75-2/index.js`, version: '1.0.75' }),
+      ]);
+    });
+
+    it('uses the cache directory name instead of spawning a version probe', async () => {
+      const cacheBase = `/Users/test/.copilot/pkg/darwin-${process.arch}`;
+      mockExistsSync.mockImplementation((p: unknown) => {
+        const s = String(p);
+        if (s === cacheBase) return true;
+        return s.startsWith(cacheBase) && (s.endsWith('index.js') || s.endsWith('app.js'));
+      });
+      mockReaddirSync.mockImplementation((p: unknown) =>
+        String(p) === cacheBase ? ['1.0.75'] : []);
+      mockStatSync.mockReturnValue({ isDirectory: () => true });
+      mockExecSync.mockImplementation(() => { throw new Error('not found'); });
+
+      const entry = (await discoverCopilotClis()).find(r => r.origin === 'Self-updated')!;
+      expect(entry.version).toBe('1.0.75');
+      // Only PATH/login-shell lookups may spawn — never a `--version` probe of
+      // a cache bundle whose version is already in its directory name.
+      const probes = mockExecSync.mock.calls.filter(c => String(c[0]).includes('--version'));
+      expect(probes).toHaveLength(0);
+    });
+
+    it('deduplicates the same install found through multiple paths', async () => {
+      mockExistsSync.mockImplementation((p: unknown) => String(p) === '/usr/local/bin/copilot');
+      mockReaddirSync.mockReturnValue([]);
+      mockExecSync.mockImplementation((cmd: unknown) => {
+        const s = String(cmd);
+        if (s.includes('which -a')) return Buffer.from('/usr/local/bin/copilot\n');
+        if (s.includes('command -v')) return Buffer.from('/usr/local/bin/copilot');
+        return Buffer.from('GitHub Copilot CLI 1.0.80');
+      });
+
+      const result = await discoverCopilotClis();
+      expect(result.filter(r => r.path === '/usr/local/bin/copilot')).toHaveLength(1);
+    });
+
+    it('ignores node_modules shims found on PATH', async () => {
+      const shim = '/proj/node_modules/.bin/copilot';
+      mockExistsSync.mockImplementation((p: unknown) => String(p) === shim);
+      mockReaddirSync.mockReturnValue([]);
+      mockExecSync.mockImplementation((cmd: unknown) => {
+        const s = String(cmd);
+        if (s.includes('which -a')) return Buffer.from(`${shim}\n`);
+        throw new Error('not found');
+      });
+
+      expect((await discoverCopilotClis()).map(r => r.path)).not.toContain(shim);
     });
   });
 

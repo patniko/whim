@@ -409,7 +409,21 @@ export interface IpcCommands {
       error?: string;
     };
   };
+  'cli:discover': {
+    args: [];
+    result: Array<{
+      path: string;
+      version: string | null;
+      source: 'bundled' | 'path';
+      origin: string;
+      compatible: boolean;
+    }>;
+  };
   'models:list': { args: []; result: Array<{ id: string; name: string }> };
+  'models:list-detailed': {
+    args: [];
+    result: { models: Array<{ id: string; name?: string }>; error: string | null };
+  };
 
   // ── Personas ─────────────────────────────────────────────
   'personas:list': { args: []; result: AgentPersona[] };

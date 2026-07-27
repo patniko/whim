@@ -143,6 +143,10 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
     const { listAgents } = await import('../agent-service');
     return listAgents(expectString(args, 0, 'spaceId'));
   },
+  'models:list-detailed': async () => {
+    const { listModelsDetailed } = await import('../ai');
+    return listModelsDetailed();
+  },
   'personas:list': () => {
     const personas = (getConfigValue('personas') || []) as AgentPersona[];
     return personas.length > 0 ? personas : DEFAULT_PERSONAS;

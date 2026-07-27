@@ -1,12 +1,15 @@
 import { ipcMain, globalShortcut } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
-import { setAIModel, listAvailableModels, scheduleCopilotReinit, previewSandboxConfig, getRuntimeStatus, testRuntimeConnection } from '../ai';
-import { resolveCopilotCliPath, invalidateCliPath, checkCliCompatibility, resolveCommandOnPath, resolveCmdToJs, isCliMxcCapable } from '../session';
+import { setAIModel, listAvailableModels, listModelsDetailed, scheduleCopilotReinit, previewSandboxConfig, getRuntimeStatus, testRuntimeConnection } from '../ai';
+import { resolveCopilotCliPath, invalidateCliPath, checkCliCompatibility, resolveCommandOnPath, resolveCmdToJs, isCliMxcCapable, discoverCopilotClis } from '../session';
+// `normalizeWebRemoteBindAddresses` and `listWebRemoteInterfaces` no longer
+// live in config: bind selections are durable intent resolved at bind time,
+// so both moved to ../web/interfaces (imported below).
 import { getConfigValue, setConfigValue, getConfig, getResolvedHotkeys, DEFAULT_PERSONAS, DEFAULT_HOTKEYS, HOTKEY_LABELS, rotateWebRemoteToken, normalizeWebRemotePort, type AgentPersona, type CliRuntime, type CliSource, type HotkeyConfig } from '../config';
 import { listDiscoveredMcpServers } from '../mcp';
 import { validateMcpServers, validateCliTools, validateSandboxPolicy } from '../validators';
-import { onAutoHideSidePaneChanged } from '../window-manager';
+import { onAutoHideSidePaneChanged, broadcastHotkeysChanged } from '../window-manager';
 import { setAutoDownload } from '../update-service';
 import { getWebRemoteState, restartWebRemoteServer, sessionStore, syncWebRemoteServer } from '../web/server';
 import { listWebRemoteInterfaces, normalizeBindSelections } from '../web/interfaces';
@@ -194,8 +197,16 @@ export function registerSettingsHandlers(): void {
     return testRuntimeConnection();
   });
 
+  ipcMain.handle('cli:discover', async () => {
+    return discoverCopilotClis();
+  });
+
   ipcMain.handle('models:list', async () => {
     return listAvailableModels();
+  });
+
+  ipcMain.handle('models:list-detailed', async () => {
+    return listModelsDetailed();
   });
 
   // Agent Personas
@@ -489,6 +500,7 @@ export function registerSettingsHandlers(): void {
       }
     }
 
+    broadcastHotkeysChanged();
     return { ok: true as const };
   });
 
@@ -514,6 +526,7 @@ export function registerSettingsHandlers(): void {
       registerToggleShortcut(DEFAULT_HOTKEYS.toggleWindow);
     }
 
+    broadcastHotkeysChanged();
     return { ok: true as const, hotkeys: getResolvedHotkeys() };
   });
 }

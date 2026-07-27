@@ -61,8 +61,12 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   'cli:check-mxc-capable': 'deny',
   'cli:runtime-status': 'deny',
   'cli:test-connection': 'deny',
+  // Enumerates CLI installs by absolute path on the host filesystem, and only
+  // feeds the Settings window, which is itself denied.
+  'cli:discover': 'deny',
 
   'models:list': 'allow',
+  'models:list-detailed': 'allow',
 
   // Reading personas is needed to launch an agent; saving one edits the
   // sandbox policy agents run under, which is a privilege change.

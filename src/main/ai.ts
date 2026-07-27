@@ -413,6 +413,9 @@ export async function testRuntimeConnection(timeoutMs = 25_000): Promise<Runtime
 /** In-flight primary init, so concurrent callers share one CLI spawn. */
 let initInFlight: Promise<void> | null = null;
 
+/** Failure reason from the last init attempt; null once one succeeds. */
+let lastInitError: string | null = null;
+
 export function initCopilot(): Promise<void> {
   if (initInFlight) return initInFlight;
   initInFlight = doInitCopilot().finally(() => { initInFlight = null; });
@@ -443,11 +446,13 @@ async function doInitCopilot(): Promise<void> {
     client = new CopilotClient(opts as any);
     await client.start();
     activeRuntimeKey = runtimeKey(runtime);
+    lastInitError = null;
     // Eagerly init the parse session (most commonly used)
     await getParseSession();
     console.log('[copilot-sdk] Client started, parse session created');
   } catch (err) {
     console.error('[copilot-sdk] Failed to initialize primary client:', err);
+    lastInitError = err instanceof Error ? err.message : String(err);
     client = null;
     activeRuntimeKey = null;
     // If the primary client failed (e.g. CLI exited), don't attempt the
@@ -517,6 +522,13 @@ export function getEphemeralCopilotClient(): CopilotClient | null {
  * one — a pointless respawn otherwise. Pass `force` to reinit regardless.
  */
 export async function reinitCopilot(force = false): Promise<void> {
+  // Wait for a start that's already underway. Otherwise shutdownCopilot() sees
+  // a null `client` and tears down nothing, initCopilot() returns the same
+  // in-flight promise, and the app ends up pinned to the *old* runtime the
+  // in-flight init was resolved against.
+  if (initInFlight) {
+    try { await initInFlight; } catch { /* handled below by re-init */ }
+  }
   const key = runtimeKey(resolveRuntimeConnection());
   if (!force && client && activeRuntimeKey === key) {
     console.log('[copilot-sdk] Runtime unchanged; skipping reinit');
@@ -570,12 +582,44 @@ export async function setAIModel(model: string): Promise<void> {
 }
 
 export async function listAvailableModels(): Promise<{ id: string; name?: string }[]> {
-  if (!client) return [];
+  const { models } = await listModelsDetailed();
+  return models;
+}
+
+/**
+ * List models, reporting *why* the list is empty when it is. The plain
+ * {@link listAvailableModels} swallows every failure into `[]`, which left the
+ * onboarding screen showing a bare "No models available" with no way to tell a
+ * still-starting runtime from an unauthenticated CLI.
+ *
+ * Also self-heals the common startup race: a call that lands before (or during)
+ * the first `initCopilot()` waits for it rather than seeing a null client.
+ */
+export async function listModelsDetailed(): Promise<{ models: { id: string; name?: string }[]; error: string | null }> {
+  if (initInFlight) {
+    try { await initInFlight; } catch { /* error surfaced via lastInitError */ }
+  }
+  // A CLI change only *schedules* a debounced reinit, so a client may still be
+  // connected to the previous runtime. Listing its models here would report the
+  // old CLI's capabilities under the new CLI's name — exactly the mismatch this
+  // is meant to surface — so re-point at the configured runtime first.
+  if (client && activeRuntimeKey !== runtimeKey(resolveRuntimeConnection())) {
+    try { await reinitCopilot(); } catch { /* error surfaced via lastInitError */ }
+  }
+  if (!client) {
+    try { await initCopilot(); } catch { /* error surfaced via lastInitError */ }
+  }
+  if (!client) {
+    return { models: [], error: lastInitError || 'Copilot runtime is not running.' };
+  }
   try {
     const models = await client.listModels();
-    return models.map(m => ({ id: m.id, name: m.name }));
-  } catch {
-    return [];
+    if (models.length === 0) {
+      return { models: [], error: 'The Copilot CLI returned no models. Run `copilot` once in a terminal to sign in.' };
+    }
+    return { models: models.map(m => ({ id: m.id, name: m.name })), error: null };
+  } catch (err) {
+    return { models: [], error: err instanceof Error ? err.message : String(err) };
   }
 }
 

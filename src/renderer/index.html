@@ -38,8 +38,13 @@
               <div class="step-label">Copilot CLI</div>
               <div id="welcome-cli-status" class="step-hint">Checking…</div>
               <div class="step-action welcome-cli-actions">
-                <input id="welcome-cli-path" class="welcome-cli-input" type="text" placeholder="Path to copilot binary (leave empty to auto-detect)" spellcheck="false" />
-                <button id="welcome-cli-refresh" class="welcome-btn welcome-btn-small" title="Re-detect CLI version">↻ Refresh</button>
+                <select id="welcome-cli-select" class="welcome-cli-select">
+                  <option value="">Detecting…</option>
+                </select>
+                <button id="welcome-cli-refresh" class="welcome-btn welcome-btn-small" title="Re-scan for Copilot CLI installs">↻ Refresh</button>
+              </div>
+              <div class="step-action welcome-cli-actions" id="welcome-cli-path-row" hidden>
+                <input id="welcome-cli-path" class="welcome-cli-input" type="text" placeholder="Path to copilot binary" spellcheck="false" />
               </div>
             </div>
             <span id="welcome-cli-check" class="step-check hidden">✓</span>
@@ -50,7 +55,7 @@
             <div class="step-number">3</div>
             <div class="step-body">
               <div class="step-label">Choose a default model</div>
-              <div class="step-hint">The AI model used for agents and space processing.</div>
+              <div class="step-hint" id="welcome-model-hint">The AI model used for agents and space processing.</div>
               <div class="step-action">
                 <select id="welcome-model-select">
                   <option value="">Loading models…</option>
@@ -347,6 +352,11 @@
                 </select>
               </div>
               <div class="settings-row cli-source-field" id="cli-path-field" hidden>
+                <select id="cli-discovered-select" class="cli-source-select">
+                  <option value="">Detecting installs…</option>
+                </select>
+              </div>
+              <div class="settings-row cli-source-field" id="cli-path-custom-row" hidden>
                 <div class="cli-path-display">
                   <input id="cli-path-input" class="cli-path-input" type="text" placeholder="Path to copilot binary" spellcheck="false" />
                   <button id="cli-path-clear" class="workspace-btn cli-path-clear hidden" title="Clear">✕</button>

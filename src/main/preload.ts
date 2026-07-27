@@ -75,7 +75,9 @@ export interface WhimAPI {
   checkCliMxcCapable(): Promise<IpcCommandResult<'cli:check-mxc-capable'>>;
   getCliRuntimeStatus(): Promise<IpcCommandResult<'cli:runtime-status'>>;
   testCliConnection(): Promise<IpcCommandResult<'cli:test-connection'>>;
+  discoverClis(): Promise<IpcCommandResult<'cli:discover'>>;
   listModels(): Promise<IpcCommandResult<'models:list'>>;
+  listModelsDetailed(): Promise<IpcCommandResult<'models:list-detailed'>>;
 
   // ── Personas ─────────────────────────────────────────────
   listPersonas(): Promise<IpcCommandResult<'personas:list'>>;
@@ -228,6 +230,11 @@ export interface WhimAPI {
 
   // ── Settings popout window ──────────────────────────────
   openSettingsWindow(): void;
+  /** Fired on the settings window when it's re-shown, so it can reload
+   *  every setting instead of displaying state cached at app start. */
+  onSettingsRefresh(callback: () => void): void;
+  /** Fired on every window when the hotkey config changes. */
+  onHotkeysChanged(callback: () => void): void;
 
   // ── Window / workspace events ────────────────────────────
   onWindowShown(callback: (data: { side: 'left' | 'right'; expanded: boolean }) => void): void;
@@ -333,7 +340,9 @@ const api: WhimAPI = {
   checkCliMxcCapable: () => ipcRenderer.invoke('cli:check-mxc-capable'),
   getCliRuntimeStatus: () => ipcRenderer.invoke('cli:runtime-status'),
   testCliConnection: () => ipcRenderer.invoke('cli:test-connection'),
+  discoverClis: () => ipcRenderer.invoke('cli:discover'),
   listModels: () => ipcRenderer.invoke('models:list'),
+  listModelsDetailed: () => ipcRenderer.invoke('models:list-detailed'),
 
   // ── Personas ─────────────────────────────────────────────
   listPersonas: () => ipcRenderer.invoke('personas:list'),
@@ -559,6 +568,12 @@ const api: WhimAPI = {
 
   // ── Settings popout window ──────────────────────────────
   openSettingsWindow: () => ipcRenderer.send('settings-window:open'),
+  onSettingsRefresh: (callback) => {
+    ipcRenderer.on('settings-window:refresh', () => callback());
+  },
+  onHotkeysChanged: (callback) => {
+    ipcRenderer.on('hotkeys:changed', () => callback());
+  },
 
   // ── Window / workspace events ────────────────────────────
   onWindowShown: (callback) => {

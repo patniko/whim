@@ -212,6 +212,8 @@ interface WhimAPI {
   getCliRuntimeStatus(): Promise<{ source: string; target: string | null; version: string | null; compatible: boolean; minVersion: string }>;
   testCliConnection(): Promise<{ ok: boolean; source: string; target: string | null; version: string | null; compatible: boolean; minVersion: string; error?: string }>;
   listModels(): Promise<{ id: string; name?: string }[]>;
+  listModelsDetailed(): Promise<{ models: { id: string; name?: string }[]; error: string | null }>;
+  discoverClis(): Promise<{ path: string; version: string | null; source: 'bundled' | 'path'; origin: string; compatible: boolean }[]>;
   listPersonas(): Promise<AgentPersona[]>;
   savePersonas(personas: AgentPersona[]): Promise<{ ok?: boolean; error?: string }>;
   listRuntimes(): Promise<CliRuntime[]>;
@@ -307,6 +309,8 @@ interface WhimAPI {
   listPages(spaceId: string): Promise<{ pages: string[]; error?: string }>;
   openPageWindow(target: { kind: 'page'; spaceId: string; page: string; title: string }): void;
   openSettingsWindow(): void;
+  onSettingsRefresh(callback: () => void): void;
+  onHotkeysChanged(callback: () => void): void;
   onWindowShown(callback: (data: { side: 'left' | 'right'; expanded: boolean }) => void): void;
   onWindowToggle(callback: () => void): void;
   onRequestHide(callback: () => void): void;
@@ -462,8 +466,12 @@ const welcomeCliStatus = document.getElementById('welcome-cli-status') as HTMLDi
 const welcomeCliCheck = document.getElementById('welcome-cli-check') as HTMLSpanElement;
 const welcomeStepCli = document.getElementById('welcome-step-cli') as HTMLDivElement;
 const welcomeCliPath = document.getElementById('welcome-cli-path') as HTMLInputElement;
+const welcomeCliSelect = document.getElementById('welcome-cli-select') as HTMLSelectElement;
+const welcomeCliPathRow = document.getElementById('welcome-cli-path-row') as HTMLDivElement;
 const welcomeCliRefresh = document.getElementById('welcome-cli-refresh') as HTMLButtonElement;
 const welcomeModelSelect = document.getElementById('welcome-model-select') as HTMLSelectElement;
+const welcomeModelHint = document.getElementById('welcome-model-hint') as HTMLDivElement;
+const WELCOME_MODEL_HINT = 'The AI model used for agents and space processing.';
 const welcomeModelCheck = document.getElementById('welcome-model-check') as HTMLSpanElement;
 const welcomeStepModel = document.getElementById('welcome-step-model') as HTMLDivElement;
 const welcomeStartBtn = document.getElementById('welcome-start-btn') as HTMLButtonElement;
@@ -1760,14 +1768,30 @@ function renderAgentEditor(persona: AgentPersona): void {
     const emoji = selectedEmoji;
     const cliRuntime = runtimeSelect.value;
 
-    // For @agent, save sandbox policy to global default as well
+    // For @agent, save sandbox policy to global default as well.
+    // ensurePolicyForm() is materialized lazily (and its callers don't await
+    // it), so read through it here — otherwise a quick check-then-save would
+    // see personaPolicyApi === null and silently drop the policy.
     let sandboxOverride: SandboxPolicy | undefined;
-    if (isDefault && sandboxed && personaPolicyApi) {
-      const policy = personaPolicyApi.getPolicy();
-      await whimAPI.saveSandboxDefaultPolicy(policy);
-      sandboxOverride = undefined; // @agent uses the global default
-    } else if (sandboxed && !inheritCheck.checked && personaPolicyApi) {
-      sandboxOverride = personaPolicyApi.getPolicy();
+    if (sandboxed) {
+      if (isDefault) {
+        await ensurePolicyForm();
+        if (personaPolicyApi) {
+          await whimAPI.saveSandboxDefaultPolicy(personaPolicyApi.getPolicy());
+        }
+        sandboxOverride = undefined; // @agent uses the global default
+      } else if (!inheritCheck.checked) {
+        await ensurePolicyForm();
+        // Fall back to the persona's stored override rather than wiping it
+        // if the form still couldn't be built.
+        sandboxOverride = personaPolicyApi
+          ? personaPolicyApi.getPolicy()
+          : persona.sandboxPolicyOverride;
+      }
+    } else if (!isDefault) {
+      // Sandboxing is off — main drops sandboxPolicyOverride in that case,
+      // so leave it undefined here to stay in sync with what's persisted.
+      sandboxOverride = undefined;
     }
 
     if (!isDefault && !HANDLE_RE.test(rawHandle)) {
@@ -1806,7 +1830,17 @@ function renderAgentEditor(persona: AgentPersona): void {
       : p
     );
 
-    await whimAPI.savePersonas(personas);
+    const result = await whimAPI.savePersonas(personas);
+    if (result && 'error' in result) {
+      errorEl.textContent = result.error;
+      errorEl.className = 'persona-form-error';
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    // Adopt the persisted list. Main-side validation normalizes fields and
+    // silently drops incomplete entries (e.g. an untouched "+ Add" draft), so
+    // keeping the optimistic array would leave ghost rows in the sidebar.
+    personas = await whimAPI.listPersonas() || [];
     personaStore.setPersonas(personas);
     renderAgentsSidebar();
     // Show animated save confirmation
@@ -1827,6 +1861,7 @@ function renderAgentEditor(persona: AgentPersona): void {
     if (isDefault) return;
     personas = personas.filter(p => p.id !== persona.id);
     await whimAPI.savePersonas(personas);
+    personas = await whimAPI.listPersonas() || [];
     personaStore.setPersonas(personas);
     selectedAgentId = null;
     renderAgentsSidebar();
@@ -2304,6 +2339,7 @@ function createMcpCard(server: DiscoveredMcpServer | CustomMcpServer, isDiscover
     delBtn.addEventListener('click', async () => {
       customMcpServers = customMcpServers.filter(s => s.name !== (server as CustomMcpServer).name);
       await whimAPI.saveCustomMcp(customMcpServers);
+      customMcpServers = await whimAPI.listCustomMcp() || [];
       renderCustomMcpServers();
     });
     card.appendChild(delBtn);
@@ -2313,7 +2349,9 @@ function createMcpCard(server: DiscoveredMcpServer | CustomMcpServer, isDiscover
 }
 
 function showMcpForm(): void {
-  const prev = mcpCustomList.querySelector('.mcp-form');
+  // The form is rendered with class `persona-form` — matching on `.mcp-form`
+  // here never hit, so repeated "+ Add" clicks stacked duplicate forms.
+  const prev = mcpCustomList.querySelector('.persona-form');
   if (prev) prev.remove();
 
   const form = document.createElement('div');
@@ -2414,7 +2452,17 @@ function showMcpForm(): void {
     };
 
     customMcpServers.push(entry);
-    await whimAPI.saveCustomMcp(customMcpServers);
+    const result = await whimAPI.saveCustomMcp(customMcpServers);
+    if (result && 'error' in result) {
+      customMcpServers = customMcpServers.filter(s => s !== entry);
+      errorEl.textContent = result.error;
+      errorEl.classList.remove('hidden');
+      return;
+    }
+    // Adopt the persisted list — main-side validation may normalize or drop
+    // entries, and keeping the optimistic copy would show rows that aren't
+    // actually saved.
+    customMcpServers = await whimAPI.listCustomMcp() || [];
     renderCustomMcpServers();
   });
 
@@ -2492,6 +2540,7 @@ function createCliToolCard(tool: CliToolDefinition): HTMLElement {
   delBtn.addEventListener('click', async () => {
     cliTools = cliTools.filter(t => t.name !== tool.name);
     await whimAPI.saveCliTools(cliTools);
+    cliTools = await whimAPI.listCliTools() || [];
     renderCliTools();
   });
 
@@ -2560,10 +2609,15 @@ function showCliToolForm(existing?: CliToolDefinition): void {
     if (existing) {
       cliTools = cliTools.map(t => t.name === existing.name ? { name, description } : t);
     } else {
-      cliTools.push({ name, description });
+      cliTools = [...cliTools, { name, description }];
     }
 
-    await whimAPI.saveCliTools(cliTools);
+    const result = await whimAPI.saveCliTools(cliTools);
+    if (result && 'error' in result) {
+      errorEl.textContent = result.error;
+      errorEl.classList.remove('hidden');
+    }
+    cliTools = await whimAPI.listCliTools() || [];
     renderCliTools();
   });
 
@@ -4617,12 +4671,6 @@ const cliPathInput = document.getElementById('cli-path-input') as HTMLInputEleme
 const cliPathClear = document.getElementById('cli-path-clear') as HTMLButtonElement;
 const cliPathDetected = document.getElementById('cli-path-detected') as HTMLSpanElement;
 
-async function loadCliPathSetting(): Promise<void> {
-  await loadCliPathInputSync();
-  await loadRuntimeSourceSettings();
-  await runCliPathChecks();
-}
-
 /**
  * Synchronous-ish part of CLI path setup — just sets the input value and
  * paints a "checking…" detected-label placeholder. Cheap enough to run
@@ -4717,14 +4765,73 @@ cliPathClear.addEventListener('click', async () => {
 // ── Runtime source selector ─────────────────────────────
 const cliSourceSelect = document.getElementById('cli-source-select') as HTMLSelectElement | null;
 const cliPathField = document.getElementById('cli-path-field') as HTMLElement | null;
+const cliPathCustomRow = document.getElementById('cli-path-custom-row') as HTMLElement | null;
+const cliDiscoveredSelect = document.getElementById('cli-discovered-select') as HTMLSelectElement | null;
 const cliServerFields = document.getElementById('cli-server-fields') as HTMLElement | null;
 const cliServerUrlInput = document.getElementById('cli-server-url-input') as HTMLInputElement | null;
 const cliServerTokenInput = document.getElementById('cli-server-token-input') as HTMLInputElement | null;
 const cliTestBtn = document.getElementById('cli-test-btn') as HTMLButtonElement | null;
 const cliRuntimeStatus = document.getElementById('cli-runtime-status') as HTMLSpanElement | null;
 
+const CLI_CUSTOM_OPTION = '__custom__';
+
+/** Short label for a discovered CLI: "Self-updated — v1.0.75". */
+function discoveredCliLabel(cli: { version: string | null; origin: string; compatible: boolean }): string {
+  const version = cli.version ? `v${cli.version}` : 'unknown version';
+  return `${cli.origin} — ${version}${cli.compatible ? '' : ' (too old)'}`;
+}
+
+/**
+ * Populate a <select> with every Copilot CLI found on the machine, plus a
+ * "Custom path…" escape hatch. Returns the discovered list so callers can
+ * decide what to preselect.
+ */
+async function populateCliSelect(
+  select: HTMLSelectElement,
+  selectedPath: string,
+  includeCustom: boolean,
+): Promise<Array<{ path: string; version: string | null; origin: string; compatible: boolean; source: string }>> {
+  let clis: Awaited<ReturnType<typeof whimAPI.discoverClis>> = [];
+  try {
+    clis = await whimAPI.discoverClis();
+  } catch {
+    clis = [];
+  }
+  select.innerHTML = '';
+  for (const cli of clis) {
+    const opt = document.createElement('option');
+    opt.value = cli.path;
+    opt.textContent = discoveredCliLabel(cli);
+    opt.title = cli.path;
+    select.appendChild(opt);
+  }
+  if (clis.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No Copilot CLI found';
+    select.appendChild(opt);
+  }
+  if (includeCustom) {
+    const opt = document.createElement('option');
+    opt.value = CLI_CUSTOM_OPTION;
+    opt.textContent = 'Custom path…';
+    select.appendChild(opt);
+  }
+  if (selectedPath && clis.some(c => c.path === selectedPath)) {
+    select.value = selectedPath;
+  } else if (selectedPath && includeCustom) {
+    select.value = CLI_CUSTOM_OPTION;
+  } else if (clis.length > 0) {
+    select.value = clis[0].path;
+  }
+  return clis;
+}
+
 function applyCliSourceVisibility(source: string): void {
   if (cliPathField) cliPathField.hidden = source !== 'path';
+  if (cliPathCustomRow) {
+    cliPathCustomRow.hidden = source !== 'path' || cliDiscoveredSelect?.value !== CLI_CUSTOM_OPTION;
+  }
   if (cliServerFields) cliServerFields.hidden = source !== 'server';
 }
 
@@ -4734,11 +4841,33 @@ async function loadRuntimeSourceSettings(): Promise<void> {
   cliSourceSelect.value = source;
   if (cliServerUrlInput) cliServerUrlInput.value = (await whimAPI.getSetting('cli_server_url')) || '';
   if (cliServerTokenInput) cliServerTokenInput.value = (await whimAPI.getSetting('cli_server_token')) || '';
+  // Discovery version-probes candidate binaries, so only run it when the
+  // custom-path picker is actually visible.
+  if (cliDiscoveredSelect && source === 'path') {
+    await populateCliSelect(cliDiscoveredSelect, cliPathInput.value.trim(), true);
+  }
   applyCliSourceVisibility(source);
 }
 
+cliDiscoveredSelect?.addEventListener('change', async () => {
+  const value = cliDiscoveredSelect.value;
+  if (cliPathCustomRow) cliPathCustomRow.hidden = value !== CLI_CUSTOM_OPTION;
+  if (value === CLI_CUSTOM_OPTION) {
+    cliPathInput.focus();
+    return;
+  }
+  cliPathInput.value = value;
+  cliPathClear.classList.toggle('hidden', !value);
+  await whimAPI.setSetting('cli_path', value);
+  await updateCliPathDetected();
+  await updateCliMxcIndicator();
+});
+
 cliSourceSelect?.addEventListener('change', async () => {
   const source = cliSourceSelect.value;
+  if (source === 'path' && cliDiscoveredSelect) {
+    await populateCliSelect(cliDiscoveredSelect, cliPathInput.value.trim(), true);
+  }
   applyCliSourceVisibility(source);
   if (cliRuntimeStatus) cliRuntimeStatus.textContent = '—';
   await whimAPI.setSetting('cli_source', source);
@@ -5596,8 +5725,10 @@ hotkeysResetAll.addEventListener('click', async () => {
   renderHotkeysTab();
 });
 
-// Load hotkeys on init
+// Load hotkeys on init, and follow changes made from any other window
+// (e.g. the settings popout) so renderer-level shortcuts don't go stale.
 loadHotkeys();
+whimAPI.onHotkeysChanged(() => { void loadHotkeys(); });
 
 /**
  * Check if a KeyboardEvent matches an Electron accelerator string from the hotkey config.
@@ -8357,6 +8488,8 @@ whimAPI.onRequestHide(() => {
 
 // ── Welcome / Onboarding ────────────────────────────────
 let welcomeWorkspaceSelected = false;
+/** Installs backing the onboarding CLI picker, kept to map a path to a source. */
+let welcomeDiscoveredClis: Awaited<ReturnType<typeof populateCliSelect>> = [];
 
 function updateWelcomeStartBtn(): void {
   welcomeStartBtn.disabled = !welcomeWorkspaceSelected;
@@ -8378,34 +8511,86 @@ async function showWelcomeView(): Promise<void> {
   welcomeCliStatus.style.color = '';
   welcomeModelCheck.classList.add('hidden');
   welcomeStepModel.classList.remove('done');
+  welcomeModelHint.textContent = WELCOME_MODEL_HINT;
+  welcomeModelHint.style.color = '';
   welcomeModelSelect.innerHTML = '<option value="">Loading models…</option>';
   updateWelcomeStartBtn();
 
-  // Load saved CLI path override into input
+  // Load saved CLI path override into input, and list every install found
   const savedCliPath = await whimAPI.getSetting('cli_path');
   welcomeCliPath.value = savedCliPath || '';
+  await populateWelcomeCliSelect(savedCliPath || '');
 
-  // Auto-detect CLI and check version compatibility, then load models
+  // Report the CLI whim will actually run, then load models
   const cliOk = await checkWelcomeCli();
   if (cliOk) {
-    loadWelcomeModels();
+    void loadWelcomeModels();
   } else {
     welcomeModelSelect.innerHTML = '<option value="">Waiting for valid CLI…</option>';
   }
 }
 
-async function loadWelcomeModels(retries = 5): Promise<void> {
-  const models = await whimAPI.listModels();
+/**
+ * Fill the onboarding CLI picker with every install discovered on the machine.
+ * A fresh machine may have several (bundled, self-updated, Homebrew, npm), and
+ * the auto-picked default isn't always the one that works — so the user needs
+ * to be able to switch.
+ */
+async function populateWelcomeCliSelect(selectedPath: string): Promise<void> {
+  welcomeDiscoveredClis = await populateCliSelect(welcomeCliSelect, selectedPath, true);
+  welcomeCliPathRow.hidden = welcomeCliSelect.value !== CLI_CUSTOM_OPTION;
+  // Nothing saved yet: adopt whichever install the picker landed on so the
+  // runtime and the displayed selection agree from the first render.
+  if (!selectedPath && welcomeDiscoveredClis.length > 0 && welcomeCliSelect.value) {
+    await applyWelcomeCliChoice(welcomeCliSelect.value);
+  }
+}
+
+/**
+ * Persist a CLI choice from the onboarding picker as the effective runtime.
+ * The bundled copy maps to `cli_source: 'bundled'` rather than a hard-coded
+ * path, so it keeps tracking whatever ships with the app across upgrades.
+ */
+async function applyWelcomeCliChoice(value: string): Promise<void> {
+  if (value === CLI_CUSTOM_OPTION) return;
+  const chosen = welcomeDiscoveredClis.find(c => c.path === value);
+  if (!value || chosen?.source === 'bundled') {
+    await whimAPI.setSetting('cli_path', '');
+    await whimAPI.setSetting('cli_source', 'bundled');
+    welcomeCliPath.value = '';
+    return;
+  }
+  welcomeCliPath.value = value;
+  await whimAPI.setSetting('cli_path', value);
+  await whimAPI.setSetting('cli_source', 'path');
+}
+
+/** Generation counter so a stale retry chain can't clobber a newer load. */
+let welcomeModelLoadToken = 0;
+
+async function loadWelcomeModels(retries = 5, token = ++welcomeModelLoadToken): Promise<void> {
+  if (token !== welcomeModelLoadToken) return;
+  const { models, error } = await whimAPI.listModelsDetailed();
+  if (token !== welcomeModelLoadToken) return;
+
   if (models.length === 0 && retries > 0) {
     welcomeModelSelect.innerHTML = '<option value="">Loading models…</option>';
-    setTimeout(() => loadWelcomeModels(retries - 1), 2000);
+    setTimeout(() => void loadWelcomeModels(retries - 1, token), 2000);
     return;
   }
   welcomeModelSelect.innerHTML = '';
   if (models.length === 0) {
+    // Surface *why* rather than a dead-end "No models available" — on a new
+    // machine this is almost always an unauthenticated or failed-to-start CLI.
     welcomeModelSelect.innerHTML = '<option value="">No models available</option>';
+    welcomeModelHint.textContent = error
+      ? `Couldn't load models: ${error}`
+      : "Couldn't load models. Try another Copilot CLI above, or run `copilot` once in a terminal to sign in.";
+    welcomeModelHint.style.color = 'var(--color-warning, #d29922)';
     return;
   }
+  welcomeModelHint.textContent = WELCOME_MODEL_HINT;
+  welcomeModelHint.style.color = '';
   const saved = await whimAPI.getSetting('model');
   for (const m of models) {
     const opt = document.createElement('option');
@@ -8428,56 +8613,77 @@ function hideWelcomeView(): void {
   descInput.focus();
 }
 
+/**
+ * Report the runtime whim will actually spawn. This reads `cli:runtime-status`
+ * rather than the bare auto-detect result, so what onboarding shows matches
+ * what the SDK connects to (they diverge whenever `cli_source` isn't 'auto').
+ */
 async function checkWelcomeCli(): Promise<boolean> {
   welcomeCliStatus.textContent = 'Checking…';
   welcomeCliStatus.style.color = '';
   welcomeCliCheck.classList.add('hidden');
   welcomeStepCli.classList.remove('done');
 
-  const info: { path: string | null; version: string | null; compatible: boolean; minVersion: string } =
-    await whimAPI.checkCliVersion();
+  const info = await whimAPI.getCliRuntimeStatus();
 
-  if (!info.path) {
-    welcomeCliStatus.textContent = 'Not found — install the Copilot CLI or provide a path below.';
+  if (!info.target) {
+    welcomeCliStatus.textContent = 'Not found — install the Copilot CLI or pick a path below.';
     return false;
-  } else if (!info.compatible) {
+  }
+  if (!info.compatible) {
     const ver = info.version || 'unknown';
-    welcomeCliStatus.textContent = `Version ${ver} found — update to ${info.minVersion}+ required (run: copilot update)`;
+    welcomeCliStatus.textContent = `Version ${ver} selected — update to ${info.minVersion}+ required (run: copilot update)`;
     welcomeCliStatus.style.color = 'var(--color-warning, #d29922)';
     return false;
-  } else {
-    const short = info.path.length > 40 ? '…' + info.path.slice(-38) : info.path;
-    welcomeCliStatus.textContent = `Detected: ${short} (v${info.version})`;
-    welcomeCliCheck.classList.remove('hidden');
-    welcomeStepCli.classList.add('done');
-    return true;
   }
+  const short = info.target.length > 40 ? '…' + info.target.slice(-38) : info.target;
+  welcomeCliStatus.textContent = `Using: ${short} (v${info.version})`;
+  welcomeCliStatus.title = info.target;
+  welcomeCliCheck.classList.remove('hidden');
+  welcomeStepCli.classList.add('done');
+  return true;
 }
 
-// Save CLI path override from welcome screen input (save only, no re-check).
-// A non-empty path opts into the 'path' source; empty falls back to the
-// bundled CLI (the default that works without a local install).
-welcomeCliPath.addEventListener('change', async () => {
-  const val = welcomeCliPath.value.trim();
-  await whimAPI.setSetting('cli_path', val);
-  await whimAPI.setSetting('cli_source', val ? 'path' : 'bundled');
-});
-
-// Refresh button re-checks CLI after user upgrades or changes path
-welcomeCliRefresh.addEventListener('click', async () => {
-  const val = welcomeCliPath.value.trim();
-  await whimAPI.setSetting('cli_path', val);
-  await whimAPI.setSetting('cli_source', val ? 'path' : 'bundled');
+/** Re-check the CLI and reload the model list after a runtime change. */
+async function refreshWelcomeCliAndModels(): Promise<void> {
   const cliOk = await checkWelcomeCli();
-  // Reload models since CLI may have changed
   welcomeModelSelect.innerHTML = '<option value="">Loading models…</option>';
   welcomeModelCheck.classList.add('hidden');
   welcomeStepModel.classList.remove('done');
   if (cliOk) {
-    loadWelcomeModels();
+    void loadWelcomeModels();
   } else {
+    welcomeModelLoadToken++;
     welcomeModelSelect.innerHTML = '<option value="">Waiting for valid CLI…</option>';
   }
+}
+
+welcomeCliSelect.addEventListener('change', async () => {
+  const value = welcomeCliSelect.value;
+  welcomeCliPathRow.hidden = value !== CLI_CUSTOM_OPTION;
+  if (value === CLI_CUSTOM_OPTION) {
+    welcomeCliPath.focus();
+    return;
+  }
+  await applyWelcomeCliChoice(value);
+  await refreshWelcomeCliAndModels();
+});
+
+// Custom path entry: a non-empty path opts into the 'path' source; empty falls
+// back to the bundled CLI (the default that works without a local install).
+welcomeCliPath.addEventListener('change', async () => {
+  const val = welcomeCliPath.value.trim();
+  await whimAPI.setSetting('cli_path', val);
+  await whimAPI.setSetting('cli_source', val ? 'path' : 'bundled');
+  await refreshWelcomeCliAndModels();
+});
+
+// Refresh button re-scans for installs after the user upgrades or installs one
+welcomeCliRefresh.addEventListener('click', async () => {
+  welcomeCliSelect.innerHTML = '<option value="">Detecting…</option>';
+  const saved = (await whimAPI.getSetting('cli_path')) || '';
+  await populateWelcomeCliSelect(saved);
+  await refreshWelcomeCliAndModels();
 });
 
 welcomeWorkspaceBtn.addEventListener('click', async () => {
@@ -8953,7 +9159,7 @@ if (isSettingsMode) {
   // immediately; the actual CLI subprocess probes (checkCliVersion +
   // checkCliMxcCapable, each spawns the CLI binary) are deferred below
   // so the General tab is interactive without waiting on them.
-  Promise.allSettled([
+  const loadAllSettings = () => Promise.allSettled([
     loadModels(),
     loadWorkspaceSetting(),
     loadThemeSetting(),
@@ -8966,9 +9172,14 @@ if (isSettingsMode) {
     loadRuntimes(),
     loadExportDestinations(),
     loadCliPathInputSync(),
+    loadRuntimeSourceSettings(),
     loadMcpServers(),
     loadCliTools(),
+    loadHotkeys(),
+    refreshProfiles(),
   ]);
+
+  loadAllSettings();
 
   // Defer the CLI subprocess probes to idle so they don't block first
   // paint. requestIdleCallback isn't on the WebKit type lib by default,
@@ -8980,6 +9191,14 @@ if (isSettingsMode) {
   } else {
     setTimeout(runChecks, 0);
   }
+
+  // The settings window is hidden (not destroyed) on close and pre-warmed at
+  // app start, so without this its controls would keep showing whatever was
+  // loaded when the process started. Main re-sends this every time the window
+  // is shown.
+  whimAPI.onSettingsRefresh(() => {
+    void loadAllSettings().then(runChecks);
+  });
 
   // Close button closes the window
   settingsClose.addEventListener('click', () => window.close());

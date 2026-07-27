@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execSync, exec } from 'child_process';
 import { app } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -216,42 +216,8 @@ export function getCopilotPkgBaseDirs(): string[] {
  * locates versions and skips partially-extracted directories.
  */
 export function findLatestSelfUpdatedCli(): string | null {
-  const join = process.platform === 'win32' ? path.win32.join : path.posix.join;
-  const platformArch = `${process.platform}-${process.arch}`;
-
-  let best: { version: string; raw: string; entry: string } | null = null;
-
-  for (const base of getCopilotPkgBaseDirs()) {
-    for (const sub of ['universal', platformArch]) {
-      const dir = join(base, sub);
-      let names: string[];
-      try {
-        if (!fs.existsSync(dir)) continue;
-        names = fs.readdirSync(dir);
-      } catch {
-        continue;
-      }
-      for (const name of names) {
-        const versionDir = join(dir, name);
-        const entry = join(versionDir, 'index.js');
-        try {
-          if (!fs.statSync(versionDir).isDirectory()) continue;
-          if (!fs.existsSync(entry)) continue;
-          // Require app.js too so we never pick a half-extracted bundle.
-          if (!fs.existsSync(join(versionDir, 'app.js'))) continue;
-        } catch {
-          continue;
-        }
-        const numeric = name.replace(/-.*$/, '');
-        const cmp = best ? compareVersions(numeric, best.version) : 1;
-        if (!best || cmp > 0 || (cmp === 0 && name.localeCompare(best.raw) > 0)) {
-          best = { version: numeric, raw: name, entry };
-        }
-      }
-    }
-  }
-
-  return best ? best.entry : null;
+  const all = findSelfUpdatedClis();
+  return all.length > 0 ? all[0].path : null;
 }
 
 /**
@@ -350,12 +316,50 @@ export function probeCliVersion(cliPath: string): string | null {
   return version;
 }
 
+/**
+ * Async twin of {@link probeCliVersion}, sharing the same cache. Used by
+ * discovery, which probes several binaries and must not block the main process
+ * while each one spawns.
+ */
+export async function probeCliVersionAsync(cliPath: string): Promise<string | null> {
+  if (probedVersions.has(cliPath)) return probedVersions.get(cliPath) ?? null;
+  const version = await runVersionProbeAsync(cliPath);
+  probedVersions.set(cliPath, version);
+  return version;
+}
+
+function versionProbeCommand(cliPath: string): string {
+  return /\.js$/i.test(cliPath)
+    ? `"${process.execPath}" "${cliPath}" --version`
+    : `"${cliPath}" --version`;
+}
+
+async function runVersionProbeAsync(cliPath: string): Promise<string | null> {
+  try {
+    const output = await execAsync(versionProbeCommand(cliPath), {
+      timeout: 10_000,
+      windowsHide: true,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    });
+    return parseCliVersion(output);
+  } catch {
+    return null;
+  }
+}
+
+/** Promise wrapper around `exec` that resolves with trimmed stdout. */
+function execAsync(cmd: string, options: Parameters<typeof exec>[1]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    exec(cmd, { ...options, encoding: 'utf8' } as never, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(String(stdout).trim());
+    });
+  });
+}
+
 function runVersionProbe(cliPath: string): string | null {
   try {
-    const cmd = /\.js$/i.test(cliPath)
-      ? `"${process.execPath}" "${cliPath}" --version`
-      : `"${cliPath}" --version`;
-    const output = execSync(cmd, {
+    const output = execSync(versionProbeCommand(cliPath), {
       timeout: 10_000,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -398,17 +402,38 @@ function resolveViaLoginShell(): string | null {
   if (process.platform === 'win32') return null;
   const shell = process.env.SHELL || '/bin/bash';
   try {
-    const out = execSync(`'${shell}' -lic 'command -v copilot' 2>/dev/null`, {
+    const out = execSync(loginShellProbeCommand(shell), {
       timeout: 8000,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).toString().trim();
-    const line = out.split(/\r?\n/).filter(Boolean).pop();
-    if (line && !line.includes('node_modules') && fs.existsSync(line)) return line;
+    return pickLoginShellResult(out);
   } catch {
     // Shell unavailable or copilot not found
   }
   return null;
+}
+
+function loginShellProbeCommand(shell: string): string {
+  return `'${shell}' -lic 'command -v copilot' 2>/dev/null`;
+}
+
+function pickLoginShellResult(out: string): string | null {
+  const line = out.split(/\r?\n/).filter(Boolean).pop();
+  if (line && !line.includes('node_modules') && fs.existsSync(line)) return line;
+  return null;
+}
+
+/** Async twin of {@link resolveViaLoginShell}, for off-main-thread discovery. */
+async function resolveViaLoginShellAsync(): Promise<string | null> {
+  if (process.platform === 'win32') return null;
+  const shell = process.env.SHELL || '/bin/bash';
+  try {
+    const out = await execAsync(loginShellProbeCommand(shell), { timeout: 8000, windowsHide: true });
+    return pickLoginShellResult(out);
+  } catch {
+    return null;
+  }
 }
 
 /** Candidate install locations for the CLI, by platform. */
@@ -511,6 +536,184 @@ function autoDetectCopilotCli(): string | null {
   }
 
   return null;
+}
+
+/**
+ * Scan every self-update cache for *all* fully-extracted CLI bundles, newest
+ * first. {@link findLatestSelfUpdatedCli} returns only the best one; discovery
+ * needs the full set so the user can pick an older version when the newest is
+ * broken.
+ */
+export function findSelfUpdatedClis(): { path: string; version: string }[] {
+  const join = process.platform === 'win32' ? path.win32.join : path.posix.join;
+  const platformArch = `${process.platform}-${process.arch}`;
+  const found: { path: string; version: string; raw: string }[] = [];
+  const seen = new Set<string>();
+
+  for (const base of getCopilotPkgBaseDirs()) {
+    for (const sub of ['universal', platformArch]) {
+      const dir = join(base, sub);
+      let names: string[];
+      try {
+        if (!fs.existsSync(dir)) continue;
+        names = fs.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        const versionDir = join(dir, name);
+        const entry = join(versionDir, 'index.js');
+        try {
+          if (!fs.statSync(versionDir).isDirectory()) continue;
+          if (!fs.existsSync(entry)) continue;
+          if (!fs.existsSync(join(versionDir, 'app.js'))) continue;
+        } catch {
+          continue;
+        }
+        if (seen.has(entry)) continue;
+        seen.add(entry);
+        found.push({ path: entry, version: name.replace(/-.*$/, ''), raw: name });
+      }
+    }
+  }
+
+  // Newest first, with the same prerelease tie-break the CLI loader uses.
+  found.sort((a, b) => compareVersions(b.version, a.version) || b.raw.localeCompare(a.raw));
+  return found.map(({ path: p, version }) => ({ path: p, version }));
+}
+
+export interface DiscoveredCli {
+  /** Absolute path to the spawnable entrypoint. */
+  path: string;
+  /** Version string, when it could be determined. */
+  version: string | null;
+  /** Which runtime source selecting this entry maps to. */
+  source: 'bundled' | 'path';
+  /** Where it was found, for display (e.g. "Self-updated", "Homebrew"). */
+  origin: string;
+  /** Whether the version meets {@link MIN_CLI_VERSION}. */
+  compatible: boolean;
+}
+
+/** Human label for the directory a CLI was found in. */
+function describeCliOrigin(cliPath: string): string {
+  const p = cliPath.replace(/\\/g, '/');
+  if (/\/(pkg)\/(universal|[a-z0-9]+-[a-z0-9]+)\//.test(p)) return 'Self-updated';
+  if (p.startsWith('/opt/homebrew/')) return 'Homebrew';
+  if (p.startsWith('/usr/local/')) return '/usr/local';
+  if (p.includes('/.local/bin/')) return 'Install script';
+  if (p.includes('/.npm-global/')) return 'npm global';
+  if (p.includes('/node_modules/')) return 'npm install';
+  return 'System';
+}
+
+/**
+ * Enumerate every Copilot CLI on the machine so the user can choose which one
+ * whim runs. Covers the bundled copy, all self-update cache versions, the
+ * well-known install locations, whatever is on PATH, and the login shell's
+ * resolution (nvm/fnm/volta/asdf).
+ *
+ * Async, and every spawn (PATH lookup, login shell, `--version` probes) runs
+ * off the main thread and in parallel — a synchronous version froze the whole
+ * app for seconds, since each probe is a CLI start that on macOS may also
+ * prompt for keychain access. Self-update bundles skip the probe entirely by
+ * reusing the version in their directory name, and only one entry per
+ * origin+version is kept. Probe results are cached by
+ * {@link probeCliVersionAsync} until {@link invalidateCliPath} is called.
+ */
+export async function discoverCopilotClis(): Promise<DiscoveredCli[]> {
+  interface Candidate {
+    path: string;
+    source: 'bundled' | 'path';
+    origin: string;
+    knownVersion?: string;
+  }
+
+  const candidates: Candidate[] = [];
+  const seen = new Set<string>();
+
+  const add = (
+    cliPath: string | null,
+    source: 'bundled' | 'path',
+    origin?: string,
+    knownVersion?: string,
+  ): void => {
+    if (!cliPath) return;
+    let resolved: string;
+    try {
+      resolved = fs.existsSync(cliPath) ? fs.realpathSync(cliPath) : cliPath;
+    } catch {
+      resolved = cliPath;
+    }
+    if (seen.has(resolved)) return;
+    try {
+      if (!fs.existsSync(resolved)) return;
+    } catch {
+      return;
+    }
+    seen.add(resolved);
+    candidates.push({ path: resolved, source, origin: origin ?? describeCliOrigin(resolved), knownVersion });
+  };
+
+  try {
+    add(resolveBundledCliPath(), 'bundled', 'Bundled with whim');
+  } catch {
+    // No bundled copy available (e.g. a source checkout)
+  }
+
+  for (const entry of findSelfUpdatedClis()) {
+    add(entry.path, 'path', 'Self-updated', entry.version);
+  }
+
+  for (const candidate of getCliCandidatePaths()) {
+    add(resolveCmdToJs(candidate), 'path');
+  }
+
+  const [pathResult, shellResolved] = await Promise.all([
+    (async () => {
+      try {
+        const cmd = process.platform === 'win32' ? 'where.exe copilot' : 'which -a copilot';
+        return await execAsync(cmd, { windowsHide: true, timeout: 5000, env: getAugmentedPathEnv() });
+      } catch {
+        return '';
+      }
+    })(),
+    resolveViaLoginShellAsync(),
+  ]);
+
+  for (const line of pathResult.split(/\r?\n/).filter(Boolean)) {
+    if (line.includes('node_modules')) continue;
+    add(resolveCmdToJs(line), 'path', 'On PATH');
+  }
+  if (shellResolved) add(resolveCmdToJs(shellResolved), 'path', 'Login shell');
+
+  const versions = await Promise.all(
+    candidates.map(c => (c.knownVersion != null ? Promise.resolve(c.knownVersion) : probeCliVersionAsync(c.path)))
+  );
+
+  const out: DiscoveredCli[] = [];
+  const seenVersions = new Set<string>();
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const version = versions[i];
+    // Self-update caches keep several builds of the same version
+    // (1.0.64, 1.0.64-1, 1.0.64-3); listing them all just bloats the picker.
+    // Keyed by origin so two genuinely different installs at the same version
+    // (say Homebrew and npm-global) both stay selectable.
+    const versionKey = version ? `${c.origin}\u0000${version}` : null;
+    if (versionKey) {
+      if (seenVersions.has(versionKey)) continue;
+      seenVersions.add(versionKey);
+    }
+    out.push({
+      path: c.path,
+      version,
+      source: c.source,
+      origin: c.origin,
+      compatible: version != null && (version === '0.0.1' || compareVersions(version, MIN_CLI_VERSION) >= 0),
+    });
+  }
+  return out;
 }
 
 let resolvedBundledCliPath: string | null = null;
