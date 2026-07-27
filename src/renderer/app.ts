@@ -137,6 +137,25 @@ interface WebRemoteBindingStatus {
   detail: string | null;
 }
 
+type WebRemoteTlsMode = 'auto' | 'off' | 'custom';
+
+interface WebRemoteTlsState {
+  mode: WebRemoteTlsMode;
+  active: boolean;
+  fingerprint: string | null;
+  expiresAt: string | null;
+  error: string | null;
+}
+
+interface WebRemoteDevice {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastSeenAt: string;
+  lastAddress: string | null;
+  userAgent: string | null;
+}
+
 interface WebRemoteState {
   enabled: boolean;
   running: boolean;
@@ -148,6 +167,9 @@ interface WebRemoteState {
   urls: string[];
   qrDataUrl: string | null;
   error: string | null;
+  tls: WebRemoteTlsState;
+  allowedHosts: string[];
+  devices: WebRemoteDevice[];
 }
 
 interface FolderCommit {
@@ -170,8 +192,16 @@ interface WhimAPI {
   setSetting(key: string, value: string): Promise<string | null | undefined>;
   getWebRemoteState(): Promise<WebRemoteState>;
   setWebRemoteEnabled(enabled: boolean): Promise<WebRemoteState>;
-  setWebRemoteConfig(config: { port?: number; selections?: WebRemoteBindSelection[] }): Promise<WebRemoteState | { error: string }>;
+  setWebRemoteConfig(config: {
+    port?: number;
+    selections?: WebRemoteBindSelection[];
+    tlsMode?: WebRemoteTlsMode;
+    tlsCertPath?: string;
+    tlsKeyPath?: string;
+    allowedHosts?: string[];
+  }): Promise<WebRemoteState | { error: string }>;
   regenerateWebRemoteToken(): Promise<WebRemoteState>;
+  revokeWebRemoteDevice(deviceId: string): Promise<WebRemoteState>;
   listWebRemoteInterfaces(): Promise<WebRemoteInterface[]>;
   getHotkeys(): Promise<Record<string, string>>;
   setHotkey(key: string, accelerator: string): Promise<{ ok?: boolean; error?: string }>;
@@ -4815,6 +4845,13 @@ const webRemoteInterfaceList = document.getElementById('web-remote-interface-lis
 const webRemoteUrlList = document.getElementById('web-remote-url-list') as HTMLDivElement | null;
 const webRemoteQr = document.getElementById('web-remote-qr') as HTMLImageElement | null;
 const webRemoteStatus = document.getElementById('web-remote-status') as HTMLDivElement | null;
+const webRemoteTlsMode = document.getElementById('web-remote-tls-mode') as HTMLSelectElement | null;
+const webRemoteTlsCustom = document.getElementById('web-remote-tls-custom') as HTMLDivElement | null;
+const webRemoteTlsCert = document.getElementById('web-remote-tls-cert') as HTMLInputElement | null;
+const webRemoteTlsKey = document.getElementById('web-remote-tls-key') as HTMLInputElement | null;
+const webRemoteTlsStatus = document.getElementById('web-remote-tls-status') as HTMLDivElement | null;
+const webRemoteAllowedHosts = document.getElementById('web-remote-allowed-hosts') as HTMLInputElement | null;
+const webRemoteDeviceList = document.getElementById('web-remote-device-list') as HTMLDivElement | null;
 
 function setWebRemoteStatus(message: string, error = false): void {
   if (!webRemoteStatus) return;
@@ -4943,11 +4980,77 @@ function describeSelection(selection: WebRemoteBindSelection): string {
   }
 }
 
+function renderWebRemoteTls(state: WebRemoteState): void {
+  if (webRemoteTlsMode) webRemoteTlsMode.value = state.tls.mode;
+  webRemoteTlsCustom?.classList.toggle('hidden', state.tls.mode !== 'custom');
+
+  if (!webRemoteTlsStatus) return;
+  const loopbackOnly = state.selections.every(selection =>
+    selection.kind === 'address' && (selection.address === '127.0.0.1' || selection.address === '::1'));
+
+  if (state.tls.error) {
+    webRemoteTlsStatus.textContent = `Certificate error: ${state.tls.error}`;
+  } else if (state.tls.active) {
+    webRemoteTlsStatus.textContent = state.tls.fingerprint
+      ? `HTTPS is on. Certificate fingerprint (SHA-256): ${state.tls.fingerprint}`
+      : 'HTTPS is on.';
+  } else if (state.tls.mode === 'auto' && loopbackOnly) {
+    webRemoteTlsStatus.textContent = 'Loopback only, so plain HTTP is used — localhost is already a secure origin.';
+  } else if (state.tls.mode === 'off') {
+    webRemoteTlsStatus.textContent = 'HTTPS is off. The microphone, clipboard and home-screen install will not work in the browser.';
+  } else {
+    webRemoteTlsStatus.textContent = 'HTTPS is not active yet.';
+  }
+}
+
+function renderWebRemoteDevices(state: WebRemoteState): void {
+  if (!webRemoteDeviceList) return;
+  webRemoteDeviceList.innerHTML = '';
+
+  if (state.devices.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'settings-hint';
+    empty.textContent = 'No paired browsers yet.';
+    webRemoteDeviceList.appendChild(empty);
+    return;
+  }
+
+  for (const device of state.devices) {
+    const row = document.createElement('div');
+    row.className = 'web-remote-device';
+
+    const name = document.createElement('span');
+    name.textContent = device.label;
+    row.appendChild(name);
+
+    const meta = document.createElement('span');
+    meta.className = 'web-remote-device-meta';
+    meta.textContent = `last seen ${new Date(device.lastSeenAt).toLocaleString()}`
+      + (device.lastAddress ? ` from ${device.lastAddress}` : '');
+    row.appendChild(meta);
+
+    const revoke = document.createElement('button');
+    revoke.className = 'workspace-btn';
+    revoke.type = 'button';
+    revoke.textContent = 'Revoke';
+    revoke.addEventListener('click', async () => {
+      renderWebRemoteState(await whimAPI.revokeWebRemoteDevice(device.id));
+    });
+    row.appendChild(revoke);
+
+    webRemoteDeviceList.appendChild(row);
+  }
+}
+
 function renderWebRemoteState(state: WebRemoteState): void {
   if (webRemoteEnabledCb) webRemoteEnabledCb.checked = state.enabled;
   if (webRemotePortInput) webRemotePortInput.value = String(state.port);
   if (webRemoteTokenInput) webRemoteTokenInput.value = state.token;
+  if (webRemoteTlsCert) webRemoteTlsCert.value = webRemoteTlsCert.value || '';
+  if (webRemoteAllowedHosts) webRemoteAllowedHosts.value = state.allowedHosts.join(', ');
   renderWebRemoteInterfaces(state);
+  renderWebRemoteTls(state);
+  renderWebRemoteDevices(state);
 
   if (webRemoteUrlList) {
     webRemoteUrlList.innerHTML = '';
@@ -5016,7 +5119,17 @@ if (webRemoteSaveBtn) {
       return;
     }
     setWebRemoteStatus('Saving remote web settings…');
-    const result = await whimAPI.setWebRemoteConfig({ port, selections });
+    const result = await whimAPI.setWebRemoteConfig({
+      port,
+      selections,
+      tlsMode: (webRemoteTlsMode?.value as WebRemoteTlsMode | undefined) ?? undefined,
+      tlsCertPath: webRemoteTlsCert?.value.trim(),
+      tlsKeyPath: webRemoteTlsKey?.value.trim(),
+      allowedHosts: (webRemoteAllowedHosts?.value ?? '')
+        .split(',')
+        .map(host => host.trim())
+        .filter(Boolean),
+    });
     if ('error' in result) {
       setWebRemoteStatus(result.error, true);
       return;
@@ -5027,8 +5140,14 @@ if (webRemoteSaveBtn) {
 
 if (webRemoteRegenerateBtn) {
   webRemoteRegenerateBtn.addEventListener('click', async () => {
-    setWebRemoteStatus('Regenerating token and closing existing mobile sessions…');
+    setWebRemoteStatus('Regenerating token and signing out every paired browser…');
     renderWebRemoteState(await whimAPI.regenerateWebRemoteToken());
+  });
+}
+
+if (webRemoteTlsMode) {
+  webRemoteTlsMode.addEventListener('change', () => {
+    webRemoteTlsCustom?.classList.toggle('hidden', webRemoteTlsMode.value !== 'custom');
   });
 }
 

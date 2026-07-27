@@ -8,7 +8,7 @@ import { listDiscoveredMcpServers } from '../mcp';
 import { validateMcpServers, validateCliTools, validateSandboxPolicy } from '../validators';
 import { onAutoHideSidePaneChanged } from '../window-manager';
 import { setAutoDownload } from '../update-service';
-import { getWebRemoteState, restartWebRemoteServer, syncWebRemoteServer } from '../web/server';
+import { getWebRemoteState, restartWebRemoteServer, sessionStore, syncWebRemoteServer } from '../web/server';
 import { listWebRemoteInterfaces, normalizeBindSelections } from '../web/interfaces';
 
 const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -99,7 +99,14 @@ export function registerSettingsHandlers(): void {
       return { error: 'invalid payload' };
     }
 
-    const raw = next as { port?: unknown; selections?: unknown };
+    const raw = next as {
+      port?: unknown;
+      selections?: unknown;
+      tlsMode?: unknown;
+      tlsCertPath?: unknown;
+      tlsKeyPath?: unknown;
+      allowedHosts?: unknown;
+    };
     if (raw.port !== undefined) {
       const port = normalizeWebRemotePort(raw.port);
       if (port !== Number(raw.port)) {
@@ -117,12 +124,50 @@ export function registerSettingsHandlers(): void {
       setConfigValue('webRemoteBindSelections', normalizeBindSelections(raw.selections));
     }
 
+    if (raw.tlsMode !== undefined) {
+      if (raw.tlsMode !== 'auto' && raw.tlsMode !== 'off' && raw.tlsMode !== 'custom') {
+        return { error: 'Invalid TLS mode.' };
+      }
+      if (raw.tlsMode === 'custom' && !(raw.tlsCertPath && raw.tlsKeyPath)) {
+        return { error: 'A certificate and key path are required for a custom certificate.' };
+      }
+      setConfigValue('webRemoteTlsMode', raw.tlsMode);
+    }
+
+    if (raw.tlsCertPath !== undefined) {
+      setConfigValue('webRemoteTlsCertPath', String(raw.tlsCertPath ?? ''));
+    }
+    if (raw.tlsKeyPath !== undefined) {
+      setConfigValue('webRemoteTlsKeyPath', String(raw.tlsKeyPath ?? ''));
+    }
+
+    if (raw.allowedHosts !== undefined) {
+      if (!Array.isArray(raw.allowedHosts)) {
+        return { error: 'Allowed hosts must be a list.' };
+      }
+      const hosts = raw.allowedHosts
+        .map(host => String(host).trim().toLowerCase())
+        .filter(host => host.length > 0 && !/[/\s]/.test(host));
+      if (hosts.length !== raw.allowedHosts.filter(host => String(host).trim()).length) {
+        return { error: 'Allowed hosts must be bare hostnames, without a scheme or path.' };
+      }
+      setConfigValue('webRemoteAllowedHosts', [...new Set(hosts)]);
+    }
+
     return restartWebRemoteServer();
   });
 
   ipcMain.handle('web-remote:regenerate-token', async () => {
     rotateWebRemoteToken();
+    // Rotating the bootstrap token must also drop every paired device,
+    // otherwise "regenerate" would leave existing browsers logged in.
+    sessionStore.revokeAll();
     return restartWebRemoteServer();
+  });
+
+  ipcMain.handle('web-remote:revoke-device', async (_event, deviceId: unknown) => {
+    if (typeof deviceId === 'string') sessionStore.revoke(deviceId);
+    return getWebRemoteState();
   });
 
   ipcMain.handle('web-remote:list-interfaces', () => {

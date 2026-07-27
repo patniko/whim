@@ -10,6 +10,7 @@ import type {
   WebRemoteInterface,
   WebRemoteBindSelection,
   WebRemoteState,
+  WebRemoteTlsMode,
 } from '../shared/ipc-contract';
 import type { ChatEvent } from '../shared/chat-types';
 import type { AgentAnchor, RecurrenceResult, RecallMatch, Skill, SkillContent, SkillScheduleFrequency, CanvasTarget, UpdateState, CanvasAgentStateSnapshot, ExportFormat, ExportDestination } from '../shared/types';
@@ -51,8 +52,16 @@ export interface WhimAPI {
   setSetting(key: string, value: string): Promise<IpcCommandResult<'settings:set'>>;
   getWebRemoteState(): Promise<WebRemoteState>;
   setWebRemoteEnabled(enabled: boolean): Promise<WebRemoteState>;
-  setWebRemoteConfig(config: { port?: number; selections?: WebRemoteBindSelection[] }): Promise<WebRemoteState | { error: string }>;
+  setWebRemoteConfig(config: {
+    port?: number;
+    selections?: WebRemoteBindSelection[];
+    tlsMode?: WebRemoteTlsMode;
+    tlsCertPath?: string;
+    tlsKeyPath?: string;
+    allowedHosts?: string[];
+  }): Promise<WebRemoteState | { error: string }>;
   regenerateWebRemoteToken(): Promise<WebRemoteState>;
+  revokeWebRemoteDevice(deviceId: string): Promise<WebRemoteState>;
   listWebRemoteInterfaces(): Promise<WebRemoteInterface[]>;
 
   // ── Hotkeys ──────────────────────────────────────────────
@@ -310,6 +319,7 @@ const api: WhimAPI = {
   setWebRemoteEnabled: (enabled) => ipcRenderer.invoke('web-remote:set-enabled', enabled),
   setWebRemoteConfig: (config) => ipcRenderer.invoke('web-remote:set-config', config),
   regenerateWebRemoteToken: () => ipcRenderer.invoke('web-remote:regenerate-token'),
+  revokeWebRemoteDevice: (deviceId) => ipcRenderer.invoke('web-remote:revoke-device', deviceId),
   listWebRemoteInterfaces: () => ipcRenderer.invoke('web-remote:list-interfaces'),
 
   // ── Hotkeys ──────────────────────────────────────────────

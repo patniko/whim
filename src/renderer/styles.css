@@ -1650,6 +1650,42 @@ body.dark .sandbox-block-banner-btn:hover {
   opacity: 0.85;
 }
 
+.settings-subheading {
+  margin-top: 14px;
+  font-size: var(--fs-label);
+  font-weight: 600;
+  opacity: 0.75;
+}
+
+.web-remote-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.web-remote-device {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--set-radius-sm, 6px);
+  background: var(--set-control-bg, rgba(0, 0, 0, 0.04));
+  border: 1px solid var(--set-border-muted, transparent);
+  font-size: var(--fs-label);
+}
+
+.web-remote-device-meta {
+  flex: 1;
+  opacity: 0.7;
+  font-size: var(--fs-caption, 11px);
+}
+
+.web-remote-tls-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .web-remote-binding-listening { color: #157f3b; }
 .web-remote-binding-pending { color: #9a6a00; }
 .web-remote-binding-failed { color: #b91414; }

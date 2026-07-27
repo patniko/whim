@@ -388,18 +388,50 @@
                   Serve mobile web UI on this network
                 </label>
               </div>
-              <div class="settings-hint">Off by default. Use Tailscale when possible; raw LAN access uses plain HTTP.</div>
+              <div class="settings-hint">Off by default. Pick the network interfaces to expose the server on below.</div>
               <div class="settings-row web-remote-port-row">
                 <label for="web-remote-port-input">Port</label>
                 <input id="web-remote-port-input" class="cli-path-input web-remote-port-input" type="number" min="1024" max="65535" step="1" />
                 <button id="web-remote-save-btn" class="workspace-btn" type="button">Save</button>
               </div>
-              <div class="settings-hint">Choose loopback or Tailscale interfaces unless you trust the whole LAN.</div>
+              <div class="settings-hint">A selected interface that is currently down stays selected and is bound automatically when it comes back.</div>
               <div id="web-remote-interface-list" class="web-remote-interface-list"></div>
+
+              <div class="settings-subheading">Encryption</div>
+              <div class="settings-row">
+                <label for="web-remote-tls-mode">HTTPS</label>
+                <select id="web-remote-tls-mode" class="cli-path-input">
+                  <option value="auto">Automatic (self-signed certificate)</option>
+                  <option value="custom">Use my own certificate</option>
+                  <option value="off">Off (plain HTTP)</option>
+                </select>
+              </div>
+              <div class="settings-hint">Browsers only allow the microphone, clipboard and home-screen install on a secure origin, so anything beyond loopback needs HTTPS — regardless of how private the network is.</div>
+              <div id="web-remote-tls-custom" class="web-remote-tls-custom hidden">
+                <div class="settings-row">
+                  <label for="web-remote-tls-cert">Certificate</label>
+                  <input id="web-remote-tls-cert" class="cli-path-input" type="text" spellcheck="false" placeholder="/path/to/fullchain.pem" />
+                </div>
+                <div class="settings-row">
+                  <label for="web-remote-tls-key">Private key</label>
+                  <input id="web-remote-tls-key" class="cli-path-input" type="text" spellcheck="false" placeholder="/path/to/privkey.pem" />
+                </div>
+              </div>
+              <div id="web-remote-tls-status" class="settings-hint"></div>
+
+              <div class="settings-subheading">Extra hostnames</div>
+              <div class="settings-row">
+                <input id="web-remote-allowed-hosts" class="cli-path-input" type="text" spellcheck="false" placeholder="whim.example.internal, whim.my-tailnet.ts.net" />
+              </div>
+              <div class="settings-hint">Comma-separated. Add the hostname here if you reach whim through a reverse proxy or tunnel; requests with any other Host header are refused.</div>
+
+              <div class="settings-subheading">Access</div>
               <div class="settings-row web-remote-token-row">
                 <input id="web-remote-token-input" class="cli-path-input web-remote-token-input" type="text" readonly spellcheck="false" />
                 <button id="web-remote-regenerate-btn" class="workspace-btn" type="button">Regenerate token</button>
               </div>
+              <div class="settings-hint">The token is a one-time pairing credential. A browser exchanges it for its own session, so it is never stored in the page or left in the URL.</div>
+              <div id="web-remote-device-list" class="web-remote-device-list"></div>
               <div id="web-remote-url-list" class="web-remote-url-list"></div>
               <div class="web-remote-onboarding">
                 <img id="web-remote-qr" class="web-remote-qr hidden" alt="Remote web access QR code" />

@@ -231,6 +231,28 @@ export interface WebRemoteBindingStatus {
   detail: string | null;
 }
 
+export type WebRemoteTlsMode = 'auto' | 'off' | 'custom';
+
+export interface WebRemoteTlsState {
+  mode: WebRemoteTlsMode;
+  /** True when the server is actually serving HTTPS. */
+  active: boolean;
+  /** SHA-256 fingerprint of the served certificate, for out-of-band verification. */
+  fingerprint: string | null;
+  expiresAt: string | null;
+  error: string | null;
+}
+
+/** A browser that has completed the token exchange and holds a session cookie. */
+export interface WebRemoteDevice {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastSeenAt: string;
+  lastAddress: string | null;
+  userAgent: string | null;
+}
+
 export interface WebRemoteState {
   enabled: boolean;
   /** True only when every selected interface is actually listening. */
@@ -243,6 +265,10 @@ export interface WebRemoteState {
   urls: string[];
   qrDataUrl: string | null;
   error: string | null;
+  tls: WebRemoteTlsState;
+  /** Extra hostnames accepted in the Host header (e.g. a reverse proxy). */
+  allowedHosts: string[];
+  devices: WebRemoteDevice[];
 }
 
 export interface HotkeyConfig {
@@ -323,9 +349,17 @@ export interface IpcCommands {
   'web-remote:get-state': { args: []; result: WebRemoteState };
   'web-remote:set-enabled': { args: [enabled: boolean]; result: WebRemoteState };
   'web-remote:set-config': {
-    args: [config: { port?: number; selections?: WebRemoteBindSelection[] }];
+    args: [config: {
+      port?: number;
+      selections?: WebRemoteBindSelection[];
+      tlsMode?: WebRemoteTlsMode;
+      tlsCertPath?: string;
+      tlsKeyPath?: string;
+      allowedHosts?: string[];
+    }];
     result: WebRemoteState | { error: string };
   };
+  'web-remote:revoke-device': { args: [deviceId: string]; result: WebRemoteState };
   'web-remote:regenerate-token': { args: []; result: WebRemoteState };
   'web-remote:list-interfaces': { args: []; result: WebRemoteInterface[] };
 

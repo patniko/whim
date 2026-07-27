@@ -9,14 +9,24 @@ const config = {
   webRemotePort: 0,
   webRemoteToken: TOKEN,
   webRemoteBindSelections: [{ kind: 'address', address: '127.0.0.1' }],
+  webRemoteTlsMode: 'auto' as const,
+  webRemoteTlsCertPath: '',
+  webRemoteTlsKeyPath: '',
+  webRemoteAllowedHosts: [] as string[],
+  webRemoteDevices: [] as unknown[],
   workspace: '/tmp/workspace',
 };
+
+vi.mock('electron', () => ({
+  app: { getPath: () => '/tmp/whim-test' },
+}));
 
 vi.mock('../config', () => ({
   getConfig: () => config,
   getConfigValue: (key: string) => (config as Record<string, unknown>)[key],
   ensureWebRemoteToken: () => config.webRemoteToken,
   normalizeWebRemotePort: (value: unknown) => Number(value) || 0,
+  setConfigValue: (key: string, value: unknown) => { (config as Record<string, unknown>)[key] = value; },
 }));
 
 vi.mock('./gateway', async () => {
@@ -53,6 +63,8 @@ let port = 0;
 interface TestResponse {
   status: number;
   body: string;
+  headers: Record<string, string | string[] | undefined>;
+  setCookie: string | undefined;
   json(): unknown;
 }
 
@@ -83,9 +95,12 @@ function request(
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
         res.on('end', () => {
           const body = Buffer.concat(chunks).toString('utf-8');
+          const setCookie = res.headers['set-cookie'];
           resolve({
             status: res.statusCode ?? 0,
             body,
+            headers: res.headers,
+            setCookie: Array.isArray(setCookie) ? setCookie[0] : setCookie,
             json: () => JSON.parse(body),
           });
         });
@@ -206,7 +221,74 @@ describe('web remote server', () => {
     });
   });
 
+  describe('sessions', () => {
+    it('exchanges the bootstrap token for an HttpOnly session cookie', async () => {
+      const res = await request('/api/session', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      expect(res.status).toBe(200);
+      expect(res.setCookie).toBeDefined();
+      expect(res.setCookie).toContain('HttpOnly');
+      expect(res.setCookie).toContain('SameSite=Strict');
+      // Plain HTTP on loopback: a Secure cookie would simply be discarded.
+      expect(res.setCookie).not.toContain('Secure');
+    });
+
+    it('authenticates subsequent requests with only the cookie', async () => {
+      const issued = await request('/api/session', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      const cookie = (issued.setCookie ?? '').split(';')[0];
+
+      const res = await request('/api/health', { headers: { Cookie: cookie } });
+      expect(res.status).toBe(200);
+    });
+
+    it('rejects a forged cookie', async () => {
+      const res = await request('/api/health', { headers: { Cookie: 'whim_session=abc.forged' } });
+      expect(res.status).toBe(401);
+    });
+
+    it('signing out revokes the device', async () => {
+      const issued = await request('/api/session', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      const cookie = (issued.setCookie ?? '').split(';')[0];
+
+      const signOut = await request('/api/session', { method: 'DELETE', headers: { Cookie: cookie } });
+      expect(signOut.status).toBe(200);
+      expect(signOut.setCookie).toContain('Max-Age=0');
+
+      const after = await request('/api/health', { headers: { Cookie: cookie } });
+      expect(after.status).toBe(401);
+    });
+  });
+
+  describe('security headers', () => {
+    it('sends no-referrer so the bootstrap URL cannot leak to linked-out sites', async () => {
+      const res = await request(`/api/health?token=${TOKEN}`);
+      expect(res.headers['referrer-policy']).toBe('no-referrer');
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.headers['x-frame-options']).toBe('DENY');
+    });
+
+    it('does not claim HSTS while serving plain HTTP', async () => {
+      const res = await request(`/api/health?token=${TOKEN}`);
+      expect(res.headers['strict-transport-security']).toBeUndefined();
+    });
+  });
+
   describe('state reporting', () => {
+    it('stays on plain HTTP for a loopback-only bind, since localhost is already a secure context', async () => {
+      const state = await getWebRemoteState();
+      expect(state.tls.mode).toBe('auto');
+      expect(state.tls.active).toBe(false);
+      expect(state.urls.every((url) => url.startsWith('http://'))).toBe(true);
+    });
+
     it('reports running only when every selection is listening', async () => {
       const state = await getWebRemoteState();
       expect(state.running).toBe(true);

@@ -1,10 +1,15 @@
 import { createHash, timingSafeEqual } from 'crypto';
 import type { IncomingHttpHeaders, IncomingMessage } from 'http';
+import type { WebRemoteDevice } from '../../shared/ipc-contract';
+import { extractSessionCookie, type DeviceSessionStore } from './sessions';
 
 export interface AuthResult {
   ok: boolean;
   status: number;
   message: string;
+  /** How the caller proved identity, when it succeeded. */
+  via?: 'token' | 'session';
+  device?: WebRemoteDevice;
 }
 
 interface FailureState {
@@ -46,10 +51,44 @@ export function extractWebSocketProtocolToken(header: string | string[] | undefi
   return null;
 }
 
+export interface AuthenticateInput {
+  headers: IncomingHttpHeaders;
+  url: URL;
+  remoteAddress: string | undefined;
+}
+
 export class WebRemoteAuthenticator {
   private readonly failures = new Map<string, FailureState>();
 
-  constructor(private readonly getExpectedToken: () => string | null | undefined) {}
+  constructor(
+    private readonly getExpectedToken: () => string | null | undefined,
+    private readonly sessions?: DeviceSessionStore,
+  ) {}
+
+  /**
+   * Accepts either a per-device session cookie or the bootstrap token.
+   *
+   * The cookie is checked first: it is the day-to-day credential, is scoped to
+   * one device, and is individually revocable. The token remains valid so that
+   * API clients and the initial pairing flow keep working.
+   */
+  authenticateRequest(input: AuthenticateInput): AuthResult {
+    const key = input.remoteAddress || 'unknown';
+    const now = Date.now();
+    const current = this.failures.get(key);
+
+    if (current && current.lockedUntil > now) {
+      return { ok: false, status: 429, message: 'Too many failed attempts. Try again later.' };
+    }
+
+    const device = this.sessions?.verify(extractSessionCookie(input.headers), input.remoteAddress);
+    if (device) {
+      this.failures.delete(key);
+      return { ok: true, status: 200, message: 'ok', via: 'session', device };
+    }
+
+    return this.authenticate(extractHttpToken(input.headers, input.url), input.remoteAddress);
+  }
 
   authenticate(candidate: string | null | undefined, remoteAddress: string | undefined): AuthResult {
     const key = remoteAddress || 'unknown';
@@ -67,7 +106,7 @@ export class WebRemoteAuthenticator {
 
     if (candidate && constantTimeTokenEqual(candidate, expected)) {
       this.failures.delete(key);
-      return { ok: true, status: 200, message: 'ok' };
+      return { ok: true, status: 200, message: 'ok', via: 'token' };
     }
 
     this.recordFailure(key, now);

@@ -14,7 +14,9 @@ import {
 import type {
   WebRemoteBindSelection,
   WebRemoteInterface,
+  WebRemoteTlsMode,
 } from '../shared/ipc-contract';
+import type { WebRemoteDeviceRecord } from './web/sessions';
 
 export type { SandboxPolicy };
 export type { ExportFormat, ExportDestination };
@@ -158,6 +160,11 @@ export interface AppConfig {
   webRemotePort: number;
   webRemoteToken: string;
   webRemoteBindSelections: WebRemoteBindSelection[];  // durable intent, resolved to addresses at bind time
+  webRemoteTlsMode: WebRemoteTlsMode;   // 'auto' = self-signed on non-loopback binds
+  webRemoteTlsCertPath: string;         // used when webRemoteTlsMode is 'custom'
+  webRemoteTlsKeyPath: string;
+  webRemoteAllowedHosts: string[];      // extra Host header values (e.g. a reverse proxy hostname)
+  webRemoteDevices: WebRemoteDeviceRecord[];  // browsers holding a session cookie, individually revocable
   hotkeys: Partial<HotkeyConfig>;   // user hotkey overrides (missing keys fall back to DEFAULT_HOTKEYS)
   commentTrigger: 'hover-or-caret' | 'caret'; // how the canvas surfaces comment threads
   profiles: WorkspaceProfile[];     // saved workspace profiles (work / personal / …)
@@ -342,6 +349,11 @@ const DEFAULT_CONFIG: AppConfig = {
   webRemotePort: DEFAULT_WEB_REMOTE_PORT,
   webRemoteToken: '',
   webRemoteBindSelections: [],
+  webRemoteTlsMode: 'auto',
+  webRemoteTlsCertPath: '',
+  webRemoteTlsKeyPath: '',
+  webRemoteAllowedHosts: [],
+  webRemoteDevices: [],
   hotkeys: {},
   commentTrigger: 'caret',
   profiles: [],

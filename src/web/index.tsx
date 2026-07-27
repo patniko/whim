@@ -5,12 +5,11 @@ import remarkGfm from 'remark-gfm';
 import type { AgentListAllItem, AgentPersona, GitSyncStatus, SpaceEvent } from '../shared/ipc-contract';
 import type { Space } from '../shared/types';
 import type { ChatEvent } from '../shared/chat-types';
-import { WebRemoteClient } from './lib/client';
+import { endSession, establishSession, hasSession, WebRemoteClient } from './lib/client';
 import type { WebRemoteEvent } from '../main/web/event-hub';
 import { agentGlyph, describeApproval, formatDueDate, humanizeToolName, statusLabel, timeAgo } from './lib/format';
 import { applyChatEvent, applyChatEvents, parseHistory, type Bubble } from './lib/transcript';
 
-const TOKEN_KEY = 'whim.webRemoteToken';
 
 type Tab = 'spaces' | 'workers' | 'history';
 
@@ -24,33 +23,97 @@ interface HistoryCommit {
 
 // ── Root + auth ────────────────────────────────────────────
 
+/**
+ * The token is a one-time bootstrap credential only. It is exchanged for an
+ * HttpOnly session cookie and then dropped from the URL, so it never lands in
+ * browser history, a `Referer` header, or localStorage.
+ */
 function App() {
-  const urlToken = new URLSearchParams(window.location.search).get('token');
-  const [token, setToken] = useState(() => urlToken || localStorage.getItem(TOKEN_KEY) || '');
+  const [authState, setAuthState] = useState<'checking' | 'authed' | 'unauthed'>('checking');
+  const [authError, setAuthError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (urlToken) {
-      localStorage.setItem(TOKEN_KEY, urlToken);
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-  }, [urlToken]);
+    let cancelled = false;
+    const params = new URLSearchParams(window.location.search);
+    const urlToken = params.get('token');
 
-  if (!token) {
-    return <Login onLogin={(next) => { localStorage.setItem(TOKEN_KEY, next); setToken(next); }} />;
+    (async () => {
+      if (urlToken) {
+        window.history.replaceState({}, '', window.location.pathname);
+        try {
+          await establishSession(urlToken);
+          if (!cancelled) setAuthState('authed');
+          return;
+        } catch (err: any) {
+          if (!cancelled) setAuthError(err?.message || 'Sign-in failed.');
+        }
+      }
+      const ok = await hasSession();
+      if (!cancelled) setAuthState(ok ? 'authed' : 'unauthed');
+    })();
+
+    return () => { cancelled = true; };
+  }, []);
+
+  if (authState === 'checking') {
+    return <main className="login"><div className="brand">whim</div><p>Connecting…</p></main>;
   }
-  return <RemoteApp token={token} onLogout={() => { localStorage.removeItem(TOKEN_KEY); setToken(''); }} />;
+
+  if (authState === 'unauthed') {
+    return (
+      <Login
+        error={authError}
+        onLogin={async (token) => {
+          await establishSession(token);
+          setAuthError(null);
+          setAuthState('authed');
+        }}
+      />
+    );
+  }
+
+  return (
+    <RemoteApp
+      onLogout={async () => {
+        await endSession();
+        setAuthState('unauthed');
+      }}
+      onUnauthorized={() => {
+        setAuthError('Your session is no longer valid. Enter the token from Settings to reconnect.');
+        setAuthState('unauthed');
+      }}
+    />
+  );
 }
 
-function Login({ onLogin }: { onLogin: (token: string) => void }) {
+function Login({ onLogin, error }: { onLogin: (token: string) => Promise<void>; error: string | null }) {
   const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(error);
+
   return (
     <main className="login">
       <div className="brand">whim</div>
       <h1>Remote access</h1>
       <p>Enter the token from the desktop app's settings, or scan the QR code from your phone.</p>
-      <form onSubmit={(e) => { e.preventDefault(); if (value.trim()) onLogin(value.trim()); }}>
+      {failure && <p className="login-error">{failure}</p>}
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (!value.trim() || busy) return;
+          setBusy(true);
+          setFailure(null);
+          try {
+            await onLogin(value.trim());
+          } catch (err: any) {
+            setFailure(err?.message || 'Sign-in failed.');
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
         <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Token" autoFocus />
-        <button type="submit">Connect</button>
+        <button type="submit" disabled={busy}>{busy ? 'Connecting…' : 'Connect'}</button>
       </form>
     </main>
   );
@@ -58,8 +121,8 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
 
 // ── Main app ───────────────────────────────────────────────
 
-function RemoteApp({ token, onLogout }: { token: string; onLogout: () => void }) {
-  const client = useMemo(() => new WebRemoteClient(token), [token]);
+function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnauthorized: () => void }) {
+  const client = useMemo(() => new WebRemoteClient(), []);
   const [tab, setTab] = useState<Tab>('spaces');
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [agents, setAgents] = useState<AgentListAllItem[]>([]);
@@ -100,7 +163,7 @@ function RemoteApp({ token, onLogout }: { token: string; onLogout: () => void })
 
   useEffect(() => {
     void refreshAll();
-    return client.connect((event) => handleEvent(event), setStatus);
+    return client.connect((event) => handleEvent(event), setStatus, onUnauthorized);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
 

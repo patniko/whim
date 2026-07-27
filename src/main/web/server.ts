@@ -1,30 +1,39 @@
 import * as fs from 'fs';
 import * as http from 'http';
-import * as net from 'net';
-import * as os from 'os';
+import * as https from 'https';
 import * as path from 'path';
 import type { Duplex } from 'stream';
+import { app } from 'electron';
 import * as QRCode from 'qrcode';
 import { WebSocket, WebSocketServer } from 'ws';
 import type {
   WebRemoteBindingStatus,
   WebRemoteBindSelection,
   WebRemoteState,
+  WebRemoteTlsState,
 } from '../../shared/ipc-contract';
 import {
   ensureWebRemoteToken,
   getConfig,
   getConfigValue,
   normalizeWebRemotePort,
+  setConfigValue,
 } from '../config';
 import {
-  extractHttpToken,
   extractWebSocketProtocolToken,
   getRemoteAddress,
   WebRemoteAuthenticator,
 } from './auth';
 import { WebRemoteBinder, type BoundListener } from './binder';
+import { createHostPolicy, type HostPolicy } from './hosts';
 import { listWebRemoteInterfaces, normalizeBindSelections, resolveBindSelections } from './interfaces';
+import { resolveTls, type TlsMaterial } from './tls';
+import {
+  buildClearedSessionCookie,
+  buildSessionCookie,
+  DeviceSessionStore,
+  type WebRemoteDeviceRecord,
+} from './sessions';
 import { GatewayError, invokeWebRemoteCommand } from './gateway';
 import { subscribeWebRemoteEvents } from './event-hub';
 
@@ -50,12 +59,25 @@ const KEEP_ALIVE_TIMEOUT_MS = 30_000;
 
 const clients = new Set<WebSocket>();
 let lastError: string | null = null;
+let tlsMaterial: TlsMaterial | null = null;
+let tlsState: WebRemoteTlsState = {
+  mode: 'auto', active: false, fingerprint: null, expiresAt: null, error: null,
+};
+let hostPolicy: HostPolicy = createHostPolicy({ boundAddresses: [], allowedHosts: [] });
 
-const authenticator = new WebRemoteAuthenticator(() => getConfigValue('webRemoteToken'));
+export const sessionStore = new DeviceSessionStore({
+  load: () => (getConfigValue('webRemoteDevices') as WebRemoteDeviceRecord[] | undefined) ?? [],
+  save: (records) => setConfigValue('webRemoteDevices', records),
+});
+
+const authenticator = new WebRemoteAuthenticator(() => getConfigValue('webRemoteToken'), sessionStore);
 
 const binder = new WebRemoteBinder({
   listen: (address, port) => startListener(address, port),
   onChange: () => {
+    // The Host allowlist is derived from what we are actually listening on, so
+    // it has to be rebuilt whenever the set of bindings changes.
+    updateHostPolicy();
     const failed = binder.status().filter((entry) => entry.state === 'failed');
     lastError = failed.length > 0
       ? failed.map((entry) => `${entry.label}: ${entry.detail}`).join('; ')
@@ -98,6 +120,11 @@ export async function startWebRemoteServer(): Promise<void> {
   const port = normalizeWebRemotePort(config.webRemotePort);
   const selections = normalizeBindSelections(config.webRemoteBindSelections);
 
+  // TLS material has to exist before the first listener is created, since the
+  // listener type (http vs https) depends on it.
+  applyTls(selections);
+  updateHostPolicy();
+
   lastError = null;
   if (binder.isActive()) {
     await binder.update(selections, port);
@@ -125,7 +152,10 @@ export async function stopWebRemoteServer(): Promise<void> {
     client.terminate();
   }
   clients.clear();
+  tlsMaterial = null;
+  tlsState = { mode: getConfigValue('webRemoteTlsMode') ?? 'auto', active: false, fingerprint: null, expiresAt: null, error: null };
   await binder.stop();
+  updateHostPolicy();
 }
 
 /** Live listeners, exposed for diagnostics and tests. */
@@ -172,6 +202,9 @@ export async function getWebRemoteState(): Promise<WebRemoteState> {
     urls,
     qrDataUrl,
     error: lastError,
+    tls: tlsState,
+    allowedHosts: config.webRemoteAllowedHosts,
+    devices: sessionStore.list(),
   };
 }
 
@@ -191,13 +224,17 @@ function previewStatus(selections: WebRemoteBindSelection[]): WebRemoteBindingSt
 
 function startListener(address: string, port: number): Promise<BoundListener> {
   const wss = new WebSocketServer({ noServer: true });
-  const server = http.createServer((req, res) => {
+  const handler = (req: http.IncomingMessage, res: http.ServerResponse) => {
     void handleHttp(req, res).catch((err) => {
       const status = err instanceof GatewayError ? err.status : 500;
       const message = err instanceof Error ? err.message : 'Internal server error';
       sendJson(res, status, { ok: false, error: { code: 'request_failed', message } });
     });
-  });
+  };
+
+  const server = tlsMaterial
+    ? https.createServer({ cert: tlsMaterial.cert, key: tlsMaterial.key }, handler)
+    : http.createServer(handler);
 
   server.headersTimeout = HEADERS_TIMEOUT_MS;
   server.requestTimeout = REQUEST_TIMEOUT_MS;
@@ -250,15 +287,31 @@ function startListener(address: string, port: number): Promise<BoundListener> {
 
 async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const url = requestUrl(req);
-  if (!isAllowedHost(req.headers.host)) {
+  if (!hostPolicy.allows(req.headers.host)) {
     sendJson(res, 403, { ok: false, error: { code: 'host_not_allowed', message: 'Host header is not allowed.' } });
     return;
   }
 
   if (url.pathname.startsWith('/api/')) {
-    const auth = authenticator.authenticate(extractHttpToken(req.headers, url), getRemoteAddress(req));
+    const auth = authenticator.authenticateRequest({ headers: req.headers, url, remoteAddress: getRemoteAddress(req) });
     if (!auth.ok) {
       sendJson(res, auth.status, { ok: false, error: { code: 'auth_failed', message: auth.message } });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/session') {
+      // Exchange the bootstrap token for a per-device session cookie so the
+      // token stops travelling in the URL (and therefore in history/Referer).
+      const issued = sessionStore.issue(req.headers['user-agent'], getRemoteAddress(req));
+      res.setHeader('Set-Cookie', buildSessionCookie(issued.cookieValue, { secure: tlsState.active }));
+      sendJson(res, 200, { ok: true, result: { device: { id: issued.record.id, label: issued.record.label } } });
+      return;
+    }
+
+    if (req.method === 'DELETE' && url.pathname === '/api/session') {
+      if (auth.device) sessionStore.revoke(auth.device.id);
+      res.setHeader('Set-Cookie', buildClearedSessionCookie());
+      sendJson(res, 200, { ok: true, result: { signedOut: true } });
       return;
     }
 
@@ -295,13 +348,24 @@ async function handleUpgrade(
   wss: WebSocketServer,
 ): Promise<void> {
   const url = requestUrl(req);
-  if (url.pathname !== '/api/events' || !isAllowedHost(req.headers.host)) {
+  if (url.pathname !== '/api/events' || !hostPolicy.allows(req.headers.host)) {
     socket.destroy();
     return;
   }
 
-  const token = extractHttpToken(req.headers, url) ?? extractWebSocketProtocolToken(req.headers['sec-websocket-protocol']);
-  const auth = authenticator.authenticate(token, getRemoteAddress(req));
+  // WebSocket upgrades are not subject to CORS, so without an explicit Origin
+  // check any page the user visits could open an authenticated socket using
+  // their session cookie.
+  if (!isAllowedOrigin(req.headers.origin)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  const protocolToken = extractWebSocketProtocolToken(req.headers['sec-websocket-protocol']);
+  const auth = protocolToken
+    ? authenticator.authenticate(protocolToken, getRemoteAddress(req))
+    : authenticator.authenticateRequest({ headers: req.headers, url, remoteAddress: getRemoteAddress(req) });
   if (!auth.ok) {
     socket.write(`HTTP/1.1 ${auth.status} ${auth.message}\r\nConnection: close\r\n\r\n`);
     socket.destroy();
@@ -341,7 +405,7 @@ function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
 
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    res.writeHead(405);
+    res.writeHead(405, securityHeaders());
     res.end('Method not allowed');
     return;
   }
@@ -352,7 +416,7 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, url: U
   const resolved = path.resolve(root, relativePath);
 
   if (!resolved.startsWith(root + path.sep)) {
-    res.writeHead(403);
+    res.writeHead(403, securityHeaders());
     res.end('Forbidden');
     return;
   }
@@ -361,12 +425,14 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, url: U
     ? path.join(resolved, 'index.html')
     : resolved;
   if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-    res.writeHead(404);
+    res.writeHead(404, securityHeaders());
     res.end('Not found');
     return;
   }
 
   res.writeHead(200, {
+    ...securityHeaders(),
+    'Content-Security-Policy': CONTENT_SECURITY_POLICY,
     'Content-Type': MIME_TYPES[path.extname(filePath)] || 'application/octet-stream',
     'Cache-Control': 'no-store',
   });
@@ -377,8 +443,42 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, url: U
   fs.createReadStream(filePath).pipe(res);
 }
 
+/**
+ * Baseline hardening headers.
+ *
+ * `Referrer-Policy` matters most here: canvas content routinely links out, and
+ * without it the bootstrap URL (which carries the token) would leak to every
+ * site the user clicks through to.
+ */
+function securityHeaders(): Record<string, string> {
+  return {
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Cross-Origin-Opener-Policy': 'same-origin',
+    ...(tlsState.active
+      ? { 'Strict-Transport-Security': 'max-age=31536000' }
+      : {}),
+  };
+}
+
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  // The bundled app uses inline styles; scripts stay same-origin only.
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self' ws: wss:",
+  "frame-ancestors 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "object-src 'none'",
+].join('; ');
+
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
+    ...securityHeaders(),
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
   });
@@ -390,42 +490,62 @@ function requestUrl(req: http.IncomingMessage): URL {
 }
 
 function buildRemoteUrls(bindings: WebRemoteBindingStatus[], port: number, token: string): string[] {
+  const scheme = tlsState.active ? 'https' : 'http';
   const urls: string[] = [];
   for (const binding of bindings) {
     for (const address of binding.addresses) {
       if (address === '0.0.0.0' || address === '::') continue;
       const host = address.includes(':') ? `[${address}]` : address;
-      urls.push(`http://${host}:${port}/?token=${encodeURIComponent(token)}`);
+      urls.push(`${scheme}://${host}:${port}/?token=${encodeURIComponent(token)}`);
     }
   }
   return [...new Set(urls)];
 }
 
-function isAllowedHost(hostHeader: string | undefined): boolean {
-  if (!hostHeader) return true;
-  const host = parseHostHeader(hostHeader);
-  const hostname = os.hostname().toLowerCase();
-  const shortHostname = hostname.split('.')[0];
-  const bound = binder.boundAddresses();
-  const allowed = new Set([
-    'localhost',
-    '127.0.0.1',
-    '::1',
-    hostname,
-    shortHostname,
-    `${shortHostname}.local`,
-    ...bound.map((address) => address.toLowerCase()),
-  ]);
-
-  if (allowed.has(host)) return true;
-  return net.isIP(host) !== 0 && bound.includes(host);
+/**
+ * An Origin is acceptable when its host is one we would accept in a Host
+ * header. Non-browser clients omit Origin entirely; those are allowed, since
+ * the header only exists to protect *browsers* from cross-origin abuse.
+ */
+function isAllowedOrigin(origin: string | undefined): boolean {
+  if (!origin) return true;
+  if (origin === 'null') return false;
+  try {
+    return hostPolicy.allows(new URL(origin).host);
+  } catch {
+    return false;
+  }
 }
 
-function parseHostHeader(hostHeader: string): string {
-  const trimmed = hostHeader.trim().toLowerCase();
-  if (trimmed.startsWith('[')) {
-    const end = trimmed.indexOf(']');
-    return end > 0 ? trimmed.slice(1, end) : trimmed;
-  }
-  return trimmed.split(':')[0];
+function updateHostPolicy(): void {
+  hostPolicy = createHostPolicy({
+    boundAddresses: binder.boundAddresses(),
+    allowedHosts: getConfigValue('webRemoteAllowedHosts') ?? [],
+  });
+}
+
+/**
+ * Resolve TLS material for the addresses these selections currently resolve
+ * to. Loopback-only deployments stay on plain HTTP: `http://localhost` is
+ * already a secure context, so a self-signed cert would add warnings for no
+ * security gain.
+ */
+function applyTls(selections: WebRemoteBindSelection[]): void {
+  const resolved = resolveBindSelections(selections);
+  const addresses = resolved.flatMap((entry) => entry.addresses);
+  const loopbackOnly = resolved.every((entry) => entry.scope === 'loopback');
+  const config = getConfig();
+
+  const result = resolveTls({
+    mode: config.webRemoteTlsMode,
+    certPath: config.webRemoteTlsCertPath,
+    keyPath: config.webRemoteTlsKeyPath,
+    addresses,
+    extraHosts: config.webRemoteAllowedHosts,
+    cachePath: path.join(app.getPath('userData'), 'web-remote-tls.json'),
+    loopbackOnly,
+  });
+
+  tlsMaterial = result.material;
+  tlsState = result.state;
 }
