@@ -46,6 +46,7 @@ const MIME_TYPES: Record<string, string> = {
   '.png': 'image/png',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
 };
 
 const MAX_BODY_BYTES = 1_000_000;
@@ -565,6 +566,9 @@ async function serveAttachment(res: http.ServerResponse, url: URL): Promise<void
 const HASHED_ASSET_RE = /\.[0-9a-f]{12}\.(js|css)$/;
 
 export function cacheControlFor(filePath: string): string {
+  // A cached service worker would pin the app to an old shell indefinitely,
+  // since the worker is what decides when to fetch a new one.
+  if (path.basename(filePath) === 'sw.js') return 'no-cache';
   if (HASHED_ASSET_RE.test(filePath)) return 'public, max-age=31536000, immutable';
   // index.html must always be revalidated, or a client would never learn about
   // a new bundle. `no-cache` still permits a cheap 304.

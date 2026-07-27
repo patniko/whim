@@ -39,8 +39,22 @@ function copyWebAssets() {
   const srcDir = path.join(__dirname, '..', 'src', 'web');
   const distDir = path.join(__dirname, '..', 'dist', 'web');
   fs.mkdirSync(distDir, { recursive: true });
-  for (const asset of ['index.html', 'styles.css']) {
+  for (const asset of ['index.html', 'styles.css', 'manifest.webmanifest', 'sw.js']) {
     fs.copyFileSync(path.join(srcDir, asset), path.join(distDir, asset));
+  }
+  copyPwaIcons(distDir);
+}
+
+/**
+ * The PWA manifest needs square PNGs at web sizes. Reuse the desktop iconset
+ * rather than carrying a second copy of the same artwork.
+ */
+function copyPwaIcons(distDir) {
+  const iconset = path.join(__dirname, '..', 'build', 'icon.iconset');
+  const sources = { 'icon-192.png': 'icon_128x128@2x.png', 'icon-512.png': 'icon_256x256@2x.png' };
+  for (const [target, source] of Object.entries(sources)) {
+    const from = path.join(iconset, source);
+    if (fs.existsSync(from)) fs.copyFileSync(from, path.join(distDir, target));
   }
 }
 
@@ -77,6 +91,28 @@ function fingerprintWebAssets() {
   }
 
   fs.writeFileSync(htmlPath, html);
+  writeServiceWorkerShell(distDir, html);
+}
+
+/**
+ * The service worker precaches the shell, but the bundle filenames are only
+ * known after fingerprinting — so inject the resolved list (and a build id
+ * derived from it, which is what invalidates the old cache) at build time.
+ */
+function writeServiceWorkerShell(distDir, html) {
+  const swPath = path.join(distDir, 'sw.js');
+  if (!fs.existsSync(swPath)) return;
+
+  const hashed = [...html.matchAll(/(?:src|href)="([^"]+)"/g)]
+    .map((match) => match[1])
+    .filter((href) => /^(?!https?:|\/\/)/.test(href) && /\.(js|css)$/.test(href))
+    .map((href) => (href.startsWith('/') ? href : `/${href}`));
+
+  const shell = ['/index.html', ...hashed, '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+  const buildId = crypto.createHash('sha256').update(shell.join('|')).digest('hex').slice(0, 12);
+  const preamble = `self.__WHIM_SHELL__ = ${JSON.stringify(shell)};\nself.__WHIM_BUILD__ = ${JSON.stringify(buildId)};\n`;
+
+  fs.writeFileSync(swPath, preamble + fs.readFileSync(swPath, 'utf-8'));
 }
 
 async function main() {
@@ -85,7 +121,7 @@ async function main() {
     const rendererCtx = await esbuild.context(rendererOptions);
     const webCtx = await esbuild.context(webOptions);
     await Promise.all([rendererCtx.watch(), webCtx.watch()]);
-    for (const asset of ['index.html', 'styles.css']) {
+    for (const asset of ['index.html', 'styles.css', 'manifest.webmanifest', 'sw.js']) {
       fs.watchFile(path.join(__dirname, '..', 'src', 'web', asset), { interval: 300 }, copyWebAssets);
     }
     console.log('[esbuild] Watching renderer and web remote...');

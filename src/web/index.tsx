@@ -9,6 +9,7 @@ import { endSession, establishSession, hasSession, WebRemoteClient } from './lib
 import type { WebRemoteEvent } from '../main/web/event-hub';
 import { agentGlyph, describeApproval, formatDueDate, humanizeToolName, statusLabel, timeAgo } from './lib/format';
 import { applyInteractionEvent, pruneInteractions, type InteractionMap, type PendingInteraction } from './lib/interactions';
+import { notificationState, notifyForEvent, registerServiceWorker, requestNotificationPermission, type NotificationPermissionState } from './lib/notifications';
 import { applyChatEvent, applyChatEvents, parseHistory, type Bubble } from './lib/transcript';
 
 
@@ -132,6 +133,7 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
   const [git, setGit] = useState<GitSyncStatus | null>(null);
   // Questions an agent is blocked on that aren't carried by `agent:list-all`.
   const [interactions, setInteractions] = useState<InteractionMap>({});
+  const [notifications, setNotifications] = useState<NotificationPermissionState>(() => notificationState());
   const [status, setStatus] = useState('connecting');
   const [error, setError] = useState<string | null>(null);
 
@@ -200,6 +202,7 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
     }
     if (ch.startsWith('agent:')) {
       setInteractions((prev) => applyInteractionEvent(prev, ch, event.payload));
+      notifyForEvent(ch, event.payload);
     }
     if (ch === 'workspace:git-sync-changed') { setGit(event.payload as GitSyncStatus); return; }
     if (ch === 'workspace:committed') { void refreshGit(); return; }
@@ -216,7 +219,15 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
 
   return (
     <div className="app">
-      <Topbar status={status} git={git} client={client} onSync={refreshGit} onLogout={onLogout} />
+      <Topbar
+        status={status}
+        git={git}
+        client={client}
+        notifications={notifications}
+        onEnableNotifications={() => { void requestNotificationPermission().then(setNotifications); }}
+        onSync={refreshGit}
+        onLogout={onLogout}
+      />
 
       {error && <div className="banner">{error}</div>}
 
@@ -282,10 +293,12 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
 
 // ── Topbar + git sync ──────────────────────────────────────
 
-function Topbar({ status, git, client, onSync, onLogout }: {
+function Topbar({ status, git, client, notifications, onEnableNotifications, onSync, onLogout }: {
   status: string;
   git: GitSyncStatus | null;
   client: WebRemoteClient;
+  notifications: NotificationPermissionState;
+  onEnableNotifications: () => void;
   onSync: () => Promise<void>;
   onLogout: () => void;
 }) {
@@ -329,6 +342,9 @@ function Topbar({ status, git, client, onSync, onLogout }: {
             )}
             {git.ahead === 0 && git.behind === 0 && <span className="git-synced" title="Up to date">✓ synced</span>}
           </div>
+        )}
+        {notifications === 'default' && (
+          <button className="ghost icon-btn" onClick={onEnableNotifications} title="Enable alerts for approvals and questions">🔔</button>
         )}
         <button className="ghost icon-btn" onClick={onLogout} title="Log out">⎋</button>
       </div>
@@ -1301,5 +1317,7 @@ async function approve(client: WebRemoteClient, agent: AgentListAllItem, approve
   await client.invoke('agent:approve', agent.agentId, agent.pendingApprovalId, approved);
   await onRefresh();
 }
+
+registerServiceWorker();
 
 createRoot(document.getElementById('root')!).render(<App />);

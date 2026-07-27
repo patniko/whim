@@ -365,6 +365,20 @@ describe('web remote server', () => {
       expect(state.bindings.map((binding) => binding.state)).toEqual(['listening', 'pending']);
     });
   });
+  describe('cache policy', () => {
+    it('caches content-hashed bundles forever', () => {
+      expect(cacheControlFor('/dist/web/app.d4eb09cff260.js')).toBe('public, max-age=31536000, immutable');
+    });
+
+    it('never caches the service worker', () => {
+      expect(cacheControlFor('/dist/web/sw.js')).toBe('no-cache');
+    });
+
+    it('revalidates index.html so a new bundle is picked up', () => {
+      expect(cacheControlFor('/dist/web/index.html')).toBe('no-cache');
+    });
+  });
+
   describe('attachment route', () => {
     it('requires spaceId and path', async () => {
       const res = await request('/api/attachment', { headers: { Authorization: `Bearer ${TOKEN}` } });
