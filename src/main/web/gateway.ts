@@ -2,6 +2,7 @@ import type { IpcCommandChannel } from '../../shared/ipc-contract';
 import { webAccessFor } from '../../shared/web-access';
 import { canReadSetting } from '../../shared/settings-access';
 import { readSetting } from '../services/settings';
+import { callRegisteredHandler, hasRegisteredHandler } from '../ipc/registry';
 import type { AgentAnchor, CreateSpaceInput, Space } from '../../shared/types';
 import * as path from 'path';
 import {
@@ -282,11 +283,19 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
   },
 };
 
-/** Channels with a gateway implementation, whatever their classification. */
+/** Channels the gateway implements itself, rather than delegating. */
 export const WEB_REMOTE_IMPLEMENTED_CHANNELS = Object.keys(HANDLERS) as IpcCommandChannel[];
 
+/**
+ * A channel is reachable if it is classified `allow` and *some* implementation
+ * exists — either a gateway-specific one above, or the desktop handler itself.
+ *
+ * Delegating to the desktop handler is the point: the browser runs the real
+ * renderer, so it calls the same ~150 commands the desktop does, and a gateway
+ * that re-implements them by hand would be permanently behind.
+ */
 export function isAllowedWebRemoteCommand(channel: string): channel is WebRemoteCommandChannel {
-  return webAccessFor(channel) === 'allow' && channel in HANDLERS;
+  return webAccessFor(channel) === 'allow' && (channel in HANDLERS || hasRegisteredHandler(channel));
 }
 
 /**
@@ -321,7 +330,12 @@ export async function invokeWebRemoteCommand(channel: string, args: unknown[]): 
 
   assertSettingKeyAllowed(channel, args);
 
-  const result = await HANDLERS[channel]!(args);
+  // Gateway-specific implementations win, because the few that exist are there
+  // for a reason the desktop version cannot serve — merging concurrent canvas
+  // writes, filtering settings by key, routing a launch without a window.
+  // Everything else runs the exact code the desktop runs.
+  const gatewayHandler = HANDLERS[channel as IpcCommandChannel];
+  const result = gatewayHandler ? await gatewayHandler(args) : await callRegisteredHandler(channel, args);
   return JSON.parse(JSON.stringify(result ?? null));
 }
 

@@ -1,4 +1,5 @@
-import { ipcMain, shell, BrowserWindow, ShareMenu } from 'electron';
+import { registerIpcHandler } from './registry';
+import { shell, BrowserWindow, ShareMenu } from 'electron';
 import * as fs from 'fs';
 import { buildExport } from '../export';
 import {
@@ -11,13 +12,13 @@ import { showOpenDialog } from './dialog-utils';
 
 export function registerExportHandlers(): void {
   // Export a canvas to a temp file and return its path (no sharing/reveal).
-  ipcMain.handle('canvas:export', async (_event, spaceId: string, format: ExportFormat) => {
+  registerIpcHandler('canvas:export', async (_event, spaceId: string, format: ExportFormat) => {
     return buildExport(spaceId, format);
   });
 
   // Export a canvas, then hand it to the OS share sheet (macOS) or reveal it in
   // the file manager (Windows/Linux fallback — no native share API in Electron).
-  ipcMain.handle('canvas:share', async (event, spaceId: string, format: ExportFormat) => {
+  registerIpcHandler('canvas:share', async (event, spaceId: string, format: ExportFormat) => {
     const result = await buildExport(spaceId, format);
     if ('error' in result) return result;
 
@@ -40,7 +41,7 @@ export function registerExportHandlers(): void {
 
   // Export a canvas straight into a configured destination folder, then reveal
   // it so the user can confirm / open it in the synced app.
-  ipcMain.handle(
+  registerIpcHandler(
     'canvas:export-to-destination',
     async (_event, spaceId: string, destinationId: string, format?: ExportFormat) => {
       const dest = getExportDestinationById(destinationId);
@@ -55,11 +56,11 @@ export function registerExportHandlers(): void {
     },
   );
 
-  ipcMain.handle('export-destinations:list', () => {
+  registerIpcHandler('export-destinations:list', () => {
     return getExportDestinations();
   });
 
-  ipcMain.handle('export-destinations:save', (_event, destinations: unknown) => {
+  registerIpcHandler('export-destinations:save', (_event, destinations: unknown) => {
     try {
       const saved = setExportDestinations(destinations);
       return { ok: true as const, destinations: saved };
@@ -69,7 +70,7 @@ export function registerExportHandlers(): void {
   });
 
   // Generic directory picker used by the export-destinations settings editor.
-  ipcMain.handle('dialog:select-folder', async (event, options?: { title?: string }) => {
+  registerIpcHandler('dialog:select-folder', async (event, options?: { title?: string }) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     const dialogOpts = {
       title: options?.title || 'Select Folder',

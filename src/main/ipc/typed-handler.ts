@@ -7,6 +7,7 @@
  */
 
 import { BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { registerIpcHandler } from './registry';
 import { mirrorRendererEvent } from '../web/event-hub';
 import type {
   IpcCommandChannel,
@@ -28,7 +29,7 @@ export function registerHandler<C extends IpcCommandChannel>(
     ...args: IpcCommands[C]['args']
   ) => IpcCommands[C]['result'] | Promise<IpcCommands[C]['result']>,
 ): void {
-  ipcMain.handle(channel, handler as any);
+  registerIpcHandler(channel, handler as any);
 }
 
 /**

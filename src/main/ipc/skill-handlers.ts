@@ -1,4 +1,5 @@
-import { ipcMain, shell } from 'electron';
+import { registerIpcHandler } from './registry';
+import { shell } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { isInitialized, listSkills, getSkill, upsertSkill, removeSkill, updateSkillSchedule } from '../database';
@@ -13,12 +14,12 @@ import type { SkillFrontmatter, Skill, SkillInvocationInput, SkillScheduleFreque
 const SKILL_FILE = 'SKILL.md';
 
 export function registerSkillHandlers(): void {
-  ipcMain.handle('skill:list', () => {
+  registerIpcHandler('skill:list', () => {
     if (!isInitialized()) return [];
     return listSkills();
   });
 
-  ipcMain.handle('skill:read', (_event, skillId: string) => {
+  registerIpcHandler('skill:read', (_event, skillId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -34,7 +35,7 @@ export function registerSkillHandlers(): void {
     }
   });
 
-  ipcMain.handle('skill:write', (_event, skillId: string, frontmatter: Record<string, unknown>, body: string) => {
+  registerIpcHandler('skill:write', (_event, skillId: string, frontmatter: Record<string, unknown>, body: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -51,7 +52,7 @@ export function registerSkillHandlers(): void {
     }
   });
 
-  ipcMain.handle('skill:create', (_event, name: string) => {
+  registerIpcHandler('skill:create', (_event, name: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -99,7 +100,7 @@ export function registerSkillHandlers(): void {
     return skill;
   });
 
-  ipcMain.handle('skill:delete', (_event, skillId: string) => {
+  registerIpcHandler('skill:delete', (_event, skillId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return false;
 
@@ -116,7 +117,7 @@ export function registerSkillHandlers(): void {
     }
   });
 
-  ipcMain.handle('skill:open-folder', (_event, skillId: string) => {
+  registerIpcHandler('skill:open-folder', (_event, skillId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return;
 
@@ -126,7 +127,7 @@ export function registerSkillHandlers(): void {
     shell.openPath(path.join(workspace, skill.folder));
   });
 
-  ipcMain.handle('skill:create-from-prompt', async (_event, description: string) => {
+  registerIpcHandler('skill:create-from-prompt', async (_event, description: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -173,7 +174,7 @@ export function registerSkillHandlers(): void {
     return result;
   });
 
-  ipcMain.handle('skill:create-space', async (_event, skillId: string) => {
+  registerIpcHandler('skill:create-space', async (_event, skillId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -181,7 +182,7 @@ export function registerSkillHandlers(): void {
     return 'error' in result ? result : result.space;
   });
 
-  ipcMain.handle('skill:launch', async (_event, skillId: string) => {
+  registerIpcHandler('skill:launch', async (_event, skillId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -189,13 +190,13 @@ export function registerSkillHandlers(): void {
     return 'space' in result ? result.space : result;
   });
 
-  ipcMain.handle('skill:invoke', async (_event, input: SkillInvocationInput) => {
+  registerIpcHandler('skill:invoke', async (_event, input: SkillInvocationInput) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
     return invokeSkill(input);
   });
 
-  ipcMain.handle('skill:set-schedule', (_event, skillId: string, frequency: SkillScheduleFrequency, time: string, day: number | null) => {
+  registerIpcHandler('skill:set-schedule', (_event, skillId: string, frequency: SkillScheduleFrequency, time: string, day: number | null) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -239,7 +240,7 @@ export function registerSkillHandlers(): void {
     return getSkill(skillId)!;
   });
 
-  ipcMain.handle('skill:clear-schedule', (_event, skillId: string) => {
+  registerIpcHandler('skill:clear-schedule', (_event, skillId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
