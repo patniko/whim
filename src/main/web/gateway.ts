@@ -1,5 +1,7 @@
 import type { IpcCommandChannel } from '../../shared/ipc-contract';
 import { webAccessFor } from '../../shared/web-access';
+import { canReadSetting } from '../../shared/settings-access';
+import { readSetting } from '../services/settings';
 import type { AgentAnchor, CreateSpaceInput, Space } from '../../shared/types';
 import * as path from 'path';
 import {
@@ -49,6 +51,8 @@ export class GatewayError extends Error {
 type Handler = (args: unknown[]) => Promise<unknown> | unknown;
 
 const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
+  // Key-filtered by assertSettingKeyAllowed before this ever runs.
+  'settings:get': (args) => readSetting(expectString(args, 0, 'key')),
   'space:create': createSpaceFromArgs,
   'space:classify': classifySpaceFromArgs,
   'space:resolve-date': resolveDateFromArgs,
@@ -285,6 +289,19 @@ export function isAllowedWebRemoteCommand(channel: string): channel is WebRemote
   return webAccessFor(channel) === 'allow' && channel in HANDLERS;
 }
 
+/**
+ * `settings:get` is reachable, but filtered per key.
+ *
+ * The renderer needs a handful of presentation settings and the workspace
+ * path to start at all, while other keys hold credentials and control what
+ * the host executes. See settings-access.ts for the reasoning behind each.
+ */
+function assertSettingKeyAllowed(channel: string, args: unknown[]): void {
+  if (channel === 'settings:get' && !canReadSetting(args[0])) {
+    throw new GatewayError('setting_not_allowed', 403, `Setting is not readable over web remote: ${String(args[0])}`);
+  }
+}
+
 export async function invokeWebRemoteCommand(channel: string, args: unknown[]): Promise<unknown> {
   if (!isAllowedWebRemoteCommand(channel)) {
     // Distinguish the three reasons, so a remote client can degrade sensibly
@@ -301,6 +318,8 @@ export async function invokeWebRemoteCommand(channel: string, args: unknown[]): 
   if (!Array.isArray(args)) {
     throw invalidArg('args must be an array');
   }
+
+  assertSettingKeyAllowed(channel, args);
 
   const result = await HANDLERS[channel]!(args);
   return JSON.parse(JSON.stringify(result ?? null));

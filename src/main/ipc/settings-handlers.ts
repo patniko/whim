@@ -13,30 +13,12 @@ import { onAutoHideSidePaneChanged, broadcastHotkeysChanged } from '../window-ma
 import { setAutoDownload } from '../update-service';
 import { getWebRemoteState, restartWebRemoteServer, sessionStore, syncWebRemoteServer } from '../web/server';
 import { listWebRemoteInterfaces, normalizeBindSelections } from '../web/interfaces';
+import { readSetting } from '../services/settings';
 
 const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 export function registerSettingsHandlers(): void {
-  ipcMain.handle('settings:get', (_event, key: string) => {
-    const configKeyMap: Record<string, keyof ReturnType<typeof getConfig>> = {
-      workspace_root: 'workspace',
-      theme: 'theme',
-      model: 'model',
-      cli_path: 'cliPath',
-      cli_source: 'cliSource',
-      cli_server_url: 'cliServerUrl',
-      cli_server_token: 'cliServerToken',
-      auto_hide_side_pane: 'autoHideSidePane',
-      auto_download_updates: 'autoDownloadUpdates',
-      remoteAutoEnable: 'remoteAutoEnable',
-      comment_trigger: 'commentTrigger',
-      quick_start_completed: 'quickStartCompleted',
-      onboarding_tips_seen: 'onboardingTipsSeen',
-    };
-    const configKey = configKeyMap[key];
-    if (configKey) return getConfigValue(configKey);
-    return null;
-  });
+  ipcMain.handle('settings:get', (_event, key: string) => readSetting(key));
 
   ipcMain.handle('settings:set', async (_event, key: string, value: string) => {
     if (key === 'theme') {

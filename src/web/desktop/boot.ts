@@ -27,16 +27,24 @@ async function boot(): Promise<void> {
   (window as any).__platform = transport.platform;
 
   const client = new WebRemoteClient();
+  let interfaceRunning = false;
+
   client.connect(
     (event) => dispatch(event),
     () => {},
     () => showFatal('Signed out', 'This device is no longer paired.'),
-    // A missed-event gap means in-memory state is unreliable. The renderer has
-    // no incremental resync path, so the honest recovery is a reload.
-    () => window.location.reload(),
+    () => {
+      // The first connection always reports a resync: the client has no state
+      // to patch, which is precisely what a freshly loaded page is. Reloading
+      // on that signal restarts the page before it has finished starting —
+      // an infinite reload loop. Only a gap that opens *after* the interface
+      // is live means we have missed something worth recovering from.
+      if (interfaceRunning) window.location.reload();
+    },
   );
 
   await loadRenderer();
+  interfaceRunning = true;
 }
 
 /**

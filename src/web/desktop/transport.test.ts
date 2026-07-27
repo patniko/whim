@@ -55,7 +55,7 @@ describe('web transport', () => {
      */
     it('refuses denied channels without touching the network', async () => {
       const { transport } = createWebTransport();
-      await expect(transport.invoke('settings:get', 'theme')).rejects.toThrow(DeniedError);
+      await expect(transport.invoke('settings:set', 'theme', 'dark')).rejects.toThrow(DeniedError);
       expect(fetchMock).not.toHaveBeenCalled();
     });
 

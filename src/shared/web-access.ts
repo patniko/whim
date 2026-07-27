@@ -38,11 +38,15 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   // Needs a secure context for getUserMedia, which TLS now provides.
   'voice:transcribe': 'allow',
 
-  // ── Settings — withheld ──
-  // Settings carry sandbox defaults, workspace selection and remote access
-  // itself. Anyone who reaches the remote could otherwise widen their own
-  // privileges from the browser.
-  'settings:get': 'deny',
+  // ── Settings — reachable, but filtered by key ──
+  // Settings carry sandbox defaults, CLI selection and remote access itself,
+  // so these are *not* open channels: settings-access.ts allowlists which keys
+  // may be read and which may be written, and the gateway refuses the rest.
+  // The channel has to be reachable because the renderer cannot boot without
+  // reading `workspace_root`.
+  'settings:get': 'allow',
+  // Writes stay denied: the desktop setter respawns the CLI and reconfigures
+  // the updater, which is more than a browser should reach.
   'settings:set': 'deny',
   'web-remote:get-state': 'deny',
   'web-remote:set-enabled': 'deny',

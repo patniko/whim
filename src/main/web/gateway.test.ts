@@ -117,3 +117,28 @@ describe('classification and implementation stay in sync', () => {
     }
   });
 });
+
+describe('settings key filtering', () => {
+  it('serves a setting the interface needs to boot', async () => {
+    // Resolving at all is the assertion: the value depends on config, but a
+    // refusal here would stop the web interface from mounting.
+    await expect(invokeWebRemoteCommand('settings:get', ['workspace_root'])).resolves.toBeDefined();
+  });
+
+  it('refuses a credential even though the channel is allowed', async () => {
+    // The channel is classified `allow`; the protection is per key. If this
+    // ever passes, the CLI server token is readable by any paired browser.
+    await expect(invokeWebRemoteCommand('settings:get', ['cli_server_token']))
+      .rejects.toThrow(/not readable/i);
+  });
+
+  it('refuses an unlisted setting', async () => {
+    await expect(invokeWebRemoteCommand('settings:get', ['sandbox_policy']))
+      .rejects.toThrow(/not readable/i);
+  });
+
+  it('refuses writing settings entirely', async () => {
+    await expect(invokeWebRemoteCommand('settings:set', ['theme', 'dark']))
+      .rejects.toThrow(/not available/i);
+  });
+});
