@@ -4852,6 +4852,7 @@ const webRemoteTlsKey = document.getElementById('web-remote-tls-key') as HTMLInp
 const webRemoteTlsStatus = document.getElementById('web-remote-tls-status') as HTMLDivElement | null;
 const webRemoteAllowedHosts = document.getElementById('web-remote-allowed-hosts') as HTMLInputElement | null;
 const webRemoteDeviceList = document.getElementById('web-remote-device-list') as HTMLDivElement | null;
+const webRemoteActivityList = document.getElementById('web-remote-activity-list') as HTMLDivElement | null;
 
 function setWebRemoteStatus(message: string, error = false): void {
   if (!webRemoteStatus) return;
@@ -5042,6 +5043,51 @@ function renderWebRemoteDevices(state: WebRemoteState): void {
   }
 }
 
+/**
+ * A single `lastError` string told you nothing about what had actually
+ * happened over the connection. This is the smallest thing that lets you
+ * answer "what has been talking to my machine?".
+ */
+function renderWebRemoteActivity(state: WebRemoteState): void {
+  if (!webRemoteActivityList) return;
+  webRemoteActivityList.innerHTML = '';
+
+  if (state.activity.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'settings-hint';
+    empty.textContent = 'No requests yet.';
+    webRemoteActivityList.appendChild(empty);
+    return;
+  }
+
+  for (const entry of state.activity) {
+    const row = document.createElement('div');
+    row.className = `web-remote-activity ${entry.outcome}`;
+
+    const when = document.createElement('span');
+    when.className = 'web-remote-activity-time';
+    when.textContent = new Date(entry.at).toLocaleTimeString();
+    row.appendChild(when);
+
+    const what = document.createElement('span');
+    what.className = 'web-remote-activity-what';
+    what.textContent = entry.channel ? entry.channel : `${entry.method} ${entry.path}`;
+    row.appendChild(what);
+
+    const who = document.createElement('span');
+    who.className = 'web-remote-activity-who';
+    who.textContent = `${entry.identity} · ${entry.remoteAddress}`;
+    row.appendChild(who);
+
+    const status = document.createElement('span');
+    status.className = 'web-remote-activity-status';
+    status.textContent = `${entry.status} · ${entry.durationMs}ms`;
+    row.appendChild(status);
+
+    webRemoteActivityList.appendChild(row);
+  }
+}
+
 function renderWebRemoteState(state: WebRemoteState): void {
   if (webRemoteEnabledCb) webRemoteEnabledCb.checked = state.enabled;
   if (webRemotePortInput) webRemotePortInput.value = String(state.port);
@@ -5051,6 +5097,7 @@ function renderWebRemoteState(state: WebRemoteState): void {
   renderWebRemoteInterfaces(state);
   renderWebRemoteTls(state);
   renderWebRemoteDevices(state);
+  renderWebRemoteActivity(state);
 
   if (webRemoteUrlList) {
     webRemoteUrlList.innerHTML = '';

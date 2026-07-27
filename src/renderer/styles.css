@@ -1680,6 +1680,37 @@ body.dark .sandbox-block-banner-btn:hover {
   font-size: var(--fs-caption, 11px);
 }
 
+.web-remote-activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.web-remote-activity {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  border-radius: var(--set-radius-sm, 6px);
+  font-size: var(--fs-caption, 11px);
+  font-variant-numeric: tabular-nums;
+}
+
+.web-remote-activity:nth-child(odd) {
+  background: var(--set-control-bg, rgba(0, 0, 0, 0.03));
+}
+
+.web-remote-activity-time { opacity: 0.6; flex: 0 0 auto; }
+.web-remote-activity-what { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.web-remote-activity-who { opacity: 0.6; flex: 0 0 auto; }
+.web-remote-activity-status { opacity: 0.6; flex: 0 0 auto; }
+
+.web-remote-activity.denied .web-remote-activity-status,
+.web-remote-activity.rate-limited .web-remote-activity-status { color: #c1121f; opacity: 1; }
+.web-remote-activity.error .web-remote-activity-status { color: #9a6a00; opacity: 1; }
+
 .web-remote-tls-custom {
   display: flex;
   flex-direction: column;
@@ -7066,6 +7097,10 @@ body.dark .web-remote-error { color: #ff9c9c; }
 body.dark .web-remote-binding-listening { color: #6ee7a0; }
 body.dark .web-remote-binding-pending { color: #f0c46a; }
 body.dark .web-remote-binding-failed { color: #ff9c9c; }
+body.dark .web-remote-activity:nth-child(odd) { background: rgba(255, 255, 255, 0.04); }
+body.dark .web-remote-activity.denied .web-remote-activity-status,
+body.dark .web-remote-activity.rate-limited .web-remote-activity-status { color: #ff9c9c; }
+body.dark .web-remote-activity.error .web-remote-activity-status { color: #f0c46a; }
 body.dark .workspace-path { color: rgba(255, 255, 255, 0.6); }
 body.dark .workspace-path.clickable:hover { color: rgba(255, 255, 255, 0.85); }
 

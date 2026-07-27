@@ -25,6 +25,7 @@ import {
   getRemoteAddress,
   WebRemoteAuthenticator,
 } from './auth';
+import { normalizeAddress, redactPath, WebRemoteAuditLog, WebRemoteRateLimiter } from './audit';
 import { WebRemoteBinder, type BoundListener } from './binder';
 import { createHostPolicy, type HostPolicy } from './hosts';
 import { listWebRemoteInterfaces, normalizeBindSelections, resolveBindSelections } from './interfaces';
@@ -73,7 +74,14 @@ export const sessionStore = new DeviceSessionStore({
   save: (records) => setConfigValue('webRemoteDevices', records),
 });
 
-const authenticator = new WebRemoteAuthenticator(() => getConfigValue('webRemoteToken'), sessionStore);
+const authenticator = new WebRemoteAuthenticator(
+  () => getConfigValue('webRemoteToken'),
+  sessionStore,
+  (records) => setConfigValue('webRemoteLockouts', records),
+);
+
+export const auditLog = new WebRemoteAuditLog();
+const rateLimiter = new WebRemoteRateLimiter();
 
 const binder = new WebRemoteBinder({
   listen: (address, port) => startListener(address, port),
@@ -113,6 +121,8 @@ export async function startWebRemoteServer(): Promise<void> {
   if (!workspace) {
     throw new Error('Select a workspace before enabling web remote access.');
   }
+
+  authenticator.hydrate(getConfigValue('webRemoteLockouts'));
 
   const token = ensureWebRemoteToken();
   if (!token) {
@@ -208,6 +218,7 @@ export async function getWebRemoteState(): Promise<WebRemoteState> {
     tls: tlsState,
     allowedHosts: config.webRemoteAllowedHosts,
     devices: sessionStore.list(),
+    activity: auditLog.recent(30),
   };
 }
 
@@ -324,6 +335,27 @@ function startListener(address: string, port: number): Promise<BoundListener> {
 }
 
 async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const startedAt = Date.now();
+  let channel: string | null = null;
+  let identity = 'anonymous';
+
+  res.on('finish', () => {
+    auditLog.record({
+      at: startedAt,
+      method: req.method ?? 'GET',
+      path: redactPath(req.url ?? '/'),
+      channel,
+      status: res.statusCode,
+      outcome: res.statusCode === 429 ? 'rate-limited'
+        : res.statusCode === 401 || res.statusCode === 403 ? 'denied'
+        : res.statusCode >= 400 ? 'error'
+        : 'ok',
+      identity,
+      remoteAddress: normalizeAddress(getRemoteAddress(req)),
+      durationMs: Date.now() - startedAt,
+    });
+  });
+
   const url = requestUrl(req);
   if (!hostPolicy.allows(req.headers.host)) {
     sendJson(res, 403, { ok: false, error: { code: 'host_not_allowed', message: 'Host header is not allowed.' } });
@@ -336,6 +368,7 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
       sendJson(res, auth.status, { ok: false, error: { code: 'auth_failed', message: auth.message } });
       return;
     }
+    identity = auth.device ? `${auth.device.label} (${auth.device.id.slice(0, 8)})` : 'token';
 
     if (req.method === 'POST' && url.pathname === '/api/session') {
       // Exchange the bootstrap token for a per-device session cookie so the
@@ -372,6 +405,18 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
       if (typeof payload.channel !== 'string') {
         throw new GatewayError('invalid_body', 400, 'channel must be a string.');
       }
+      channel = payload.channel;
+
+      // Failed logins are throttled by the authenticator, but every successful
+      // invoke does real work — spawning agents, touching the filesystem — so
+      // an authenticated caller needs a ceiling too.
+      const limit = rateLimiter.check(identity);
+      if (!limit.allowed) {
+        res.setHeader('Retry-After', String(limit.retryAfterSeconds));
+        sendJson(res, 429, { ok: false, error: { code: 'rate_limited', message: 'Too many requests. Slow down.' } });
+        return;
+      }
+
       const result = await invokeWebRemoteCommand(payload.channel, Array.isArray(payload.args) ? payload.args : []);
       sendJson(res, 200, { ok: true, result });
       return;

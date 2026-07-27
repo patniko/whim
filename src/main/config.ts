@@ -17,6 +17,7 @@ import type {
   WebRemoteTlsMode,
 } from '../shared/ipc-contract';
 import type { WebRemoteDeviceRecord } from './web/sessions';
+import type { WebRemoteLockoutRecord } from './web/auth';
 
 export type { SandboxPolicy };
 export type { ExportFormat, ExportDestination };
@@ -165,6 +166,7 @@ export interface AppConfig {
   webRemoteTlsKeyPath: string;
   webRemoteAllowedHosts: string[];      // extra Host header values (e.g. a reverse proxy hostname)
   webRemoteDevices: WebRemoteDeviceRecord[];  // browsers holding a session cookie, individually revocable
+  webRemoteLockouts: WebRemoteLockoutRecord[]; // auth lockouts, persisted so a restart doesn't clear them
   hotkeys: Partial<HotkeyConfig>;   // user hotkey overrides (missing keys fall back to DEFAULT_HOTKEYS)
   commentTrigger: 'hover-or-caret' | 'caret'; // how the canvas surfaces comment threads
   profiles: WorkspaceProfile[];     // saved workspace profiles (work / personal / …)
@@ -354,6 +356,7 @@ const DEFAULT_CONFIG: AppConfig = {
   webRemoteTlsKeyPath: '',
   webRemoteAllowedHosts: [],
   webRemoteDevices: [],
+  webRemoteLockouts: [],
   hotkeys: {},
   commentTrigger: 'caret',
   profiles: [],

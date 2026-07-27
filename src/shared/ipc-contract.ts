@@ -269,6 +269,21 @@ export interface WebRemoteState {
   /** Extra hostnames accepted in the Host header (e.g. a reverse proxy). */
   allowedHosts: string[];
   devices: WebRemoteDevice[];
+  /** Most recent requests, newest first. Redacted — no query strings or bodies. */
+  activity: WebRemoteActivityEntry[];
+}
+
+export interface WebRemoteActivityEntry {
+  at: number;
+  method: string;
+  path: string;
+  /** IPC channel for `/api/invoke` calls, null otherwise. */
+  channel: string | null;
+  status: number;
+  outcome: 'ok' | 'denied' | 'error' | 'rate-limited';
+  identity: string;
+  remoteAddress: string;
+  durationMs: number;
 }
 
 export interface HotkeyConfig {

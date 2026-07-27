@@ -33,3 +33,47 @@ describe('web remote auth', () => {
     expect(extractWebSocketProtocolToken(undefined)).toBeNull();
   });
 });
+
+describe('lockout persistence', () => {
+  it('restores an active lockout across a restart', () => {
+    const lockedUntil = Date.now() + 60_000;
+    const auth = new WebRemoteAuthenticator(() => 'expected');
+    auth.hydrate([{ key: '10.0.0.5', lockedUntil }]);
+    // The correct token must still be refused while the lockout stands,
+    // otherwise restarting the app would be a free reset for an attacker.
+    expect(auth.authenticate('expected', '10.0.0.5').status).toBe(429);
+  });
+
+  it('ignores a lockout that has already expired', () => {
+    const auth = new WebRemoteAuthenticator(() => 'expected');
+    auth.hydrate([{ key: '10.0.0.5', lockedUntil: Date.now() - 1 }]);
+    expect(auth.authenticate('expected', '10.0.0.5').ok).toBe(true);
+  });
+
+  it('does not lock out unrelated addresses', () => {
+    const auth = new WebRemoteAuthenticator(() => 'expected');
+    auth.hydrate([{ key: '10.0.0.5', lockedUntil: Date.now() + 60_000 }]);
+    expect(auth.authenticate('expected', '10.0.0.6').ok).toBe(true);
+  });
+
+  it('persists a lockout as soon as it trips', () => {
+    const saved: unknown[][] = [];
+    const auth = new WebRemoteAuthenticator(() => 'expected', undefined, (records) => saved.push(records));
+    for (let i = 0; i < 5; i += 1) auth.authenticate('wrong', '10.0.0.5');
+    expect(saved.at(-1)).toEqual([{ key: '10.0.0.5', lockedUntil: expect.any(Number) }]);
+  });
+
+  it('does not persist anything before the threshold is reached', () => {
+    const saved: unknown[][] = [];
+    const auth = new WebRemoteAuthenticator(() => 'expected', undefined, (records) => saved.push(records));
+    auth.authenticate('wrong', '10.0.0.5');
+    expect(saved).toHaveLength(0);
+  });
+
+  it('clears persisted lockouts on reset', () => {
+    const saved: unknown[][] = [];
+    const auth = new WebRemoteAuthenticator(() => 'expected', undefined, (records) => saved.push(records));
+    auth.reset();
+    expect(saved.at(-1)).toEqual([]);
+  });
+});

@@ -18,6 +18,17 @@ interface FailureState {
   lockedUntil: number;
 }
 
+/**
+ * Lockouts were previously in-memory only, so restarting the app — something
+ * an attacker can trigger simply by waiting for an update, or that happens
+ * naturally overnight — reset the counter to zero. Persisting the locked
+ * entries makes the limit mean something.
+ */
+export interface WebRemoteLockoutRecord {
+  key: string;
+  lockedUntil: number;
+}
+
 const FAILURE_WINDOW_MS = 60_000;
 const LOCKOUT_MS = 5 * 60_000;
 const MAX_FAILURES = 5;
@@ -63,7 +74,32 @@ export class WebRemoteAuthenticator {
   constructor(
     private readonly getExpectedToken: () => string | null | undefined,
     private readonly sessions?: DeviceSessionStore,
+    private readonly persist?: (records: WebRemoteLockoutRecord[]) => void,
   ) {}
+
+  /**
+   * Reload lockouts saved by a previous run. Called at server start rather
+   * than in the constructor because the authenticator is a module-level
+   * singleton and must not read config at import time.
+   */
+  hydrate(records: readonly WebRemoteLockoutRecord[] | undefined): void {
+    const now = Date.now();
+    for (const record of records ?? []) {
+      // Expired entries are dropped rather than resurrected.
+      if (record.lockedUntil > now) {
+        this.failures.set(record.key, { count: MAX_FAILURES, firstFailureAt: now, lockedUntil: record.lockedUntil });
+      }
+    }
+  }
+
+  /** Currently-active lockouts, for persistence. */
+  activeLockouts(now = Date.now()): WebRemoteLockoutRecord[] {
+    const records: WebRemoteLockoutRecord[] = [];
+    for (const [key, state] of this.failures) {
+      if (state.lockedUntil > now) records.push({ key, lockedUntil: state.lockedUntil });
+    }
+    return records;
+  }
 
   /**
    * Accepts either a per-device session cookie or the bootstrap token.
@@ -115,6 +151,7 @@ export class WebRemoteAuthenticator {
 
   reset(): void {
     this.failures.clear();
+    this.persist?.([]);
   }
 
   private recordFailure(key: string, now: number): void {
@@ -129,6 +166,7 @@ export class WebRemoteAuthenticator {
     }
 
     this.failures.set(key, next);
+    if (next.lockedUntil > now) this.persist?.(this.activeLockouts(now));
   }
 }
 

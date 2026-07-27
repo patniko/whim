@@ -17,6 +17,7 @@ const config = {
   webRemoteTlsKeyPath: '',
   webRemoteAllowedHosts: [] as string[],
   webRemoteDevices: [] as unknown[],
+  webRemoteLockouts: [] as unknown[],
   workspace: '/tmp/workspace',
 };
 
@@ -62,6 +63,7 @@ vi.mock('qrcode', () => ({
 }));
 
 import {
+  auditLog,
   cacheControlFor,
   getWebRemoteState,
   listWebRemoteListeners,
@@ -365,6 +367,48 @@ describe('web remote server', () => {
       expect(state.bindings.map((binding) => binding.state)).toEqual(['listening', 'pending']);
     });
   });
+  describe('audit log', () => {
+    it('records the invoked channel, not the raw URL', async () => {
+      await request('/api/invoke', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: 'space:list', args: [] }),
+      });
+      const latest = auditLog.recent(1)[0];
+      expect(latest).toMatchObject({ channel: 'space:list', status: 200, outcome: 'ok', identity: 'token' });
+    });
+
+    it('never records a query string, which is where a token would be', async () => {
+      await request(`/api/health?token=${TOKEN}`);
+      expect(auditLog.recent(1)[0].path).toBe('/api/health');
+    });
+
+    it('marks a rejected request as denied', async () => {
+      await request('/api/health');
+      expect(auditLog.recent(1)[0]).toMatchObject({ status: 401, outcome: 'denied' });
+    });
+  });
+
+  describe('rate limiting', () => {
+    it('rejects a caller that floods /api/invoke and tells it when to retry', async () => {
+      const send = () => request('/api/invoke', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: 'space:list', args: [] }),
+      });
+
+      let limited: Awaited<ReturnType<typeof send>> | null = null;
+      for (let i = 0; i < 80 && !limited; i += 1) {
+        const res = await send();
+        if (res.status === 429) limited = res;
+      }
+
+      expect(limited).not.toBeNull();
+      expect(limited!.headers['retry-after']).toBeDefined();
+      expect((limited!.json() as { error: { code: string } }).error.code).toBe('rate_limited');
+    });
+  });
+
   describe('cache policy', () => {
     it('caches content-hashed bundles forever', () => {
       expect(cacheControlFor('/dist/web/app.d4eb09cff260.js')).toBe('public, max-age=31536000, immutable');
