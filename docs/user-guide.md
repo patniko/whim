@@ -9,9 +9,19 @@ This guide walks you through everything you can do with whim — from first laun
 ### First Launch
 
 1. Install and start the app (`npm run start`)
-2. whim appears as a ⚡ icon in your system tray
-3. Press **Ctrl+Shift+Space** (or **Cmd+Shift+Space** on Mac) to open the window
-4. You'll be prompted to **select a workspace directory** — this is where all your intent data will be stored
+2. whim appears as an icon in your menu bar (macOS) or system tray (Windows/Linux)
+3. The **Quick start** tour runs first, before any setup. It walks you through the two ways to
+   show and hide the side pane:
+   - **The global shortcut** — **Cmd+Shift+Space** on macOS, **Ctrl+Shift+Space** elsewhere.
+     Press it once to slide whim away, again to bring it back. If the combo is already taken by
+     another app, click it in the tour and press the keys you'd rather use — it's saved
+     immediately (and you can change it later under **Settings → Hotkeys**).
+   - **The tray icon** — clicking the whim icon in the menu bar / system tray always brings the
+     pane back, so you can never lose the window.
+4. After the tour you'll be prompted to **select a workspace directory** — this is where all your
+   intent data will be stored
+
+You can replay the tour any time from the **?** button in the header → **Replay quick start**.
 
 ### Setting Up Your Workspace
 

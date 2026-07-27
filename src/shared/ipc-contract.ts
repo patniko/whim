@@ -302,6 +302,7 @@ export interface IpcCommands {
   'hotkeys:get': { args: []; result: HotkeyConfig };
   'hotkeys:set': { args: [key: string, accelerator: string]; result: { ok: true } | { error: string } };
   'hotkeys:reset': { args: [key?: string]; result: { ok: true; hotkeys: HotkeyConfig } };
+  'hotkeys:toggle-status': { args: []; result: { accelerator: string; registered: boolean } };
 
   // ── CLI / Models ─────────────────────────────────────────
   'cli:resolve-path': { args: []; result: string | null };
@@ -527,6 +528,13 @@ export interface IpcMessages {
 // 3. Events — main → renderer via webContents.send
 // ---------------------------------------------------------------------------
 
+/**
+ * What caused the main window to show or hide. The quick-start tour uses this
+ * to tell "the user pressed the global hotkey" apart from "the user clicked the
+ * tray icon", so it can check off each lesson only when it was really performed.
+ */
+export type WindowToggleSource = 'hotkey' | 'tray' | 'startup' | 'other';
+
 export interface IpcEvents {
   'chat:event': { agentId: string } & ChatEvent;
   'subagent:changed': { parentAgentId: string };
@@ -535,8 +543,8 @@ export interface IpcEvents {
   'canvas-window:closed': void;
   'canvas-window:theme-changed': { theme: string };
   'canvas-window:request-hide': void;
-  'window:shown': void;
-  'window:toggle': void;
+  'window:shown': { side: 'left' | 'right'; expanded: boolean; source: WindowToggleSource };
+  'window:toggle': { source: WindowToggleSource };
   'workspace:committed': void;
   'workspace:changed': { path: string | null };
   'profiles:changed': ProfilesState;

@@ -90,10 +90,11 @@ describe('typed-handler', () => {
         { webContents: { send: send2 } } as any,
       ]);
 
-      sendToAllWindows('window:shown');
+      const payload = { side: 'right', expanded: false, source: 'hotkey' } as const;
+      sendToAllWindows('window:shown', payload);
 
-      expect(send1).toHaveBeenCalledWith('window:shown');
-      expect(send2).toHaveBeenCalledWith('window:shown');
+      expect(send1).toHaveBeenCalledWith('window:shown', payload);
+      expect(send2).toHaveBeenCalledWith('window:shown', payload);
     });
   });
 });

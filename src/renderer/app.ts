@@ -17,7 +17,7 @@ import {
 import { generateTintColor, isValidTint, hueOf } from './lib/tint';
 import { parseFrontmatter } from '../shared/frontmatter';
 import { deriveMarkdownTitle, ensureMarkdownH1Title } from '../shared/markdown-title';
-import type { CanvasSaveResult } from '../shared/ipc-contract';
+import type { CanvasSaveResult, WindowToggleSource } from '../shared/ipc-contract';
 
 interface ResolvedProfile {
   id: string;
@@ -159,6 +159,7 @@ interface WhimAPI {
   getHotkeys(): Promise<Record<string, string>>;
   setHotkey(key: string, accelerator: string): Promise<{ ok?: boolean; error?: string }>;
   resetHotkeys(key?: string): Promise<{ ok?: boolean; hotkeys?: Record<string, string> }>;
+  getToggleShortcutStatus(): Promise<{ accelerator: string; registered: boolean }>;
   resolveCliPath(): Promise<string | null>;
   checkCliVersion(): Promise<{ path: string | null; version: string | null; compatible: boolean; minVersion: string }>;
   checkCliMxcCapable(): Promise<{ mxcCapable: boolean }>;
@@ -264,8 +265,8 @@ interface WhimAPI {
   openSettingsWindow(): void;
   onSettingsRefresh(callback: () => void): void;
   onHotkeysChanged(callback: () => void): void;
-  onWindowShown(callback: (data: { side: 'left' | 'right'; expanded: boolean }) => void): void;
-  onWindowToggle(callback: () => void): void;
+  onWindowShown(callback: (data: { side: 'left' | 'right'; expanded: boolean; source?: WindowToggleSource }) => void): void;
+  onWindowToggle(callback: (data: { source?: WindowToggleSource }) => void): void;
   onRequestHide(callback: () => void): void;
   onWorkspaceCommitted(callback: () => void): void;
   onSpaceProcessed(callback: (id: string) => void): void;
@@ -428,6 +429,30 @@ const WELCOME_MODEL_HINT = 'The AI model used for agents and space processing.';
 const welcomeModelCheck = document.getElementById('welcome-model-check') as HTMLSpanElement;
 const welcomeStepModel = document.getElementById('welcome-step-model') as HTMLDivElement;
 const welcomeStartBtn = document.getElementById('welcome-start-btn') as HTMLButtonElement;
+
+// ── Quick start tour refs ───────────────────────────────
+const tourView = document.getElementById('tour-view') as HTMLDivElement;
+const tourStepHotkey = document.getElementById('tour-step-hotkey') as HTMLElement;
+const tourStepTray = document.getElementById('tour-step-tray') as HTMLElement;
+const tourProgress = document.getElementById('tour-progress') as HTMLDivElement;
+const tourHotkeyChip = document.getElementById('tour-hotkey-chip') as HTMLButtonElement;
+const tourHotkeyReset = document.getElementById('tour-hotkey-reset') as HTMLButtonElement;
+const tourHotkeyHint = document.getElementById('tour-hotkey-hint') as HTMLDivElement;
+const tourCheckHide = document.getElementById('tour-check-hide') as HTMLLIElement;
+const tourCheckShow = document.getElementById('tour-check-show') as HTMLLIElement;
+const tourHotkeyNext = document.getElementById('tour-hotkey-next') as HTMLButtonElement;
+const tourHotkeySkip = document.getElementById('tour-hotkey-skip') as HTMLButtonElement;
+const tourTrayText = document.getElementById('tour-tray-text') as HTMLParagraphElement;
+const tourTrayTitle = document.getElementById('tour-step-tray-title') as HTMLHeadingElement;
+const tourTrayArrow = document.getElementById('tour-tray-arrow') as HTMLDivElement;
+const tourTrayCaption = document.getElementById('tour-tray-caption') as HTMLDivElement;
+const tourTrayKeys = document.getElementById('tour-tray-keys') as HTMLSpanElement;
+const tourCheckTrayHide = document.getElementById('tour-check-tray-hide') as HTMLLIElement;
+const tourCheckTrayClick = document.getElementById('tour-check-tray-click') as HTMLLIElement;
+const tourTrayHideFallback = document.getElementById('tour-tray-hide-fallback') as HTMLButtonElement;
+const tourTrayNext = document.getElementById('tour-tray-next') as HTMLButtonElement;
+const tourTraySkip = document.getElementById('tour-tray-skip') as HTMLButtonElement;
+const tourSkipAll = document.getElementById('tour-skip-all') as HTMLButtonElement;
 
 let spaces: Space[] = [];
 // Track spaces being processed by LLM
@@ -5441,6 +5466,7 @@ async function loadHotkeys(): Promise<void> {
     currentHotkeys = { ...DEFAULT_HOTKEYS };
   }
   renderHotkeysTab();
+  syncToggleHotkeyLabels();
 }
 
 hotkeysResetAll.addEventListener('click', async () => {
@@ -8033,6 +8059,9 @@ window.addEventListener('beforeunload', (event) => {
 });
 
 document.addEventListener('keydown', (e) => {
+  // The tour has its own key handling (and Esc must not hide the pane there —
+  // the whole point is teaching the global shortcut).
+  if (tourActive) return;
   // When settings modal is open, only close shortcut is handled
   if (settingsModalOpen) {
     if (matchesHotkey(e, 'close')) {
@@ -8166,6 +8195,19 @@ document.addEventListener('keydown', (e) => {
 });
 
 whimAPI.onWindowShown((data) => {
+  // Quick-start tour owns the window while it runs: don't reset the (hidden)
+  // main view, just slide back in and credit whatever the user just did.
+  if (tourActive) {
+    if (!data.expanded) {
+      slideIn(data.side);
+    } else {
+      appEl.classList.remove('app-hidden-left', 'app-hidden-right', 'app-no-transition');
+      windowVisualState = 'visible';
+    }
+    noteTourShow(data.source);
+    return;
+  }
+
   // Close any sub-views that were open when the window was hidden
   if (!chatView.classList.contains('hidden')) closeAgentChat();
   if (!canvasView.classList.contains('hidden')) closeCanvas();
@@ -8195,12 +8237,16 @@ whimAPI.onWindowShown((data) => {
   }
 });
 
-whimAPI.onWindowToggle(() => {
+whimAPI.onWindowToggle((data) => {
   // Always hide the window immediately — Escape handles sub-view navigation
+  if (tourActive) noteTourHide(data?.source);
   slideOut();
 });
 
 whimAPI.onRequestHide(() => {
+  // The tour asks the user to hide the pane deliberately — an incidental blur
+  // hide would both confuse the lesson and lose the window mid-instruction.
+  if (tourActive) return;
   // Blur-triggered hide: check if we should stay visible
   const hasInput = descInput && descInput.value.trim().length > 0;
   const canvasOpen = !canvasView.classList.contains('hidden');
@@ -8209,6 +8255,314 @@ whimAPI.onRequestHide(() => {
 
   slideOut();
 });
+
+// ── Quick start tour (hotkey + tray coach, runs before setup) ──
+/**
+ * A fresh install drops the user into a side pane with no indication that it
+ * hides, how to bring it back, or that a tray icon exists. This short tour runs
+ * *before* the setup view and has the user actually perform both actions, so the
+ * muscle memory is there before they ever lose the window.
+ */
+type TourStep = 'hotkey' | 'tray';
+
+let tourActive = false;
+let tourStep: TourStep = 'hotkey';
+let tourReturnTo: 'welcome' | 'main' = 'welcome';
+let tourToggleRegistered = true;
+let tourHotkeyRecording = false;
+let tourAdvanceTimer: number | null = null;
+const tourDone = { hide: false, show: false, trayHide: false, trayClick: false };
+
+const isMacTray = navigator.platform.toLowerCase().includes('mac');
+
+function toggleAccelerator(): string {
+  return currentHotkeys.toggleWindow || DEFAULT_HOTKEYS.toggleWindow;
+}
+
+function formattedToggleAccelerator(): string {
+  return formatAccelerator(toggleAccelerator(), hotkeyPlatform);
+}
+
+/** Per-key labels for the toggle accelerator, e.g. ['\u2318', '\u21e7', 'Space']. */
+function toggleAcceleratorParts(): string[] {
+  return toggleAccelerator()
+    .split('+')
+    .map(token => token.trim())
+    .filter(Boolean)
+    .map(token => formatAccelerator(token, hotkeyPlatform));
+}
+
+/** Keep every "toggle whim" hint in the UI showing the *current* binding. */
+function syncToggleHotkeyLabels(): void {
+  const label = formattedToggleAccelerator();
+  const parts = toggleAcceleratorParts();
+  document.querySelectorAll('[data-toggle-hotkey]').forEach(el => {
+    el.textContent = '';
+    for (const part of parts) {
+      const kbd = document.createElement('kbd');
+      kbd.textContent = part;
+      el.appendChild(kbd);
+    }
+    if (!el.childElementCount) el.textContent = label;
+  });
+  if (tourHotkeyChip && !tourHotkeyRecording) tourHotkeyChip.textContent = label;
+  if (tourTrayKeys) tourTrayKeys.textContent = label;
+}
+
+function setTourHint(message: string, warn = false): void {
+  if (!tourHotkeyHint) return;
+  tourHotkeyHint.textContent = message;
+  tourHotkeyHint.classList.toggle('warn', warn);
+}
+
+const TOUR_DEFAULT_HINT = 'Prefer a different combo? Click the shortcut above and press the keys you want.';
+
+function markCheck(el: HTMLElement | null, done: boolean, active: boolean): void {
+  if (!el) return;
+  el.classList.toggle('done', done);
+  el.classList.toggle('active', !done && active);
+}
+
+function renderTour(): void {
+  if (!tourView) return;
+  const onHotkey = tourStep === 'hotkey';
+  tourStepHotkey?.classList.toggle('hidden', !onHotkey);
+  tourStepTray?.classList.toggle('hidden', onHotkey);
+
+  tourProgress?.querySelectorAll('[data-tour-dot]').forEach(dot => {
+    const key = (dot as HTMLElement).dataset.tourDot;
+    dot.classList.toggle('active', key === tourStep);
+    dot.classList.toggle('done', key === 'hotkey' && !onHotkey);
+  });
+  tourProgress?.setAttribute('aria-valuenow', onHotkey ? '1' : '2');
+
+  markCheck(tourCheckHide, tourDone.hide, true);
+  markCheck(tourCheckShow, tourDone.show, tourDone.hide);
+  markCheck(tourCheckTrayHide, tourDone.trayHide, true);
+  markCheck(tourCheckTrayClick, tourDone.trayClick, tourDone.trayHide);
+
+  const hotkeyStepDone = tourDone.hide && tourDone.show;
+  if (tourHotkeyNext) {
+    tourHotkeyNext.disabled = !hotkeyStepDone;
+    tourHotkeyNext.textContent = hotkeyStepDone ? 'Nice — next' : 'Next';
+  }
+  // Without a working global shortcut the user can't hide the pane themselves,
+  // so offer a button that does it for them (the tray lesson still lands).
+  tourTrayHideFallback?.classList.toggle('hidden', tourToggleRegistered || tourDone.trayHide);
+  tourHotkeyReset?.classList.toggle('hidden', toggleAccelerator() === DEFAULT_HOTKEYS.toggleWindow);
+
+  syncToggleHotkeyLabels();
+}
+
+function tourGoToStep(step: TourStep): void {
+  tourStep = step;
+  if (tourAdvanceTimer !== null) {
+    window.clearTimeout(tourAdvanceTimer);
+    tourAdvanceTimer = null;
+  }
+  renderTour();
+}
+
+/** Credit a hide that the user performed themselves. */
+function noteTourHide(source: string | undefined): void {
+  if (!tourActive) return;
+  if (tourStep === 'hotkey') {
+    if (source !== 'hotkey') return;
+    tourDone.hide = true;
+  } else {
+    tourDone.trayHide = true;
+  }
+  renderTour();
+}
+
+/** Credit a show, but only when it came from the mechanism we're teaching. */
+function noteTourShow(source: string | undefined): void {
+  if (!tourActive) return;
+  if (tourStep === 'hotkey') {
+    if (source === 'hotkey') {
+      // Showing via the hotkey means they pressed it — credit the hide too, in
+      // case the pane was already hidden (e.g. a blur) when the tour began.
+      tourDone.hide = true;
+      tourDone.show = true;
+    } else if (source === 'tray') {
+      // They discovered the tray early — bank it for step 2.
+      tourDone.trayHide = true;
+      tourDone.trayClick = true;
+    }
+  } else if (tourStep === 'tray') {
+    if (source === 'tray') {
+      tourDone.trayHide = true;
+      tourDone.trayClick = true;
+    } else if (source === 'hotkey') {
+      setTourHint(TOUR_DEFAULT_HINT);
+    }
+  }
+  renderTour();
+
+  if (tourStep === 'hotkey' && tourDone.hide && tourDone.show && tourAdvanceTimer === null) {
+    tourAdvanceTimer = window.setTimeout(() => {
+      tourAdvanceTimer = null;
+      if (tourActive && tourStep === 'hotkey') tourGoToStep('tray');
+    }, 1100);
+  }
+}
+
+/** Record a replacement accelerator for the global toggle, inline in the tour. */
+function startTourHotkeyRecording(): void {
+  if (!tourHotkeyChip || tourHotkeyRecording) return;
+  tourHotkeyRecording = true;
+  tourHotkeyChip.classList.add('recording');
+  tourHotkeyChip.textContent = 'Press shortcut…';
+  setTourHint('Hold your modifiers and press a key. Esc cancels.');
+
+  const stop = (): void => {
+    tourHotkeyRecording = false;
+    tourHotkeyChip.classList.remove('recording');
+    document.removeEventListener('keydown', handler, true);
+  };
+
+  const handler = async (e: KeyboardEvent): Promise<void> => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+
+    if (e.key === 'Escape') {
+      stop();
+      setTourHint(TOUR_DEFAULT_HINT);
+      renderTour();
+      return;
+    }
+
+    const accel = keyboardEventToAccelerator(e, hotkeyPlatform);
+    if (!accel) {
+      const modifiers = modifierEventToAccelerator(e, hotkeyPlatform);
+      tourHotkeyChip.textContent = modifiers
+        ? `${formatAccelerator(modifiers, hotkeyPlatform)}…`
+        : 'Press shortcut…';
+      return;
+    }
+
+    const conflict = findConflict(accel, 'toggleWindow');
+    if (conflict) {
+      setTourHint(`⚠ Conflicts with "${conflict}" — try another combo.`, true);
+      return;
+    }
+
+    stop();
+    const result = await whimAPI.setHotkey('toggleWindow', accel);
+    if (result.error) {
+      setTourHint(`⚠ ${result.error}`, true);
+      renderTour();
+      return;
+    }
+    currentHotkeys.toggleWindow = accel;
+    tourToggleRegistered = true;
+    renderHotkeysTab();
+    setTourHint(`Shortcut set to ${formatAccelerator(accel, hotkeyPlatform)}. Give it a try.`);
+    renderTour();
+  };
+
+  document.addEventListener('keydown', handler, true);
+}
+
+async function showTourView(returnTo: 'welcome' | 'main' = 'welcome'): Promise<void> {
+  if (isCanvasMode || isSettingsMode) return;
+  tourActive = true;
+  tourReturnTo = returnTo;
+  tourStep = 'hotkey';
+  tourDone.hide = false;
+  tourDone.show = false;
+  tourDone.trayHide = false;
+  tourDone.trayClick = false;
+
+  mainView.classList.add('hidden');
+  welcomeView.classList.add('hidden');
+  tourView.classList.remove('hidden');
+
+  // Platform wording: menu bar (top-right) on macOS, system tray (bottom-right)
+  // everywhere else — where Windows may also tuck it behind the "^" overflow.
+  tourView.classList.toggle('tray-bottom', !isMacTray);
+  if (tourTrayTitle) {
+    tourTrayTitle.textContent = isMacTray
+      ? 'whim also lives in your menu bar'
+      : 'whim also lives in your system tray';
+  }
+  if (tourTrayText) {
+    tourTrayText.textContent = isMacTray
+      ? 'Forget the shortcut? Click the whim icon in the menu bar and the pane comes right back.'
+      : 'Forget the shortcut? Click the whim icon in the system tray and the pane comes right back.';
+  }
+  if (tourTrayArrow) tourTrayArrow.textContent = isMacTray ? '↑' : '↓';
+  if (tourTrayCaption) {
+    tourTrayCaption.textContent = isMacTray
+      ? 'Look for it at the top-right of your screen.'
+      : 'Look for it near the clock — you may need to expand the “^” overflow first.';
+  }
+
+  if (tourTrayNext) {
+    tourTrayNext.textContent = returnTo === 'welcome' ? 'Continue to setup' : 'Done';
+  }
+  setTourHint(TOUR_DEFAULT_HINT);
+
+  try {
+    const status = await whimAPI.getToggleShortcutStatus();
+    tourToggleRegistered = status.registered !== false;
+    if (status.accelerator) currentHotkeys.toggleWindow = status.accelerator;
+    if (!tourToggleRegistered) {
+      setTourHint(
+        `⚠ ${formattedToggleAccelerator()} is already taken by another app. Click it above to pick a different combo.`,
+        true,
+      );
+    }
+  } catch {
+    tourToggleRegistered = true;
+  }
+
+  renderTour();
+  tourHotkeyChip?.focus();
+}
+
+async function finishTour(): Promise<void> {
+  if (!tourActive) return;
+  tourActive = false;
+  if (tourAdvanceTimer !== null) {
+    window.clearTimeout(tourAdvanceTimer);
+    tourAdvanceTimer = null;
+  }
+  tourView.classList.add('hidden');
+  await whimAPI.setSetting('quick_start_completed', '1');
+  if (tourReturnTo === 'welcome') {
+    void showWelcomeView();
+  } else {
+    mainView.classList.remove('hidden');
+    descInput.focus();
+    // The tour suppressed the usual on-show refresh, so catch the list up.
+    void loadSpaces();
+    refreshGitSync();
+  }
+}
+
+tourHotkeyChip?.addEventListener('click', startTourHotkeyRecording);
+
+tourHotkeyReset?.addEventListener('click', async () => {
+  await whimAPI.resetHotkeys('toggleWindow');
+  currentHotkeys.toggleWindow = DEFAULT_HOTKEYS.toggleWindow;
+  tourToggleRegistered = true;
+  renderHotkeysTab();
+  setTourHint(TOUR_DEFAULT_HINT);
+  renderTour();
+});
+
+tourHotkeyNext?.addEventListener('click', () => tourGoToStep('tray'));
+tourHotkeySkip?.addEventListener('click', () => tourGoToStep('tray'));
+tourTrayHideFallback?.addEventListener('click', () => {
+  tourDone.trayHide = true;
+  renderTour();
+  slideOut();
+});
+tourTrayNext?.addEventListener('click', () => void finishTour());
+tourTraySkip?.addEventListener('click', () => void finishTour());
+tourSkipAll?.addEventListener('click', () => void finishTour());
 
 // ── Welcome / Onboarding ────────────────────────────────
 let welcomeWorkspaceSelected = false;
@@ -8455,6 +8809,7 @@ const helpOverlay = document.getElementById('help-overlay') as HTMLDivElement | 
 const helpBtn = document.getElementById('help-btn') as HTMLButtonElement | null;
 const helpCloseBtn = document.getElementById('help-close') as HTMLButtonElement | null;
 const helpGotItBtn = document.getElementById('help-got-it') as HTMLButtonElement | null;
+const helpReplayTourBtn = document.getElementById('help-replay-tour') as HTMLButtonElement | null;
 const helpDismissBackdrop = helpOverlay?.querySelector('[data-help-dismiss]') as HTMLElement | null;
 
 function isHelpOpen(): boolean {
@@ -8463,6 +8818,7 @@ function isHelpOpen(): boolean {
 
 function openHelp(): void {
   if (!helpOverlay) return;
+  syncToggleHotkeyLabels();
   helpOverlay.classList.remove('hidden');
   helpGotItBtn?.focus();
 }
@@ -8475,6 +8831,12 @@ function closeHelp(): void {
 }
 
 helpBtn?.addEventListener('click', openHelp);
+helpReplayTourBtn?.addEventListener('click', () => {
+  if (!helpOverlay) return;
+  helpOverlay.classList.add('hidden');
+  void whimAPI.setSetting('onboarding_tips_seen', '1');
+  void showTourView(welcomeView.classList.contains('hidden') ? 'main' : 'welcome');
+});
 helpCloseBtn?.addEventListener('click', closeHelp);
 helpGotItBtn?.addEventListener('click', closeHelp);
 helpDismissBackdrop?.addEventListener('click', closeHelp);
@@ -8487,7 +8849,7 @@ document.addEventListener('keydown', (e) => {
     closeHelp();
     return;
   }
-  if (e.key === '?' && !isHelpOpen()) {
+  if (e.key === '?' && !isHelpOpen() && !tourActive) {
     const t = e.target as HTMLElement | null;
     const editable = !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
     if (!editable) {
@@ -8621,7 +8983,15 @@ whimAPI.getSetting('workspace_root').then(async ws => {
   installIpcBridge(bridgeApi);
 
   if (!ws && !isCanvasMode && !isSettingsMode) {
-    showWelcomeView();
+    // Brand-new install: teach the hotkey and the tray icon *before* the setup
+    // form, so the user can never lose the window without knowing how to get
+    // it back. Returning users (tour already done) go straight to setup.
+    const quickStartDone = await whimAPI.getSetting('quick_start_completed');
+    if (quickStartDone) {
+      showWelcomeView();
+    } else {
+      void showTourView('welcome');
+    }
     // Still mount React so the lists are ready when a workspace is selected;
     // they render empty states while no workspace is configured.
     mountReactLists();

@@ -239,6 +239,27 @@ describe('config', () => {
     });
   });
 
+  describe('quick start onboarding flags', () => {
+    beforeEach(() => {
+      fs.writeFileSync(CONFIG_PATH, '{}');
+    });
+
+    it('treats a fresh install as not having seen the quick start', () => {
+      const config = loadConfig();
+      expect(config.quickStartCompleted).toBe(false);
+      expect(config.onboardingTipsSeen).toBe(false);
+    });
+
+    it('persists completion so the tour only runs once', () => {
+      loadConfig();
+      setConfigValue('quickStartCompleted', true);
+
+      const raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+      expect(raw.quickStartCompleted).toBe(true);
+      expect(getConfigValue('quickStartCompleted')).toBe(true);
+    });
+  });
+
   describe('workspace profiles', () => {
     beforeEach(() => {
       // loadConfig() only resets in-memory state when a file exists; write an
