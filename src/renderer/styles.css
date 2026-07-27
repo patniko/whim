@@ -292,7 +292,6 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 28px;
-  max-width: 360px;
   width: 100%;
 }
 
@@ -463,12 +462,13 @@ body {
 
 
 #welcome-model-select {
+  flex: 1;
+  min-width: 0;
   padding: 6px 10px;
   border-radius: 6px;
   border: 1px solid rgba(0, 0, 0, 0.15);
   background: white;
   font-size: var(--fs-body);
-  min-width: 200px;
   max-width: 100%;
 }
 
