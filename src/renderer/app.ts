@@ -438,7 +438,7 @@ import {
   loadHistorySnapshot,
 } from './state/ipc-bridge';
 import { mountLists } from './views/mount.tsx';
-import type { WhimAPI as PreloadWhimAPI } from '../main/preload';
+import type { WhimAPI as PreloadWhimAPI } from '../shared/whim-api';
 import type { Skill as SharedSkill, CanvasAgentStateSnapshot, ExportFormat, ExportDestination, SkillInvocationInput, SkillInvocationResult, UpdateState } from '../shared/types';
 
 // The local `interface WhimAPI` declared near the top of this file shadows the
