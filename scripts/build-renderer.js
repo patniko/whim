@@ -6,6 +6,9 @@ const path = require('path');
 const watch = process.argv.includes('--watch');
 const minify = !watch;
 
+/** Non-bundled files the renderer loads by URL, copied verbatim into dist. */
+const RENDERER_ASSETS = ['index.html', 'styles.css', 'copilot.png', 'fonts'];
+
 const rendererOptions = {
   entryPoints: [path.join(__dirname, '..', 'src', 'renderer', 'app.ts')],
   bundle: true,
@@ -65,6 +68,8 @@ function assembleDesktopBundle() {
   for (const asset of ['styles.css', 'copilot.png']) {
     fs.copyFileSync(path.join(source, asset), path.join(target, asset));
   }
+  // styles.css references fonts relative to itself, so they land beside it.
+  fs.cpSync(path.join(source, 'fonts'), path.join(target, 'fonts'), { recursive: true });
 
   let html = fs.readFileSync(path.join(source, 'index.html'), 'utf-8');
   html = html.replace(/<script src="app\.js"><\/script>\s*/, '');
@@ -93,6 +98,24 @@ function assertDesktopBundleSane(html) {
   }
 }
 
+/**
+ * Assets the Electron renderer loads at runtime.
+ *
+ * `copilot-whim://app/renderer/...` resolves under `dist/`, so these have to be
+ * copied even though nothing bundles them. This used to be an inline `node -e`
+ * one-liner in package.json's build script with a hard-coded file list; fonts
+ * are a directory, and a build step that can only copy individual files is a
+ * step that quietly drops half a feature.
+ */
+function copyRendererAssets() {
+  const srcDir = path.join(__dirname, '..', 'src', 'renderer');
+  const distDir = path.join(__dirname, '..', 'dist', 'renderer');
+  fs.mkdirSync(distDir, { recursive: true });
+  for (const asset of RENDERER_ASSETS) {
+    fs.cpSync(path.join(srcDir, asset), path.join(distDir, asset), { recursive: true });
+  }
+}
+
 function copyWebAssets() {
   const srcDir = path.join(__dirname, '..', 'src', 'web');
   const distDir = path.join(__dirname, '..', 'dist', 'web');
@@ -100,6 +123,9 @@ function copyWebAssets() {
   for (const asset of ['index.html', 'styles.css', 'manifest.webmanifest', 'sw.js']) {
     fs.copyFileSync(path.join(srcDir, asset), path.join(distDir, asset));
   }
+  // The lite client's stylesheet is content-hashed, so it cannot carry its
+  // fonts beside itself; they are served from the web root instead.
+  fs.cpSync(path.join(__dirname, '..', 'src', 'renderer', 'fonts'), path.join(distDir, 'fonts'), { recursive: true });
   copyPwaIcons(distDir);
 }
 
@@ -175,6 +201,7 @@ function writeServiceWorkerShell(distDir, html) {
 
 async function main() {
   if (watch) {
+    copyRendererAssets();
     copyWebAssets();
     const rendererCtx = await esbuild.context(rendererOptions);
     const webCtx = await esbuild.context(webOptions);
@@ -194,6 +221,7 @@ async function main() {
       esbuild.build(webOptions),
       esbuild.build(desktopBootOptions),
     ]);
+    copyRendererAssets();
     copyWebAssets();
     fingerprintWebAssets();
     // After fingerprinting, which only rewrites the lightweight client's HTML.

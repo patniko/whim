@@ -6,7 +6,7 @@
   "main": "dist/main/main.js",
   "scripts": {
     "clean": "node -e \"const fs=require('fs');const p=require('path');if(fs.existsSync('dist'))fs.rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc -p tsconfig.main.json && node scripts/build-renderer.js && node -e \"const fs=require('fs');const p=require('path');['index.html','styles.css','copilot.png'].forEach(f=>fs.copyFileSync(p.join('src','renderer',f),p.join('dist','renderer',f)))\"",
+    "build": "npm run clean && tsc -p tsconfig.main.json && node scripts/build-renderer.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "oxlint src/",
