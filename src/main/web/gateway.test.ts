@@ -45,7 +45,8 @@ vi.mock('../notify', () => ({
   notifyAllWindows: vi.fn(),
 }));
 
-import { GatewayError, invokeWebRemoteCommand, isAllowedWebRemoteCommand } from './gateway';
+import { GatewayError, invokeWebRemoteCommand, isAllowedWebRemoteCommand, WEB_REMOTE_IMPLEMENTED_CHANNELS } from './gateway';
+import { webAccessFor, webAllowedChannels } from '../../shared/web-access';
 
 describe('web remote gateway', () => {
   it('allows only reviewed channels', () => {
@@ -79,5 +80,40 @@ describe('web remote gateway', () => {
     await expect(invokeWebRemoteCommand('space:list', [])).resolves.toEqual([
       { id: 'space-1', description: 'Test space' },
     ]);
+  });
+});
+
+describe('classification and implementation stay in sync', () => {
+  it('never implements a channel that is not classified allow', () => {
+    // This is the invariant that actually prevents accidental exposure: an
+    // implementation alone is not enough to reach the network.
+    const wronglyImplemented = WEB_REMOTE_IMPLEMENTED_CHANNELS
+      .filter((channel) => webAccessFor(channel) !== 'allow');
+    expect(wronglyImplemented).toEqual([]);
+  });
+
+  it('refuses a denied channel even though it exists on the desktop', () => {
+    expect(isAllowedWebRemoteCommand('settings:set')).toBe(false);
+    expect(isAllowedWebRemoteCommand('workspace:select')).toBe(false);
+  });
+
+  it('refuses an unknown channel', () => {
+    expect(isAllowedWebRemoteCommand('not:a:channel')).toBe(false);
+  });
+
+  it('reports the remaining parity gap, so it cannot grow unnoticed', () => {
+    // Commands we have decided are safe remotely but have not built a gateway
+    // adapter for yet. Shrinking this list is the parity work; this test
+    // exists so the list is visible in review rather than invisible.
+    const implemented = new Set<string>(WEB_REMOTE_IMPLEMENTED_CHANNELS);
+    const pending = webAllowedChannels().filter((channel) => !implemented.has(channel));
+
+    // A ratchet, not a target: it may shrink freely, but growing it requires
+    // deliberately editing this number.
+    expect(pending.length).toBeLessThanOrEqual(35);
+    // None of the interaction commands may ever be in the pending list.
+    for (const channel of ['agent:approve', 'agent:respond-user-input', 'agent:respond-elicitation', 'agent:resolve-sandbox']) {
+      expect(pending).not.toContain(channel);
+    }
   });
 });

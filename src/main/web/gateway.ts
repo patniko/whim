@@ -1,4 +1,5 @@
 import type { IpcCommandChannel } from '../../shared/ipc-contract';
+import { webAccessFor } from '../../shared/web-access';
 import type { AgentAnchor, CreateSpaceInput, Space } from '../../shared/types';
 import * as path from 'path';
 import {
@@ -18,51 +19,21 @@ import { notifyAllWindows } from '../notify';
 import { rememberCanvasEditorContent, writeMainCanvasWithMerge } from '../services/canvas-editor-state';
 import { resolveCommentLaunchTarget } from '../services/comment-launch-target';
 
-export const WEB_REMOTE_COMMAND_ALLOWLIST = [
-  'space:create',
-  'space:classify',
-  'space:resolve-date',
-  'space:list',
-  'space:search',
-  'space:events',
-  'space:update',
-  'space:delete',
-  'space:unarchive',
-  'agent:list-all',
-  'agent:get-history',
-  'agent:abort',
-  'agent:delete-session',
-  'chat:send-message',
-  'agent:approve',
-  'agent:respond-user-input',
-  'agent:respond-elicitation',
-  'agent:resolve-sandbox',
-  'agent:quick-launch',
-  'agent:launch-cloud',
-  'agent:launch',
-  'agent:launch-from-comment',
-  'agent:list',
-  'personas:list',
-  'models:list',
-  'canvas:read',
-  'canvas:write',
-  'canvas:close',
-  'canvas:has-content',
-  'canvas:history',
-  'canvas:preview-version',
-  'canvas:restore',
-  'canvas:list-pages',
-  'canvas:read-page',
-  'canvas:write-page',
-  'canvas:create-page',
-  'workspace:git-status',
-  'workspace:git-push',
-  'workspace:git-pull',
-] as const satisfies readonly IpcCommandChannel[];
-
-export type WebRemoteCommandChannel = typeof WEB_REMOTE_COMMAND_ALLOWLIST[number];
-
-const ALLOWLIST = new Set<string>(WEB_REMOTE_COMMAND_ALLOWLIST);
+/**
+ * Which commands the web remote actually implements.
+ *
+ * This used to be a hand-maintained array of channel names sitting next to a
+ * separate handler map, so the two could — and did — drift apart, and nothing
+ * recorded *why* any given command was absent. The authority now lives in
+ * `src/shared/web-access.ts`, which classifies every `IpcCommandChannel` and
+ * will not compile until a newly added command is classified.
+ *
+ * A channel is reachable only if it is classified `allow` *and* implemented
+ * here. Those are separate conditions on purpose: "we decided this is safe"
+ * and "we have built it" are different statements, and conflating them is how
+ * the surface silently drifted before.
+ */
+export type WebRemoteCommandChannel = IpcCommandChannel;
 
 export class GatewayError extends Error {
   constructor(
@@ -77,7 +48,7 @@ export class GatewayError extends Error {
 
 type Handler = (args: unknown[]) => Promise<unknown> | unknown;
 
-const HANDLERS: Record<WebRemoteCommandChannel, Handler> = {
+const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
   'space:create': createSpaceFromArgs,
   'space:classify': classifySpaceFromArgs,
   'space:resolve-date': resolveDateFromArgs,
@@ -303,19 +274,31 @@ const HANDLERS: Record<WebRemoteCommandChannel, Handler> = {
   },
 };
 
+/** Channels with a gateway implementation, whatever their classification. */
+export const WEB_REMOTE_IMPLEMENTED_CHANNELS = Object.keys(HANDLERS) as IpcCommandChannel[];
+
 export function isAllowedWebRemoteCommand(channel: string): channel is WebRemoteCommandChannel {
-  return ALLOWLIST.has(channel);
+  return webAccessFor(channel) === 'allow' && channel in HANDLERS;
 }
 
 export async function invokeWebRemoteCommand(channel: string, args: unknown[]): Promise<unknown> {
   if (!isAllowedWebRemoteCommand(channel)) {
+    // Distinguish the three reasons, so a remote client can degrade sensibly
+    // instead of treating "not built yet" as "forbidden".
+    const access = webAccessFor(channel);
+    if (access === 'desktop-only') {
+      throw new GatewayError('desktop_only', 501, `Channel only works on the desktop app: ${channel}`);
+    }
+    if (access === 'allow') {
+      throw new GatewayError('not_implemented', 501, `Channel is not yet available over web remote: ${channel}`);
+    }
     throw new GatewayError('channel_not_allowed', 403, `Channel is not available over web remote: ${channel}`);
   }
   if (!Array.isArray(args)) {
     throw invalidArg('args must be an array');
   }
 
-  const result = await HANDLERS[channel](args);
+  const result = await HANDLERS[channel]!(args);
   return JSON.parse(JSON.stringify(result ?? null));
 }
 
