@@ -63,22 +63,40 @@ export class WebRemoteClient {
     return body.result as IpcCommandResult<C>;
   }
 
+  /** Highest sequence number seen, so a reconnect can ask for just the gap. */
+  private lastSeq = 0;
+
   connect(
     onEvent: (event: WebRemoteEvent) => void,
     onStatus: (status: string) => void,
     onUnauthorized?: () => void,
+    onResync?: () => void,
   ): () => void {
     let closed = false;
     let ws: WebSocket | null = null;
     let retryTimer: number | null = null;
+    let watchdog: number | null = null;
+
+    /**
+     * Browsers don't expose WebSocket ping/pong, so the client watches for
+     * silence instead: the server pings every 30s, and any traffic at all
+     * resets this. A socket that goes quiet for far longer is half-open.
+     */
+    const armWatchdog = () => {
+      if (watchdog) window.clearTimeout(watchdog);
+      watchdog = window.setTimeout(() => {
+        if (!closed) ws?.close();
+      }, 90_000);
+    };
 
     const open = () => {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       // No token in the URL: the browser sends the session cookie on upgrade.
-      const url = `${protocol}//${window.location.host}/api/events`;
+      const url = `${protocol}//${window.location.host}/api/events?lastSeq=${this.lastSeq}`;
       ws = new WebSocket(url);
-      ws.onopen = () => onStatus('live');
+      ws.onopen = () => { onStatus('live'); armWatchdog(); };
       ws.onclose = (event) => {
+        if (watchdog) window.clearTimeout(watchdog);
         // 1008/1011-style closes and a rejected upgrade both surface here; a
         // dropped session must show a re-auth prompt rather than reconnecting
         // forever with a credential the server no longer accepts.
@@ -96,8 +114,25 @@ export class WebRemoteClient {
       };
       ws.onerror = () => onStatus('connection error');
       ws.onmessage = (message) => {
+        armWatchdog();
         const data = JSON.parse(message.data);
-        if (data?.type === 'event') onEvent(data.event);
+
+        if (data?.type === 'hello') {
+          // The server couldn't replay the gap (first connect, or we fell
+          // outside the replay window), so pull fresh state rather than
+          // rendering whatever stale data is still on screen.
+          if (data.resyncRequired) {
+            this.lastSeq = typeof data.seq === 'number' ? data.seq : this.lastSeq;
+            onResync?.();
+          }
+          return;
+        }
+
+        if (data?.type === 'event') {
+          const event = data.event as WebRemoteEvent;
+          if (typeof event.seq === 'number') this.lastSeq = Math.max(this.lastSeq, event.seq);
+          onEvent(event);
+        }
       };
     };
 
@@ -105,6 +140,7 @@ export class WebRemoteClient {
     return () => {
       closed = true;
       if (retryTimer) window.clearTimeout(retryTimer);
+      if (watchdog) window.clearTimeout(watchdog);
       ws?.close();
     };
   }

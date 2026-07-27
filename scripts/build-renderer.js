@@ -1,4 +1,5 @@
 const esbuild = require('esbuild');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -43,6 +44,41 @@ function copyWebAssets() {
   }
 }
 
+function contentHash(filePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex').slice(0, 12);
+}
+
+/**
+ * Emit content-hashed copies of the web remote's assets and point index.html
+ * at them, so the bundle can be cached indefinitely instead of being
+ * re-downloaded on every page load over a phone connection.
+ */
+function fingerprintWebAssets() {
+  const distDir = path.join(__dirname, '..', 'dist', 'web');
+  const htmlPath = path.join(distDir, 'index.html');
+  let html = fs.readFileSync(htmlPath, 'utf-8');
+
+  for (const asset of ['app.js', 'styles.css']) {
+    const assetPath = path.join(distDir, asset);
+    if (!fs.existsSync(assetPath)) continue;
+
+    const extension = path.extname(asset);
+    const base = asset.slice(0, -extension.length);
+    // Drop hashed copies from earlier builds so dist/ doesn't grow forever.
+    for (const existing of fs.readdirSync(distDir)) {
+      if (new RegExp(`^${base}\\.[0-9a-f]{12}\\${extension}$`).test(existing)) {
+        fs.rmSync(path.join(distDir, existing));
+      }
+    }
+
+    const hashed = `${base}.${contentHash(assetPath)}${extension}`;
+    fs.copyFileSync(assetPath, path.join(distDir, hashed));
+    html = html.split(asset).join(hashed);
+  }
+
+  fs.writeFileSync(htmlPath, html);
+}
+
 async function main() {
   if (watch) {
     copyWebAssets();
@@ -59,6 +95,7 @@ async function main() {
       esbuild.build(webOptions),
     ]);
     copyWebAssets();
+    fingerprintWebAssets();
   }
 }
 

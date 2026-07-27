@@ -163,9 +163,26 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
 
   useEffect(() => {
     void refreshAll();
-    return client.connect((event) => handleEvent(event), setStatus, onUnauthorized);
+    // A resync is requested whenever the server could not replay the events we
+    // missed, so the UI never silently keeps rendering stale state.
+    return client.connect(
+      (event) => handleEvent(event),
+      setStatus,
+      onUnauthorized,
+      () => { void refreshAll(); },
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
+
+  // Coming back from a backgrounded tab is the most common way to end up
+  // looking at stale data on a phone.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshAll();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [refreshAll]);
 
   function handleEvent(event: WebRemoteEvent) {
     const ch = event.channel;

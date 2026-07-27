@@ -46,6 +46,7 @@ vi.mock('qrcode', () => ({
 }));
 
 import {
+  cacheControlFor,
   getWebRemoteState,
   listWebRemoteListeners,
   startWebRemoteServer,
@@ -278,6 +279,43 @@ describe('web remote server', () => {
     it('does not claim HSTS while serving plain HTTP', async () => {
       const res = await request(`/api/health?token=${TOKEN}`);
       expect(res.headers['strict-transport-security']).toBeUndefined();
+    });
+  });
+
+  describe('static caching', () => {
+    // Served from src/web in tests, which is where __dirname/../../web resolves.
+    it('revalidates index.html so a new bundle is always picked up', async () => {
+      const res = await request('/index.html');
+      expect(res.status).toBe(200);
+      expect(res.headers['cache-control']).toBe('no-cache');
+    });
+
+    it('caches content-hashed assets indefinitely and revalidates everything else', () => {
+      expect(cacheControlFor('/dist/web/app.abcdef123456.js')).toBe('public, max-age=31536000, immutable');
+      expect(cacheControlFor('/dist/web/styles.abcdef123456.css')).toBe('public, max-age=31536000, immutable');
+      expect(cacheControlFor('/dist/web/app.js')).toBe('no-cache');
+      expect(cacheControlFor('/dist/web/index.html')).toBe('no-cache');
+    });
+
+    it('answers a conditional request with 304', async () => {
+      const first = await request('/index.html');
+      const etag = first.headers.etag as string;
+      expect(etag).toBeTruthy();
+
+      const second = await request('/index.html', { headers: { 'If-None-Match': etag } });
+      expect(second.status).toBe(304);
+      expect(second.body).toBe('');
+    });
+
+    it('compresses text assets when the client accepts it', async () => {
+      const res = await request('/index.html', { headers: { 'Accept-Encoding': 'gzip' } });
+      expect(res.headers['content-encoding']).toBe('gzip');
+      expect(res.headers.vary).toBe('Accept-Encoding');
+    });
+
+    it('sends identity when the client does not accept compression', async () => {
+      const res = await request('/index.html', { headers: { 'Accept-Encoding': 'identity' } });
+      expect(res.headers['content-encoding']).toBeUndefined();
     });
   });
 

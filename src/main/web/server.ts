@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as http from 'http';
 import * as https from 'https';
 import * as path from 'path';
+import * as zlib from 'zlib';
 import type { Duplex } from 'stream';
 import { app } from 'electron';
 import * as QRCode from 'qrcode';
@@ -35,7 +36,7 @@ import {
   type WebRemoteDeviceRecord,
 } from './sessions';
 import { GatewayError, invokeWebRemoteCommand } from './gateway';
-import { subscribeWebRemoteEvents } from './event-hub';
+import { currentEventSequence, replayEventsSince, subscribeWebRemoteEvents } from './event-hub';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -56,6 +57,7 @@ const MAX_BODY_BYTES = 1_000_000;
 const HEADERS_TIMEOUT_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 60_000;
 const KEEP_ALIVE_TIMEOUT_MS = 30_000;
+const WS_PING_INTERVAL_MS = 30_000;
 
 const clients = new Set<WebSocket>();
 let lastError: string | null = null;
@@ -244,15 +246,50 @@ function startListener(address: string, port: number): Promise<BoundListener> {
     void handleUpgrade(req, socket, head, wss);
   });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req: http.IncomingMessage) => {
     clients.add(ws);
-    ws.send(JSON.stringify({ type: 'hello', timestamp: new Date().toISOString() }));
+
+    // Replay anything the client missed while it was disconnected. Mobile
+    // browsers suspend sockets aggressively, and without this the UI silently
+    // shows stale state after every backgrounding.
+    const replay = replayEventsSince(Number(requestUrl(req).searchParams.get('lastSeq')));
+
+    ws.send(JSON.stringify({
+      type: 'hello',
+      timestamp: new Date().toISOString(),
+      seq: currentEventSequence(),
+      resyncRequired: replay.kind === 'resync-required',
+    }));
+
+    if (replay.kind === 'events') {
+      for (const event of replay.events) {
+        ws.send(JSON.stringify({ type: 'event', event }));
+      }
+    }
+
     const unsubscribe = subscribeWebRemoteEvents((event) => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'event', event }));
       }
     });
+
+    // Liveness: a NAT or mobile radio can drop a connection without either
+    // side seeing a FIN, leaving a half-open socket that looks "live" while
+    // delivering nothing.
+    let awaitingPong = false;
+    const heartbeat = setInterval(() => {
+      if (awaitingPong) {
+        ws.terminate();
+        return;
+      }
+      awaitingPong = true;
+      ws.ping();
+    }, WS_PING_INTERVAL_MS);
+    heartbeat.unref?.();
+    ws.on('pong', () => { awaitingPong = false; });
+
     const cleanup = () => {
+      clearInterval(heartbeat);
       unsubscribe();
       clients.delete(ws);
     };
@@ -430,17 +467,63 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, url: U
     return;
   }
 
-  res.writeHead(200, {
+  const stats = fs.statSync(filePath);
+  const etag = `W/"${stats.size.toString(16)}-${stats.mtimeMs.toString(16)}"`;
+  const headers: Record<string, string> = {
     ...securityHeaders(),
     'Content-Security-Policy': CONTENT_SECURITY_POLICY,
     'Content-Type': MIME_TYPES[path.extname(filePath)] || 'application/octet-stream',
-    'Cache-Control': 'no-store',
-  });
-  if (req.method === 'HEAD') {
+    'Cache-Control': cacheControlFor(filePath),
+    ETag: etag,
+  };
+
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, headers);
     res.end();
     return;
   }
+
+  if (req.method === 'HEAD') {
+    res.writeHead(200, headers);
+    res.end();
+    return;
+  }
+
+  // Text assets over a phone connection are worth compressing; images and
+  // fonts are already compressed and would only burn CPU.
+  const encoding = negotiateEncoding(req.headers['accept-encoding']);
+  const compressible = /^(text\/|application\/(javascript|json|svg))/.test(headers['Content-Type']);
+
+  if (encoding && compressible) {
+    headers['Content-Encoding'] = encoding;
+    headers.Vary = 'Accept-Encoding';
+    res.writeHead(200, headers);
+    const compressor = encoding === 'br' ? zlib.createBrotliCompress() : zlib.createGzip();
+    fs.createReadStream(filePath).pipe(compressor).pipe(res);
+    return;
+  }
+
+  headers['Content-Length'] = String(stats.size);
+  res.writeHead(200, headers);
   fs.createReadStream(filePath).pipe(res);
+}
+
+/** Content-hashed filenames (`app.<hash>.js`) can be cached indefinitely. */
+const HASHED_ASSET_RE = /\.[0-9a-f]{12}\.(js|css)$/;
+
+export function cacheControlFor(filePath: string): string {
+  if (HASHED_ASSET_RE.test(filePath)) return 'public, max-age=31536000, immutable';
+  // index.html must always be revalidated, or a client would never learn about
+  // a new bundle. `no-cache` still permits a cheap 304.
+  return 'no-cache';
+}
+
+function negotiateEncoding(header: string | undefined): 'br' | 'gzip' | null {
+  if (!header) return null;
+  const accepted = header.toLowerCase();
+  if (accepted.includes('br')) return 'br';
+  if (accepted.includes('gzip')) return 'gzip';
+  return null;
 }
 
 /**
