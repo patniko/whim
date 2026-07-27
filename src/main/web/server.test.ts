@@ -225,6 +225,15 @@ describe('web remote server', () => {
   });
 
   describe('static files', () => {
+    // Serve the real build output rather than the sources; see
+    // webRootDirectory() for why they differ under vitest.
+    beforeEach(() => {
+      process.env.WHIM_WEB_ROOT = path.join(__dirname, '..', '..', '..', 'dist', 'web');
+    });
+    afterEach(() => {
+      delete process.env.WHIM_WEB_ROOT;
+    });
+
     it('rejects a path traversal attempt', async () => {
       const res = await request('/..%2f..%2f..%2fetc%2fpasswd');
       expect(res.status).toBe(403);
@@ -238,6 +247,31 @@ describe('web remote server', () => {
     it('does not require a token for static files', async () => {
       const res = await request('/definitely-missing.js');
       expect(res.status).toBe(404);
+    });
+
+    /**
+     * /desktop serves the real renderer. These assert the wiring the browser
+     * depends on, which unit tests of the transport cannot reach: that the
+     * route resolves at all, that the bundle is reachable at the absolute URL
+     * boot.js injects, and that app.js is *not* referenced from the HTML —
+     * if it were, it would evaluate before window.whimAPI existed and the
+     * page would break in a way no test here would otherwise notice.
+     */
+    it('serves the desktop interface at /desktop', async () => {
+      const res = await request('/desktop/');
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('<script src="/desktop/boot.js"');
+      expect(res.body).not.toContain('src="/desktop/app.js"');
+    });
+
+    it('serves the renderer bundle boot.js asks for', async () => {
+      const res = await request('/desktop/app.js');
+      expect(res.status).toBe(200);
+    });
+
+    it('resolves /desktop without a trailing slash', async () => {
+      const res = await request('/desktop');
+      expect(res.status).toBe(200);
     });
   });
 

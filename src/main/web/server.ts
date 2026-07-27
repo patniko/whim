@@ -491,6 +491,21 @@ function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   });
 }
 
+/**
+ * Where the browser assets live.
+ *
+ * Resolved from the compiled server's own location, which lands on dist/web
+ * in a real run. Under vitest the sources run in place, so `__dirname` is
+ * src/main/web and this would resolve to src/web — a directory that contains
+ * TypeScript rather than a built page. WHIM_WEB_ROOT lets a test point at the
+ * actual build output so route wiring is verified against what ships.
+ */
+export function webRootDirectory(): string {
+  return process.env.WHIM_WEB_ROOT
+    ? path.resolve(process.env.WHIM_WEB_ROOT)
+    : path.resolve(__dirname, '..', '..', 'web');
+}
+
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405, securityHeaders());
@@ -498,7 +513,7 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, url: U
     return;
   }
 
-  const root = path.resolve(__dirname, '..', '..', 'web');
+  const root = webRootDirectory();
   const decodedPath = decodeURIComponent(url.pathname);
   const relativePath = decodedPath === '/' ? 'index.html' : decodedPath.replace(/^\/+/, '');
   const resolved = path.resolve(root, relativePath);
@@ -674,6 +689,15 @@ function requestUrl(req: http.IncomingMessage): URL {
   return new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 }
 
+/**
+ * The path the shared URLs and QR code point at.
+ *
+ * `/desktop` serves whim's real interface; `/` serves the lightweight client.
+ * The full interface is what people are actually asking for when they open the
+ * app from another device, so it is what they get by default.
+ */
+const PRIMARY_PATH = '/desktop/';
+
 function buildRemoteUrls(bindings: WebRemoteBindingStatus[], port: number, token: string): string[] {
   const scheme = tlsState.active ? 'https' : 'http';
   const urls: string[] = [];
@@ -681,7 +705,7 @@ function buildRemoteUrls(bindings: WebRemoteBindingStatus[], port: number, token
     for (const address of binding.addresses) {
       if (address === '0.0.0.0' || address === '::') continue;
       const host = address.includes(':') ? `[${address}]` : address;
-      urls.push(`${scheme}://${host}:${port}/?token=${encodeURIComponent(token)}`);
+      urls.push(`${scheme}://${host}:${port}${PRIMARY_PATH}?token=${encodeURIComponent(token)}`);
     }
   }
   return [...new Set(urls)];

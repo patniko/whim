@@ -15,7 +15,7 @@ import { createWebTransport } from './transport';
 import { createWhimAPI } from '../../shared/whim-api';
 
 async function boot(): Promise<void> {
-  if (!(await hasSession())) {
+  if (!(await establishSessionFromUrl()) && !(await hasSession())) {
     await promptForToken();
   }
 
@@ -37,6 +37,29 @@ async function boot(): Promise<void> {
   );
 
   await loadRenderer();
+}
+
+/**
+ * Pair from a `?token=` in the URL, which is what the QR code in Settings
+ * encodes.
+ *
+ * The token is stripped from the address bar immediately, before the exchange
+ * is even attempted: it must not survive into history, a bookmark, or a
+ * screenshot of a shared screen.
+ */
+async function establishSessionFromUrl(): Promise<boolean> {
+  const token = new URLSearchParams(window.location.search).get('token');
+  if (!token) return false;
+
+  window.history.replaceState({}, '', window.location.pathname);
+  try {
+    await establishSession(token);
+    return true;
+  } catch {
+    // Fall through to the manual prompt, which can report the failure with
+    // somewhere for the user to correct it.
+    return false;
+  }
 }
 
 /** Inject the desktop renderer bundle now that `window.whimAPI` exists. */

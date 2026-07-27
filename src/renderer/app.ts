@@ -5276,7 +5276,7 @@ function renderWebRemoteState(state: WebRemoteState): void {
   if (!state.enabled) {
     setWebRemoteStatus('Remote web access is off.');
   } else if (state.running) {
-    setWebRemoteStatus('Remote web access is running. Scan the QR code from your phone.');
+    setWebRemoteStatus("Remote web access is running. Scan the QR code to open whim on your phone.");
   } else if (state.bindings.some(binding => binding.state === 'listening')) {
     // Partially bound: serving on what's up, still waiting on the rest.
     const waiting = state.bindings.filter(binding => binding.state !== 'listening');
