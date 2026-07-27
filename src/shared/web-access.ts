@@ -54,6 +54,9 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   'hotkeys:get': 'desktop-only',
   'hotkeys:set': 'desktop-only',
   'hotkeys:reset': 'desktop-only',
+  // Reports whether an OS-level global shortcut registered. A browser has no
+  // such concept.
+  'hotkeys:toggle-status': 'desktop-only',
 
   // Probe and configure the local CLI installation — host-machine concerns.
   'cli:resolve-path': 'deny',
