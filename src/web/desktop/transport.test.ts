@@ -65,6 +65,17 @@ describe('web transport', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
+    /**
+     * The pin button is drawn from this value, so a rejection leaves it in
+     * whatever state it happened to start in. "Not pinned" isn't a placeholder
+     * — a browser tab genuinely cannot be an always-on-top window.
+     */
+    it('answers desktop-only channels that have a true browser answer', async () => {
+      const { transport } = createWebTransport();
+      await expect(transport.invoke('window:get-pinned')).resolves.toBe(false);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
     it('reports the server error message when a call fails', async () => {
       fetchMock.mockResolvedValue({
         ok: false,

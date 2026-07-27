@@ -84,32 +84,39 @@ export interface WebTransport {
 export function createWebTransport(options: WebTransportOptions = {}): WebTransport {
   const router = new EventRouter();
 
+  async function remoteInvoke(channel: string, args: unknown[]): Promise<any> {
+    const res = await fetch('/api/invoke', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel, args }),
+    });
+
+    if (res.status === 401) {
+      options.onUnauthorized?.();
+      throw new Error('Session expired.');
+    }
+
+    const body = await res.json().catch(() => null);
+    if (!res.ok || !body?.ok) {
+      throw new Error(body?.error?.message || `"${channel}" failed (${res.status})`);
+    }
+    return body.result;
+  }
+
   const transport: IpcTransport = {
-    async invoke(channel: string, ...args: any[]): Promise<any> {
+    invoke(channel: string, ...args: any[]): Promise<any> {
       // Consult the shared classification before spending a round trip. The
       // server enforces this too — this only makes the failure immediate and
       // the message specific.
       const access = webAccessFor(channel);
-      if (access === 'deny') throw new DeniedError(channel);
-      if (access === 'desktop-only') throw new DesktopOnlyError(channel);
-
-      const res = await fetch('/api/invoke', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channel, args }),
-      });
-
-      if (res.status === 401) {
-        options.onUnauthorized?.();
-        throw new Error('Session expired.');
+      if (access === 'desktop-only' && channel in BROWSER_TRUTH) {
+        return Promise.resolve(BROWSER_TRUTH[channel]);
       }
+      if (access === 'deny') return preRejected(new DeniedError(channel));
+      if (access === 'desktop-only') return preRejected(new DesktopOnlyError(channel));
 
-      const body = await res.json().catch(() => null);
-      if (!res.ok || !body?.ok) {
-        throw new Error(body?.error?.message || `"${channel}" failed (${res.status})`);
-      }
-      return body.result;
+      return remoteInvoke(channel, args);
     },
 
     send(channel: string, ..._args: any[]): void {
@@ -149,3 +156,39 @@ function detectPlatform(): string {
   if (/Win/i.test(ua)) return 'win32';
   return 'linux';
 }
+
+/**
+ * Reject, but count the rejection as already observed.
+ *
+ * The renderer was written against a desktop where every channel exists, so it
+ * calls things like `window:get-pinned` on boot and ignores the result. In a
+ * browser those calls fail, and each one surfaced as an "Uncaught (in promise)"
+ * error — noise that buries the failures that do matter, and that looks like a
+ * broken page to anyone opening devtools.
+ *
+ * Resolving these to a placeholder instead would be worse: `window:get-pinned`
+ * returns a boolean, and a truthy stand-in would render the wrong UI. So the
+ * promise still rejects — callers that await it get an accurate, specific
+ * error — and a no-op handler is attached to the same promise so callers that
+ * discard it stay silent. Unhandled-rejection tracking is per-promise, so this
+ * marks exactly this one as observed without swallowing anything.
+ */
+function preRejected(error: Error): Promise<never> {
+  const rejected = Promise.reject(error);
+  rejected.catch(() => {});
+  return rejected;
+}
+
+/**
+ * Desktop-only channels that nonetheless have a true answer in a browser.
+ *
+ * The bar for this table is narrow on purpose: the value must be *correct*,
+ * not merely inoffensive. A browser tab is never an always-on-top window, so
+ * "not pinned" is the honest state of the world, and the renderer draws an
+ * accurate button from it. Anything where the truthful answer is "there is no
+ * such thing here" belongs in the rejecting path instead, where the caller
+ * finds out rather than being misled.
+ */
+const BROWSER_TRUTH: Record<string, unknown> = {
+  'window:get-pinned': false,
+};

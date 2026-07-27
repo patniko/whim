@@ -21,6 +21,41 @@ import type { IpcCommandChannel } from './ipc-contract';
  */
 export type WebAccess = 'allow' | 'deny' | 'desktop-only';
 
+/**
+ * Commands that are registered but absent from `ipc-contract.ts`.
+ *
+ * "Exhaustive by construction" was only true of channels the contract knows
+ * about, and nine handlers had been added without one. `webAccessFor` returns
+ * `null` for anything it has never heard of, which the gateway treats as
+ * denied — so these were refused with no decision ever having been made, and
+ * the browser reported them as forbidden rather than as an oversight. Serving
+ * the real renderer made that visible: it calls `runtimes:list` on boot and
+ * got an unhandled rejection.
+ *
+ * These are classified here rather than quietly allowed, and
+ * `registry.test.ts` fails if a registered channel appears in neither map, so
+ * the next one cannot slip through the same gap. Moving them into the
+ * contract is the better end state; classifying them is the part that has to
+ * be true today.
+ */
+const UNTYPED_CHANNEL_ACCESS: Record<string, WebAccess> = {
+  // Reads: describing state a remote user is already allowed to see.
+  'agent:get-working-dir': 'allow',
+  'canvas:read-activity-log': 'allow',
+  'canvas:get-agent-state': 'allow',
+  'subagent:list-persisted': 'allow',
+  'runtimes:list': 'allow',
+
+  // Lowers the sandbox around an agent with shell access on the host.
+  'agent:disable-sandbox': 'deny',
+  // Rewrites which runtimes the host will execute against.
+  'runtimes:save': 'deny',
+
+  // Native surfaces with no browser meaning.
+  'canvas:open-folder': 'desktop-only',
+  'canvas-window:get-always-on-top': 'desktop-only',
+};
+
 export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   // ── Spaces — the core workspace content ──
   'space:create': 'allow',
@@ -199,6 +234,8 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   'update:download': 'desktop-only',
   'update:get-state': 'desktop-only',
   'update:open-log': 'desktop-only',
+
+  ...UNTYPED_CHANNEL_ACCESS,
 };
 
 export function webAccessFor(channel: string): WebAccess | null {

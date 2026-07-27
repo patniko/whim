@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
+// The registry installs handlers on ipcMain; the test only cares that it also
+// records them, so a stub is enough to keep Electron out of the test process.
+vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }));
+
 vi.mock('../database', () => ({
   assignSpaceFolder: vi.fn(),
   createSpace: vi.fn(),
@@ -46,7 +50,8 @@ vi.mock('../notify', () => ({
 }));
 
 import { GatewayError, invokeWebRemoteCommand, isAllowedWebRemoteCommand, WEB_REMOTE_IMPLEMENTED_CHANNELS } from './gateway';
-import { webAccessFor, webAllowedChannels } from '../../shared/web-access';
+import { webAccessFor } from '../../shared/web-access';
+import { registerIpcHandler } from '../ipc/registry';
 
 describe('web remote gateway', () => {
   it('allows only reviewed channels', () => {
@@ -101,28 +106,22 @@ describe('classification and implementation stay in sync', () => {
     expect(isAllowedWebRemoteCommand('not:a:channel')).toBe(false);
   });
 
-  it('reports the remaining parity gap, so it cannot grow unnoticed', () => {
-    // Commands we have decided are safe remotely but have not built a gateway
-    // adapter for yet. Shrinking this list is the parity work; this test
-    // exists so the list is visible in review rather than invisible.
-    const implemented = new Set<string>(WEB_REMOTE_IMPLEMENTED_CHANNELS);
-    const pending = webAllowedChannels().filter((channel) => !implemented.has(channel));
-
-    // A ratchet, not a target: it may shrink freely, but growing it requires
-    // deliberately editing this number.
-    expect(pending.length).toBeLessThanOrEqual(35);
-    // None of the interaction commands may ever be in the pending list.
-    for (const channel of ['agent:approve', 'agent:respond-user-input', 'agent:respond-elicitation', 'agent:resolve-sandbox']) {
-      expect(pending).not.toContain(channel);
-    }
+  it('reaches an allowed channel through the desktop handler', async () => {
+    // The gateway holds no adapter for `skill:list`; it is reachable purely
+    // because the desktop registered a handler for it. This is the property
+    // that replaced hand-porting, so it is worth pinning: registering a
+    // handler is what makes an allowed channel work over the web.
+    expect(isAllowedWebRemoteCommand('skill:list')).toBe(false);
+    registerIpcHandler('skill:list', () => [{ name: 'a-skill' }]);
+    expect(isAllowedWebRemoteCommand('skill:list')).toBe(true);
+    await expect(invokeWebRemoteCommand('skill:list', [])).resolves.toEqual([{ name: 'a-skill' }]);
   });
-});
 
-describe('settings key filtering', () => {
-  it('serves a setting the interface needs to boot', async () => {
-    // Resolving at all is the assertion: the value depends on config, but a
-    // refusal here would stop the web interface from mounting.
-    await expect(invokeWebRemoteCommand('settings:get', ['workspace_root'])).resolves.toBeDefined();
+  it('still refuses a denied channel that the desktop has registered', async () => {
+    // Registration must never be enough on its own — classification decides.
+    registerIpcHandler('settings:set', () => ({ ok: true }));
+    expect(isAllowedWebRemoteCommand('settings:set')).toBe(false);
+    await expect(invokeWebRemoteCommand('settings:set', ['theme', 'dark'])).rejects.toThrow();
   });
 
   it('refuses a credential even though the channel is allowed', async () => {

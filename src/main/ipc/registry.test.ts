@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WEB_ACCESS } from '../../shared/web-access';
+import { WEB_ACCESS, webAccessFor } from '../../shared/web-access';
 
 /**
  * A static ratchet over the "one implementation, two transports" rule.
@@ -47,6 +47,11 @@ describe('ipc handler registry', () => {
     ).map(({ file }) => path.relative(MAIN_DIR, file));
 
     expect(offenders).toEqual([]);
+  });
+
+  it('classifies every channel it registers', () => {
+    const unclassified = [...registeredChannels()].filter((channel) => webAccessFor(channel) === null);
+    expect(unclassified).toEqual([]);
   });
 
   it('registers every channel the web remote is allowed to reach', () => {
