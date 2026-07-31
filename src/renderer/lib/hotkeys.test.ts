@@ -50,6 +50,20 @@ describe('renderer hotkeys', () => {
     expect(modifierEventToAccelerator(event, 'MacIntel')).toBe('Command+Shift');
   });
 
+  it('captures Option+Command+Space as an ASCII Electron accelerator', () => {
+    expect(keyboardEventToAccelerator(
+      keyEvent({ key: '\u00a0', code: 'Space', metaKey: true, altKey: true }),
+      'MacIntel',
+    )).toBe('Command+Alt+Space');
+  });
+
+  it('uses the physical key when Option transforms a printable macOS key', () => {
+    expect(keyboardEventToAccelerator(
+      keyEvent({ key: '˚', code: 'KeyK', altKey: true }),
+      'MacIntel',
+    )).toBe('Alt+K');
+  });
+
   it('matches CommandOrControl using platform-specific Electron semantics', () => {
     const shortcut = 'CommandOrControl+Shift+Space';
 
