@@ -8343,7 +8343,6 @@ function renderTour(): void {
 
   const hotkeyStepDone = tourDone.hide && tourDone.show;
   if (tourHotkeyNext) {
-    tourHotkeyNext.disabled = !hotkeyStepDone;
     tourHotkeyNext.textContent = hotkeyStepDone ? 'Nice — next' : 'Next';
   }
   // Without a working global shortcut the user can't hide the pane themselves,
@@ -8367,7 +8366,10 @@ function tourGoToStep(step: TourStep): void {
 function noteTourHide(source: string | undefined): void {
   if (!tourActive) return;
   if (tourStep === 'hotkey') {
-    if (source !== 'hotkey') return;
+    // Older/stale preload bundles may omit the source metadata even though
+    // the global shortcut successfully toggled the window. Blur hides use a
+    // separate event, so any non-tray toggle here is safe to count.
+    if (source === 'tray' || source === 'startup') return;
     tourDone.hide = true;
   } else {
     tourDone.trayHide = true;
@@ -8388,6 +8390,10 @@ function noteTourShow(source: string | undefined): void {
       // They discovered the tray early — bank it for step 2.
       tourDone.trayHide = true;
       tourDone.trayClick = true;
+    } else if (source !== 'startup' && tourDone.hide) {
+      // A missing/legacy source still proves the second half of the cycle
+      // when this renderer already observed the corresponding toggle hide.
+      tourDone.show = true;
     }
   } else if (tourStep === 'tray') {
     if (source === 'tray') {
