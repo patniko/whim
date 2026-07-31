@@ -8566,23 +8566,29 @@ tourSkipAll?.addEventListener('click', () => void finishTour());
 
 // ── Welcome / Onboarding ────────────────────────────────
 let welcomeWorkspaceSelected = false;
+let welcomeCliReady = false;
+let welcomeModelSelected = false;
 /** Installs backing the onboarding CLI picker, kept to map a path to a source. */
 let welcomeDiscoveredClis: Awaited<ReturnType<typeof populateCliSelect>> = [];
 
 function updateWelcomeStartBtn(): void {
-  welcomeStartBtn.disabled = !welcomeWorkspaceSelected;
+  welcomeStartBtn.disabled = !(welcomeWorkspaceSelected && welcomeCliReady && welcomeModelSelected);
 }
 
 async function showWelcomeView(): Promise<void> {
   mainView.classList.add('hidden');
   welcomeView.classList.remove('hidden');
-  welcomeWorkspaceSelected = false;
+  const savedWorkspace = await whimAPI.getSetting('workspace_root');
+  welcomeWorkspaceSelected = !!savedWorkspace;
+  welcomeCliReady = false;
+  welcomeModelSelected = false;
 
   // Reset step states
-  welcomeWorkspaceHint.textContent = 'A folder where your spaces, skills, and agent data will live.';
-  welcomeWorkspaceBtn.textContent = 'Choose Folder…';
-  welcomeWorkspaceCheck.classList.add('hidden');
-  welcomeStepWorkspace.classList.remove('done');
+  welcomeWorkspaceHint.textContent = savedWorkspace || 'A folder where your spaces, skills, and agent data will live.';
+  welcomeWorkspaceHint.title = savedWorkspace || '';
+  welcomeWorkspaceBtn.textContent = savedWorkspace ? 'Change…' : 'Choose Folder…';
+  welcomeWorkspaceCheck.classList.toggle('hidden', !savedWorkspace);
+  welcomeStepWorkspace.classList.toggle('done', !!savedWorkspace);
   welcomeCliCheck.classList.add('hidden');
   welcomeStepCli.classList.remove('done');
   welcomeCliStatus.textContent = 'Checking…';
@@ -8658,6 +8664,8 @@ async function loadWelcomeModels(retries = 5, token = ++welcomeModelLoadToken): 
   }
   welcomeModelSelect.innerHTML = '';
   if (models.length === 0) {
+    welcomeModelSelected = false;
+    updateWelcomeStartBtn();
     // Surface *why* rather than a dead-end "No models available" — on a new
     // machine this is almost always an unauthenticated or failed-to-start CLI.
     welcomeModelSelect.innerHTML = '<option value="">No models available</option>';
@@ -8681,8 +8689,10 @@ async function loadWelcomeModels(retries = 5, token = ++welcomeModelLoadToken): 
   } else {
     welcomeModelSelect.value = models[0].id;
   }
+  welcomeModelSelected = !!welcomeModelSelect.value;
   welcomeModelCheck.classList.remove('hidden');
   welcomeStepModel.classList.add('done');
+  updateWelcomeStartBtn();
 }
 
 function hideWelcomeView(): void {
@@ -8697,6 +8707,8 @@ function hideWelcomeView(): void {
  * what the SDK connects to (they diverge whenever `cli_source` isn't 'auto').
  */
 async function checkWelcomeCli(): Promise<boolean> {
+  welcomeCliReady = false;
+  updateWelcomeStartBtn();
   welcomeCliStatus.textContent = 'Checking…';
   welcomeCliStatus.style.color = '';
   welcomeCliCheck.classList.add('hidden');
@@ -8719,11 +8731,15 @@ async function checkWelcomeCli(): Promise<boolean> {
   welcomeCliStatus.title = info.target;
   welcomeCliCheck.classList.remove('hidden');
   welcomeStepCli.classList.add('done');
+  welcomeCliReady = true;
+  updateWelcomeStartBtn();
   return true;
 }
 
 /** Re-check the CLI and reload the model list after a runtime change. */
 async function refreshWelcomeCliAndModels(): Promise<void> {
+  welcomeModelSelected = false;
+  updateWelcomeStartBtn();
   const cliOk = await checkWelcomeCli();
   welcomeModelSelect.innerHTML = '<option value="">Loading models…</option>';
   welcomeModelCheck.classList.add('hidden');
@@ -8779,6 +8795,7 @@ welcomeWorkspaceBtn.addEventListener('click', async () => {
 
 welcomeModelSelect.addEventListener('change', () => {
   const model = welcomeModelSelect.value;
+  welcomeModelSelected = !!model;
   if (model) {
     welcomeModelCheck.classList.remove('hidden');
     welcomeStepModel.classList.add('done');
@@ -8786,10 +8803,11 @@ welcomeModelSelect.addEventListener('change', () => {
     welcomeModelCheck.classList.add('hidden');
     welcomeStepModel.classList.remove('done');
   }
+  updateWelcomeStartBtn();
 });
 
 welcomeStartBtn.addEventListener('click', async () => {
-  if (!welcomeWorkspaceSelected) return;
+  if (!welcomeWorkspaceSelected || !welcomeCliReady || !welcomeModelSelected) return;
 
   // Save model selection
   const model = welcomeModelSelect.value;
@@ -8977,12 +8995,17 @@ function mountReactLists(): void {
   });
 }
 
-whimAPI.getSetting('workspace_root').then(async ws => {
+Promise.all([
+  whimAPI.getSetting('workspace_root'),
+  whimAPI.getSetting('model'),
+  whimAPI.getCliRuntimeStatus(),
+]).then(async ([ws, model, cli]) => {
   // Install the IPC -> store bridge once at boot. The bridge runs alongside
   // the legacy IPC handlers during the migration (Phase 6).
   installIpcBridge(bridgeApi);
 
-  if (!ws && !isCanvasMode && !isSettingsMode) {
+  const setupRequired = !ws || !model || !cli.target || !cli.compatible;
+  if (setupRequired && !isCanvasMode && !isSettingsMode) {
     // Brand-new install: teach the hotkey and the tray icon *before* the setup
     // form, so the user can never lose the window without knowing how to get
     // it back. Returning users (tour already done) go straight to setup.

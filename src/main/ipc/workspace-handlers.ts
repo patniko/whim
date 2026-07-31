@@ -246,8 +246,8 @@ export function registerWorkspaceHandlers(): void {
     return transcribeAudio(float32);
   });
 
-  // Clear workspace — returns app to fresh start state (keeps saved profiles,
-  // just deactivates the current one for this session).
+  // Clear workspace — returns app to a persistent fresh-start state while
+  // keeping saved profiles available for later activation.
   ipcMain.handle('workspace:clear', async () => {
     enterFreshStartWorkspaceState();
     await broadcastProfilesChanged();

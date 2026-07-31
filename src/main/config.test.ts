@@ -311,6 +311,17 @@ describe('config', () => {
       expect(config.workspace).toBe('/repo-a');
     });
 
+    it('preserves an explicitly cleared workspace when saved profiles exist', () => {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify({
+        workspace: null,
+        profiles: [{ id: 'a', path: '/repo-a', name: null, tint: null }],
+        activeProfileId: null,
+      }));
+      const config = loadConfig();
+      expect(config.activeProfileId).toBeNull();
+      expect(config.workspace).toBeNull();
+    });
+
     it('upserts a profile for a path and dedupes by resolved path', () => {
       loadConfig();
       const first = upsertProfileForPath('/repo/one');
@@ -350,6 +361,7 @@ describe('config', () => {
       setActiveProfile(null);
       expect(getActiveProfileId()).toBeNull();
       expect(getActiveProfile()).toBeNull();
+      expect(getConfigValue('workspace')).toBeNull();
     });
 
     it('cycles to the next profile, wrapping around', () => {

@@ -245,6 +245,7 @@ body {
 }
 
 /* Keep inner views interactive — only the #app padding gutter is draggable */
+#app > #tour-view,
 #app > #welcome-view,
 #app > #main-view,
 #app > #settings-overlay,
