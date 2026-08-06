@@ -16,6 +16,7 @@ import {
   buildArtifactUrl,
   parseArtifactUrl,
   resolveArtifactRequest,
+  stripMetaRefresh,
   type SpaceResolver,
 } from './artifact-protocol';
 
@@ -200,5 +201,34 @@ describe('resolveArtifactRequest', () => {
       ok: false,
       status: 404,
     });
+  });
+});
+
+describe('stripMetaRefresh', () => {
+  it('removes a meta refresh, the one way an inert page can navigate itself', () => {
+    const html = '<head><meta http-equiv="refresh" content="0;url=https://evil.example"></head><p>hi</p>';
+
+    const cleaned = stripMetaRefresh(html);
+
+    expect(cleaned).not.toMatch(/http-equiv/i);
+    expect(cleaned).toContain('<p>hi</p>');
+  });
+
+  it('removes it however the author spelled it', () => {
+    const variants = [
+      "<meta HTTP-EQUIV='REFRESH' content='0'>",
+      '<meta content="0;url=/x" http-equiv=refresh>',
+      '<meta http-equiv = "refresh" content="1">',
+    ];
+
+    for (const html of variants) {
+      expect(stripMetaRefresh(html)).not.toMatch(/refresh/i);
+    }
+  });
+
+  it('leaves other meta tags alone', () => {
+    const html = '<meta charset="utf-8"><meta name="viewport" content="width=device-width">';
+
+    expect(stripMetaRefresh(html)).toBe(html);
   });
 });

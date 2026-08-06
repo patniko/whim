@@ -101,6 +101,11 @@ Content passes **by reference** — a path, never inline HTML. The runtime persi
 action input in durable session events and replays it on reconnect, so shipping
 whole documents through the RPC would store and replay them on every restart.
 
+An explicit `artifactId` must already be lowercase letters, digits and hyphens;
+it is rejected rather than slugified, because slugifying makes `Q&A` and `Q A`
+the same report and one would silently overwrite the other. A `title` has no
+such expectation and is slugified as before.
+
 ## Shipping a template with a skill
 
 A skill can supply its own layout instead, so the model provides findings and
@@ -171,8 +176,13 @@ from a Slack quote or an issue title as easily as from the model itself.
   skill that found nothing stays silent; a manual run you are watching does not
   notify, because its window is already in front of you.
 
-Scheduled runs never steal focus. The point of scheduling is that you are
-elsewhere.
+Scheduled runs never steal focus, and never open a window at all — an unread
+report should not cost a renderer process. The point of scheduling is that you
+are elsewhere.
+
+If a run finishes owing a report and never files one, it says so: the worker
+reads "Completed without a report" rather than a plain "Completed", which would
+be indistinguishable from success.
 
 ## Security model
 
@@ -188,16 +198,26 @@ Reports are agent-authored documents and are treated as untrusted input.
   `nodeIntegration: false` and no preload, so there is no IPC surface to reach.
 - **Confined paths.** Publishing resolves through `fs.realpath` and rejects
   anything that escapes the space folder, including symlinks and encoded
-  traversal.
+  traversal. The same applies to the artifact directory itself and to a skill's
+  template: the agent can write anywhere in its own workspace, so it can leave a
+  symlink and let whim — not the sandboxed agent — do the reading or writing.
+  Report files are always written temp-and-rename, which replaces a symlink
+  sitting at the target rather than writing through it.
 - **Size limits.** 5 MB for a report, 1 MB for its data payload.
-- **External links** open in the system browser on a user gesture; in-window
-  navigation, redirects and downloads are blocked.
+- **External links** open in the system browser, but only from a window you are
+  actually looking at, and only for `http(s)`. In-window navigation, redirects
+  and downloads are blocked, and `<meta http-equiv="refresh">` is stripped when
+  the report is served — with scripts already blocked, it was the one way an
+  agent-authored page could navigate itself with nobody involved.
 
 Canvas tools prompt for permission like any other custom tool, with one narrow
 exception: `list_canvas_capabilities`, `open_canvas` and `invoke_canvas_action`
 are pre-approved for **scheduled** runs, which would otherwise stall forever
 waiting for a user who is not there. The list is explicit rather than a pattern
-match, so a future tool with "canvas" in its name is not silently approved.
+match, so a future tool with "canvas" in its name is not silently approved. The
+grant lasts only as long as the unattended run: it is dropped when the run
+finishes and is not restored when you resume a finished session, because from
+then on somebody is driving.
 
 ## Implementation map
 

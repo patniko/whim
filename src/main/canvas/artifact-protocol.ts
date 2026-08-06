@@ -211,6 +211,21 @@ export function getArtifactSession(): Electron.Session {
 let handlerRegistered = false;
 
 /**
+ * Remove `<meta http-equiv="refresh">` from an artifact before serving it.
+ *
+ * The CSP already stops scripts, which leaves meta refresh as the one way an
+ * agent-authored page can navigate itself with no user involved — and the
+ * window's navigation handler turns an outbound navigation into "open this in
+ * the user's browser". Reports are meant to be inert until clicked.
+ */
+export function stripMetaRefresh(html: string): string {
+  return html.replace(
+    /<meta\b[^>]*http-equiv\s*=\s*(?:"\s*refresh\s*"|'\s*refresh\s*'|refresh)[^>]*>/gi,
+    '<!-- inert -->',
+  );
+}
+
+/**
  * Install the artifact handler on the isolated session. Registered on that
  * session only, so the app's own renderer can never fetch artifact URLs.
  */
@@ -229,7 +244,10 @@ export function registerArtifactProtocol(resolveSpace: SpaceResolver): void {
 
     try {
       const body = fs.readFileSync(result.filePath);
-      return new Response(body, { status: 200, headers: result.headers });
+      const served = result.mimeType.startsWith('text/html')
+        ? stripMetaRefresh(body.toString('utf-8'))
+        : body;
+      return new Response(served, { status: 200, headers: result.headers });
     } catch {
       return new Response('not_found', { status: 404 });
     }

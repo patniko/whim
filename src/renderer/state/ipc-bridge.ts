@@ -233,6 +233,24 @@ export async function loadSpaceArtifacts(api: WhimAPI, spaceId: string): Promise
   }
 }
 
+/**
+ * Open a report, and drop its chip if the file is no longer on disk.
+ *
+ * The chip is drawn from a snapshot, and reports live in the workspace, so git
+ * sync or a manual delete can remove one out from under it. Without this the
+ * chip is simply inert when clicked, which reads as whim being broken.
+ */
+export async function openCanvasArtifact(api: WhimAPI, spaceId: string, artifactId: string): Promise<void> {
+  try {
+    const result = await api.openCanvasArtifact(spaceId, artifactId);
+    if (result && 'error' in result && result.error) {
+      await loadSpaceArtifacts(api, spaceId);
+    }
+  } catch {
+    await loadSpaceArtifacts(api, spaceId);
+  }
+}
+
 export async function loadSkillsSnapshot(api: WhimAPI): Promise<void> {
   try {
     const skills = await api.listSkills();

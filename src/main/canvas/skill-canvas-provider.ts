@@ -25,6 +25,9 @@ import {
   resolveArtifactDir,
   resolveInsideSpace,
   toArtifactId,
+  isValidArtifactId,
+  CanvasArtifactError,
+  writeArtifactFile,
 } from './artifact-store';
 import { buildArtifactUrl } from './artifact-protocol';
 import { renderSkillCanvas, type SkillCanvasDefinition } from './skill-canvas-template';
@@ -38,8 +41,20 @@ function readString(input: Record<string, unknown> | undefined, key: string): st
 }
 
 function resolveArtifactId(input: Record<string, unknown> | undefined, fallback = DEFAULT_ARTIFACT_ID): string {
-  const requested = readString(input, 'artifactId') ?? readString(input, 'title');
-  return requested ? toArtifactId(requested, fallback) : fallback;
+  const requested = readString(input, 'artifactId');
+  // Validated, not slugified: slugifying makes "Q&A" and "Q A" the same
+  // directory, so one report silently overwrites another.
+  if (requested) {
+    if (!isValidArtifactId(requested)) {
+      throw new CanvasArtifactError(
+        'invalid_artifact_id',
+        `artifactId must be lowercase letters, digits and hyphens (got "${requested}")`,
+      );
+    }
+    return requested;
+  }
+  const title = readString(input, 'title');
+  return title ? toArtifactId(title, fallback) : fallback;
 }
 
 function describeError(err: unknown): string {
@@ -87,7 +102,8 @@ export function createSkillTemplateCanvas(
         title: { type: 'string', description: 'Title shown in the window and the space list.' },
         artifactId: {
           type: 'string',
-          description: 'Optional stable id. Reuse it across runs to refresh one report.',
+          description: 'Optional stable id. Reuse it across runs to refresh one report. '
+            + 'Lowercase letters, digits and hyphens only.',
         },
         status: { type: 'string', description: 'Short status line, e.g. "7 open questions".' },
       },
@@ -118,20 +134,18 @@ export function createSkillTemplateCanvas(
             return { ok: false, error: 'A relative `dataPath` to the JSON payload is required.' };
           }
 
-          const artifactId = resolveArtifactId(input);
-          const title = readString(input, 'title')
-            ?? getArtifact(run.workspaceRoot, run.folder, artifactId)?.title
-            ?? definition.displayName;
-
           try {
+            const artifactId = resolveArtifactId(input);
+            const title = readString(input, 'title')
+              ?? getArtifact(run.workspaceRoot, run.folder, artifactId)?.title
+              ?? definition.displayName;
             const data = readRenderData(run, relativeDataPath);
             const html = renderSkillCanvas(definition, data);
 
             // Render straight into the artifact's own directory so publishing
             // is an import of a file that already lives where it belongs.
             const dir = resolveArtifactDir(run.workspaceRoot, run.folder, artifactId);
-            fs.mkdirSync(dir, { recursive: true });
-            fs.writeFileSync(`${dir}/${ARTIFACT_FILE}`, html, 'utf-8');
+            writeArtifactFile(dir, ARTIFACT_FILE, html);
 
             const { artifact, changed } = await publishArtifact({
               workspaceRoot: run.workspaceRoot,

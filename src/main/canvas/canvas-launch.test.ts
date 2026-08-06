@@ -153,7 +153,7 @@ describe('resolveRunCanvasConfig', () => {
     expect(opened).toMatchObject({ spaceId: 'space-h', focus: true });
   });
 
-  it('opens without focus for a scheduled run, so it cannot interrupt the user', async () => {
+  it('opens no window at all for a scheduled run, so it cannot interrupt the user', async () => {
     const workingDir = makeSpace('space-i', 'canvas_artifacts: true\nskill_invocation:\n  skill_id: s1\n  source: schedule');
     const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-i', runId: 'run-2' })!;
     const canvas: any = config.session.canvases[0];
@@ -166,8 +166,9 @@ describe('resolveRunCanvasConfig', () => {
       input: { path: 'out.html', title: 'Findings' },
     });
 
-    const opened = windowCalls.find(c => c.kind === 'open');
-    expect(opened).toMatchObject({ spaceId: 'space-i', focus: false });
+    expect(windowCalls.find(c => c.kind === 'open')).toBeUndefined();
+    // It still refreshes a window the user already had open on this report.
+    expect(windowCalls.some(c => c.kind === 'reload')).toBe(true);
   });
 
   it('does not open a window merely because a canvas was opened', async () => {

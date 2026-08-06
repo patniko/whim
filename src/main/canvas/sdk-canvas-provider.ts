@@ -29,6 +29,7 @@ import {
   publishArtifact,
   setArtifactStatus,
   toArtifactId,
+  isValidArtifactId,
   CanvasArtifactError,
   type CanvasArtifact,
 } from './artifact-store';
@@ -81,7 +82,18 @@ function readString(input: Record<string, unknown> | undefined, key: string): st
  */
 function resolveArtifactId(input: Record<string, unknown> | undefined, run: CanvasRunContext): string {
   const requested = readString(input, 'artifactId');
-  if (requested) return toArtifactId(requested, DEFAULT_ARTIFACT_ID);
+  // An explicit id is validated rather than slugified. Slugifying it makes
+  // "Q&A" and "Q A" the same directory, so one report quietly replaces another;
+  // rejecting it tells the model to pick a different one while it can still act.
+  if (requested) {
+    if (!isValidArtifactId(requested)) {
+      throw new CanvasArtifactError(
+        'invalid_artifact_id',
+        `artifactId must be lowercase letters, digits and hyphens (got "${requested}")`,
+      );
+    }
+    return requested;
+  }
 
   const title = readString(input, 'title');
   if (title) return toArtifactId(title, DEFAULT_ARTIFACT_ID);
@@ -110,7 +122,7 @@ export function createArtifactCanvas(run: CanvasRunContext, events: CanvasProvid
           type: 'string',
           description:
             'Optional stable id for this report. Reuse the same id across runs to refresh one report ' +
-            'instead of creating another.',
+            'instead of creating another. Lowercase letters, digits and hyphens only.',
         },
         status: { type: 'string', description: 'Short status line, e.g. "7 open questions".' },
       },
@@ -146,11 +158,10 @@ export function createArtifactCanvas(run: CanvasRunContext, events: CanvasProvid
             return { ok: false, error: 'A relative `path` to the HTML file is required.' };
           }
 
-          const artifactId = resolveArtifactId(input, run);
-          const title = readString(input, 'title') ?? getArtifact(run.workspaceRoot, run.folder, artifactId)?.title
-            ?? 'Report';
-
           try {
+            const artifactId = resolveArtifactId(input, run);
+            const title = readString(input, 'title') ?? getArtifact(run.workspaceRoot, run.folder, artifactId)?.title
+              ?? 'Report';
             const { artifact, changed } = await publishArtifact({
               workspaceRoot: run.workspaceRoot,
               folder: run.folder,
@@ -196,10 +207,14 @@ export function createArtifactCanvas(run: CanvasRunContext, events: CanvasProvid
           const status = readString(input, 'status');
           if (!status) return { ok: false, error: 'A `status` is required.' };
 
-          const artifactId = resolveArtifactId(input, run);
+          let artifactId: string;
           try {
-            const artifact = await setArtifactStatus({
-              workspaceRoot: run.workspaceRoot,
+            artifactId = resolveArtifactId(input, run);
+          } catch (err) {
+            return { ok: false, error: describeError(err) };
+          }
+          try {
+            const artifact = await setArtifactStatus({              workspaceRoot: run.workspaceRoot,
               folder: run.folder,
               artifactId,
               status,

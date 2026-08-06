@@ -38,14 +38,17 @@ import { notifyCanvasRun } from '../canvas/canvas-notifier';
  * reports success as soon as a run starts, which says nothing about whether a
  * report was ever produced.
  */
-function reportFinishedCanvasRun(agentId: string, spaceId: string | null | undefined): void {
+function reportFinishedCanvasRun(
+  agentId: string,
+  spaceId: string | null | undefined,
+): 'published' | 'no-output' | null {
   const result = reportCanvasRun(agentId);
-  if (!result) return;
+  if (!result) return null;
 
   if (result.outcome === 'no-output') {
     console.warn(`[canvas] run ${agentId} finished without publishing an artifact (space ${result.spaceId})`);
     endCanvasRun(agentId);
-    return;
+    return 'no-output';
   }
 
   let label: string | undefined;
@@ -56,7 +59,11 @@ function reportFinishedCanvasRun(agentId: string, spaceId: string | null | undef
 
   notifyCanvasRun(result, label);
   endCanvasRun(agentId);
+  return 'published';
 }
+
+/** Shown instead of "Completed" when a run owed a report and did not file one. */
+export const NO_REPORT_SUMMARY = 'Completed without a report';
 
 /**
  * Resolve cloud session options from the workspace. Attempts to detect the
@@ -1162,7 +1169,12 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
       pendingApprovals: new Map(),
       summary: persisted.summary || 'Resumed',
       runLocation: isCloud ? 'cloud' : 'local',
-      ...(canvasConfig?.run.scheduled ? { autoApproveCanvasTools: true } : {}),
+      // Only a run that is still unattended keeps the carve-out. Resuming a
+      // finished scheduled session means a person is driving it now, and they
+      // should be asked like anyone else.
+      ...(canvasConfig?.run.scheduled && restoredStatus === 'running'
+        ? { autoApproveCanvasTools: true }
+        : {}),
       ...(persisted.yolo_mode ? { yoloMode: true } : {}),
       ...(persisted.persona_handle ? { personaHandle: persisted.persona_handle } : {}),
       ...(commentContextFromPersisted(persisted, workingDir)
@@ -1781,7 +1793,19 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
         } catch { /* non-fatal: file may not exist */ }
       }
 
-      reportFinishedCanvasRun(agentId, record.spaceId);
+      const canvasOutcome = reportFinishedCanvasRun(agentId, record.spaceId);
+      // The unattended run is over. Anything that happens next is somebody
+      // typing, so the scheduled carve-out should no longer apply.
+      record.autoApproveCanvasTools = false;
+      // A run that owed a report and filed none looks identical to a successful
+      // one on the Workers tab — no report, no notification, and a card that
+      // says "Completed". Say what actually happened instead.
+      if (canvasOutcome === 'no-output') {
+        record.summary = NO_REPORT_SUMMARY;
+        persistence.updateStatus(record);
+        notifier.notifyRenderer('agent:completed', { agentId, summary: record.summary });
+        logIntentActivity(record, 'agent.completed', { summary: record.summary });
+      }
 
       // Ephemeral agents: remove from registry after a short delay so the
       // renderer has time to process final events, then they vanish from history.

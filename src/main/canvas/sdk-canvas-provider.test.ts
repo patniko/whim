@@ -205,11 +205,34 @@ describe('publish', () => {
     const canvas = createArtifactCanvas(run());
     writeReport('report.html', '<h1>Mine</h1>');
 
-    await invokeAction(canvas, 'publish', { path: 'report.html', artifactId: '../../other/hijack' });
+    const result = await invokeAction(canvas, 'publish', { path: 'report.html', artifactId: '../../other/hijack' });
 
-    // The id is slugified rather than honoured as a path, so the other space is untouched.
+    // Rejected outright rather than quietly slugified into a different report.
+    expect(result).toMatchObject({ ok: false });
     expect(listArtifacts(workspace, otherFolder)).toHaveLength(0);
-    expect(listArtifacts(workspace, FOLDER)).toHaveLength(1);
+    expect(listArtifacts(workspace, FOLDER)).toHaveLength(0);
+  });
+
+  it('rejects an explicit artifact id that is not already a safe id', async () => {
+    const canvas = createArtifactCanvas(run());
+    writeReport('report.html', '<h1>A</h1>');
+
+    // "Q&A" and "Q A" both slugify to "q-a", so honouring them silently would
+    // let one report replace an unrelated one.
+    const result = await invokeAction(canvas, 'publish', { path: 'report.html', artifactId: 'Q&A' });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(String((result as any).error)).toMatch(/lowercase letters, digits and hyphens/);
+    expect(listArtifacts(workspace, FOLDER)).toHaveLength(0);
+  });
+
+  it('still derives an id from a title, which has no such expectation', async () => {
+    const canvas = createArtifactCanvas(run());
+    writeReport('report.html', '<h1>A</h1>');
+
+    const result = await invokeAction(canvas, 'publish', { path: 'report.html', title: 'Q&A digest' });
+
+    expect(result).toMatchObject({ ok: true, artifactId: 'q-a-digest' });
   });
 
   it('verifies a supplied content hash', async () => {

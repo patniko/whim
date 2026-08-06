@@ -61,7 +61,15 @@ function defaultHooks(run: CanvasRunContext, agentId: string | undefined, extra?
   const show = (artifact: CanvasArtifact, instanceId?: string) => {
     if (!artifact.published) return;
     const key = { spaceId: run.spaceId, artifactId: artifact.artifactId };
-    openArtifactWindow({ ...key, title: artifact.title, focus: !run.scheduled, ...(instanceId ? { instanceId } : {}) });
+    // A scheduled run must not materialise a window at all. Opening one hidden
+    // would leave a renderer process per unread report, and there is nobody
+    // there to see it: the chip, the tray entry and the notification are how an
+    // unattended report gets opened, whenever the user gets to it.
+    if (run.scheduled) {
+      reloadArtifactWindow(key);
+      return;
+    }
+    openArtifactWindow({ ...key, title: artifact.title, focus: true, ...(instanceId ? { instanceId } : {}) });
     reloadArtifactWindow(key);
   };
 

@@ -162,9 +162,7 @@ function hardenArtifactWebContents(win: BrowserWindow): void {
   const { webContents } = win;
 
   webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://') || url.startsWith('http://')) {
-      void shell.openExternal(url);
-    }
+    if (isExternalUrl(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
 
@@ -172,7 +170,10 @@ function hardenArtifactWebContents(win: BrowserWindow): void {
     // The initial load is not a navigation; anything after it is.
     if (url.startsWith(`${ARTIFACT_SCHEME}://`)) return;
     event.preventDefault();
-    if (url.startsWith('https://') || url.startsWith('http://')) {
+    // Only hand a URL to the browser when the user is actually looking at this
+    // window. A report is untrusted output, and a background window that can
+    // launch the browser on its own is a page that decides what the user sees.
+    if (!win.isDestroyed() && win.isVisible() && win.isFocused() && isExternalUrl(url)) {
       void shell.openExternal(url);
     }
   });
@@ -185,7 +186,26 @@ function hardenArtifactWebContents(win: BrowserWindow): void {
     callback(false);
   });
   webContents.session.setPermissionCheckHandler(() => false);
-  webContents.session.on('will-download', event => {
+  blockArtifactDownloads(webContents.session);
+}
+
+/** Only ordinary web links leave the app — never `file:`, `javascript:` or our own scheme. */
+function isExternalUrl(url: string): boolean {
+  return url.startsWith('https://') || url.startsWith('http://');
+}
+
+/**
+ * Block downloads once for the shared artifact session.
+ *
+ * Every artifact window uses the same session, so attaching this per window
+ * would add a listener per report and eventually hit the max-listeners warning.
+ */
+const downloadsBlockedFor = new WeakSet<object>();
+
+function blockArtifactDownloads(artifactSession: Electron.Session): void {
+  if (downloadsBlockedFor.has(artifactSession)) return;
+  downloadsBlockedFor.add(artifactSession);
+  artifactSession.on('will-download', event => {
     event.preventDefault();
   });
 }

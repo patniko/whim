@@ -70,6 +70,18 @@ function readString(source: Record<string, unknown>, key: string): string | unde
 /** Hard ceiling on the documented data shape, so a huge one cannot flood the prompt. */
 export const MAX_DATA_SHAPE_BYTES = 8 * 1024;
 
+/** Whether a path is really inside a directory once every symlink is resolved. */
+function isRealPathInside(dir: string, candidate: string): boolean {
+  try {
+    const realDir = fs.realpathSync(dir);
+    const realCandidate = fs.realpathSync(candidate);
+    const rel = path.relative(realDir, realCandidate);
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Read the author's description of the data their template expects.
  *
@@ -129,6 +141,15 @@ export function loadSkillCanvasDefinition(
 
   if (!fs.existsSync(templatePath) || !fs.statSync(templatePath).isFile()) {
     console.warn(`[canvas] skill "${skillId}" is missing its template at ${templateFile}`);
+    return null;
+  }
+
+  // The lexical check above is not enough on its own: a path inside the canvas
+  // folder can be a symlink to anywhere. Skills are installed files, so this is
+  // the difference between rendering a template and having whim read a private
+  // file on the skill's behalf and publish it into the workspace.
+  if (!isRealPathInside(canvasDir, templatePath)) {
+    console.warn(`[canvas] skill "${skillId}" points at a template outside its canvas folder`);
     return null;
   }
 

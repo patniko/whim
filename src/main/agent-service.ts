@@ -12,6 +12,8 @@ import { subscribeWebRemoteEvents } from './web/event-hub';
 import { initSdkRunner, setupAgentEventListeners } from './agents/sdk-runner';
 import { initCliRunner } from './agents/cli-runner';
 import { initCommentWorkflow } from './agents/comment-workflow';
+import { releaseCanvasInstances } from './canvas/canvas-lifecycle';
+import { endCanvasRun } from './canvas/canvas-outcome';
 
 export type { AgentStatus } from './agents/agent-registry';
 
@@ -469,6 +471,11 @@ export function forgetAgent(agentId: string): void {
     broker.clearPendingInteractions(record);
     notifier.notifyRenderer('agent:presence-ended', { agentId, spaceId: record.spaceId });
   }
+  // Canvas bookkeeping is keyed by agent id, so it has to be dropped on the
+  // common teardown path too. Otherwise a deleted or resumed agent leaves
+  // instance bindings and run state behind for the life of the process.
+  releaseCanvasInstances(agentId);
+  endCanvasRun(agentId);
   registry.delete(agentId);
 }
 

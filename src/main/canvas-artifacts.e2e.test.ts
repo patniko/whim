@@ -145,9 +145,10 @@ describe('scheduled skill to opened artifact', () => {
     expect(artifact?.status).toBe('3 open questions');
     expect(fs.readFileSync(artifact!.htmlPath, 'utf-8')).toBe('<h1>3 open questions</h1>');
 
-    // Shown, but not in the user's face — this run was unattended.
-    expect(openedWindows).toHaveLength(1);
-    expect(openedWindows[0]).toMatchObject({ spaceId, focus: false });
+    // Not shown at all — this run was unattended, and a hidden window per
+    // unread report is a renderer process nobody asked for. The chip, the tray
+    // and the notification are how the user gets to it.
+    expect(openedWindows).toHaveLength(0);
 
     // And the URL the agent got back resolves to that artifact.
     const parsed = parseArtifactUrl(result.url);

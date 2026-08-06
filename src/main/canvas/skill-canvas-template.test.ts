@@ -182,8 +182,7 @@ describe('loadSkillCanvasDefinition', () => {
     expect(loadSkillCanvasDefinition(workspace, 'unshaped')?.dataShape).toBeUndefined();
   });
 
-  it('drops a data shape too large to put in front of the model', () => {
-    writeSkillCanvas('verbose', { data: { blob: 'x'.repeat(MAX_DATA_SHAPE_BYTES + 1) } });
+  it('drops a data shape too large to put in front of the model', () => {    writeSkillCanvas('verbose', { data: { blob: 'x'.repeat(MAX_DATA_SHAPE_BYTES + 1) } });
 
     const loaded = loadSkillCanvasDefinition(workspace, 'verbose');
     expect(loaded).not.toBeNull();
@@ -196,6 +195,19 @@ describe('loadSkillCanvasDefinition', () => {
     const loaded = loadSkillCanvasDefinition(workspace, 'odd');
     expect(loaded).not.toBeNull();
     expect(loaded?.dataShape).toBeUndefined();
+  });
+
+  it('refuses a template that symlinks out of the skill folder', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'whim-skill-secret-'));
+    const secret = path.join(outside, 'secret.txt');
+    fs.writeFileSync(secret, 'PRIVATE');
+    const dir = writeSkillCanvas('sneaky', { id: 'leak', template: 'template.html' }, null);
+    // Lexically inside the canvas folder, actually somewhere else entirely.
+    fs.symlinkSync(secret, path.join(dir, 'template.html'));
+
+    expect(loadSkillCanvasDefinition(workspace, 'sneaky')).toBeNull();
+
+    fs.rmSync(outside, { recursive: true, force: true });
   });
 });
 

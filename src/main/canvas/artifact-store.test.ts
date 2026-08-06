@@ -25,6 +25,7 @@ import {
   CanvasArtifactError,
   MAX_ARTIFACT_BYTES,
   ARTIFACT_FILE,
+  writeArtifactFile,
 } from './artifact-store';
 
 let workspace: string;
@@ -273,6 +274,61 @@ describe('publishArtifact', () => {
     // they cannot come from different publishes.
     expect(manifest.contentHash).toBe(hashContent(html));
     expect(manifest.runId).toBe(html === '<p>a</p>' ? 'run-a' : 'run-b');
+  });
+
+  it('rejects a data path that was asked for but is not there', async () => {
+    await publishHtml('<h1>v1</h1>', { dataRelativePath: 'findings.json' })
+      .then(() => { throw new Error('should have thrown'); })
+      .catch((err: unknown) => {
+        expect(err).toBeInstanceOf(CanvasArtifactError);
+        expect((err as CanvasArtifactError).code).toBe('data_not_found');
+      });
+  });
+
+  it('keeps existing data when a republish does not mention it', async () => {
+    writeSourceFile('findings.json', '{"n":1}');
+    await publishHtml('<h1>v1</h1>', { dataRelativePath: 'findings.json' });
+
+    const { artifact } = await publishHtml('<h1>v2</h1>');
+
+    expect(artifact.hasData).toBe(true);
+    expect(fs.readFileSync(path.join(artifact.dir, 'data.json'), 'utf-8')).toBe('{"n":1}');
+  });
+});
+
+describe('write confinement', () => {
+  it('refuses an artifact directory that symlinks out of the space', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-escape-'));
+    const reports = path.join(spaceDir(), 'reports');
+    fs.mkdirSync(reports, { recursive: true });
+    // The agent can write anywhere in its own workspace, so it can leave a
+    // symlink here and let whim do the writing.
+    fs.symlinkSync(outside, path.join(reports, 'hijack'), 'dir');
+
+    expect(() => resolveArtifactDir(workspace, FOLDER, 'hijack'))
+      .toThrow(/outside the space folder/);
+
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+
+  it('replaces a symlinked target instead of writing through it', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-target-'));
+    const victim = path.join(outside, 'victim.html');
+    fs.writeFileSync(victim, 'ORIGINAL');
+    const dir = resolveArtifactDir(workspace, FOLDER, 'open-questions');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.symlinkSync(victim, path.join(dir, ARTIFACT_FILE));
+
+    writeArtifactFile(dir, ARTIFACT_FILE, '<h1>rendered</h1>');
+
+    expect(fs.readFileSync(victim, 'utf-8')).toBe('ORIGINAL');
+    expect(fs.readFileSync(path.join(dir, ARTIFACT_FILE), 'utf-8')).toBe('<h1>rendered</h1>');
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+
+  it('rejects a file name that tries to climb out of the artifact directory', () => {
+    const dir = resolveArtifactDir(workspace, FOLDER, 'open-questions');
+    expect(() => writeArtifactFile(dir, '../escape.html', 'x')).toThrow(/Invalid artifact file name/);
   });
 });
 

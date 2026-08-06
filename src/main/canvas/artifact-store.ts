@@ -98,14 +98,40 @@ export function getArtifactsRoot(workspaceRoot: string, folder: string): string 
 
 /**
  * Resolve an artifact directory, rejecting ids that could escape the space.
+ *
  * Validation is on the id itself rather than on the joined path, so traversal
- * is impossible by construction rather than by string comparison.
+ * is impossible by construction. The realpath check is a second, independent
+ * guard: the agent can write anywhere in its own workspace, so it can replace
+ * `reports/<id>` with a symlink pointing anywhere on disk and let whim — not
+ * the sandboxed agent — do the writing.
  */
 export function resolveArtifactDir(workspaceRoot: string, folder: string, artifactId: string): string {
   if (!isValidArtifactId(artifactId)) {
     throw new CanvasArtifactError('invalid_artifact_id', `Invalid artifact id: ${artifactId}`);
   }
-  return path.join(getArtifactsRoot(workspaceRoot, folder), artifactId);
+  const dir = path.join(getArtifactsRoot(workspaceRoot, folder), artifactId);
+  const realRoot = realpathOrSelf(resolveSpaceFolder(workspaceRoot, folder));
+  if (!isInside(realRoot, realpathOrSelf(dir))) {
+    throw new CanvasArtifactError('path_escape', 'Artifact directory resolves outside the space folder');
+  }
+  return dir;
+}
+
+/**
+ * Write a file into an artifact directory.
+ *
+ * Always temp-and-rename: renaming onto a path *replaces* a symlink sitting
+ * there instead of writing through it, which a plain write would do. Callers
+ * that render content themselves must use this rather than `fs.writeFileSync`.
+ */
+export function writeArtifactFile(dir: string, fileName: string, content: string | Buffer): string {
+  if (fileName.includes('/') || fileName.includes('\\') || fileName.includes('..')) {
+    throw new CanvasArtifactError('invalid_path', `Invalid artifact file name: ${fileName}`);
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  const target = path.join(dir, fileName);
+  writeFileAtomic(target, content);
+  return target;
 }
 
 /**
@@ -203,7 +229,13 @@ function withArtifactLock<T>(dir: string, fn: () => Promise<T> | T): Promise<T> 
   const prev = writeQueues.get(key) ?? Promise.resolve();
   const next = prev.then(() => fn(), () => fn());
   // Store a never-rejecting tail so one failure cannot poison later writes.
-  writeQueues.set(key, next.then(() => undefined, () => undefined));
+  const tail = next.then(() => undefined, () => undefined);
+  writeQueues.set(key, tail);
+  // Drop the entry once nothing is queued behind it, so a long-lived process
+  // does not accumulate one promise per artifact it has ever written.
+  void tail.then(() => {
+    if (writeQueues.get(key) === tail) writeQueues.delete(key);
+  });
   return next;
 }
 
@@ -314,16 +346,20 @@ export function publishArtifact(input: PublishArtifactInput): Promise<PublishArt
     let dataBytes: Buffer | null = null;
     if (input.dataRelativePath) {
       const dataPath = resolveInsideSpace(input.workspaceRoot, input.folder, input.dataRelativePath);
-      if (fs.existsSync(dataPath) && fs.statSync(dataPath).isFile()) {
-        dataBytes = fs.readFileSync(dataPath);
-        if (dataBytes.byteLength > MAX_DATA_BYTES) {
-          throw new CanvasArtifactError(
-            'data_too_large',
-            `Artifact data is ${dataBytes.byteLength} bytes, over the ${MAX_DATA_BYTES} byte limit`,
-          );
-        }
-        hasData = true;
+      // A data path that was asked for but is not there must fail loudly. The
+      // old behaviour kept the previous run's data.json and reported success,
+      // so a report could describe findings backed by stale data.
+      if (!fs.existsSync(dataPath) || !fs.statSync(dataPath).isFile()) {
+        throw new CanvasArtifactError('data_not_found', `No data file at ${input.dataRelativePath}`);
       }
+      dataBytes = fs.readFileSync(dataPath);
+      if (dataBytes.byteLength > MAX_DATA_BYTES) {
+        throw new CanvasArtifactError(
+          'data_too_large',
+          `Artifact data is ${dataBytes.byteLength} bytes, over the ${MAX_DATA_BYTES} byte limit`,
+        );
+      }
+      hasData = true;
     }
 
     const existing = readManifest(dir);
@@ -354,6 +390,9 @@ export function publishArtifact(input: PublishArtifactInput): Promise<PublishArt
       ...(input.skillId ? { skillId: input.skillId } : existing?.skillId ? { skillId: existing.skillId } : {}),
       contentHash,
       contentBytes: bytes.byteLength,
+      // Omitting a data path means "leave the data alone", so a status-only
+      // republish does not discard it. Supplying a missing one now throws
+      // above, which is the case that used to preserve data misleadingly.
       hasData: hasData || existing?.hasData === true,
       updatedAt: now,
       publishedAt: now,

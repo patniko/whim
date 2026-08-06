@@ -8,6 +8,7 @@ interface MockWin {
   close: ReturnType<typeof vi.fn>;
   setTitle: ReturnType<typeof vi.fn>;
   isVisible: () => boolean;
+  isFocused: () => boolean;
   isDestroyed: () => boolean;
   on: ReturnType<typeof vi.fn>;
   webContents: {
@@ -36,18 +37,20 @@ vi.mock('electron', () => ({
       const handlers = new Map<string, Function>();
       const wcHandlers = new Map<string, Function>();
       let visible = false;
+      let focused = false;
       let destroyed = false;
       const win: MockWin = {
         id: nextId++,
         loadURL: vi.fn(),
         show: vi.fn(() => { visible = true; }),
-        focus: vi.fn(),
+        focus: vi.fn(() => { focused = true; }),
         close: vi.fn(() => {
           destroyed = true;
           handlers.get('closed')?.();
         }),
         setTitle: vi.fn(),
         isVisible: () => visible,
+        isFocused: () => visible && focused,
         isDestroyed: () => destroyed,
         on: vi.fn((event: string, handler: Function) => { handlers.set(event, handler); }),
         webContents: {
@@ -126,8 +129,8 @@ describe('artifact window hardening', () => {
     expect(openExternal).not.toHaveBeenCalled();
   });
 
-  it('blocks navigation away from the artifact origin', () => {
-    openArtifactWindow(KEY);
+  it('blocks navigation away from the artifact origin, and only opens links the user can see', () => {
+    openArtifactWindow({ ...KEY, focus: true });
     const win = createdWindows[0];
     const event = { preventDefault: vi.fn() };
 
@@ -138,6 +141,29 @@ describe('artifact window hardening', () => {
     const sameOrigin = { preventDefault: vi.fn() };
     win.__fireWc('will-navigate', sameOrigin, 'whim-artifact://space/space-1/open-questions/index.html');
     expect(sameOrigin.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('does not launch the browser from a window the user is not looking at', () => {
+    // Never shown: nothing the user did can have caused this navigation, so it
+    // is the page deciding what the user sees.
+    openArtifactWindow({ ...KEY, focus: false });
+    const win = createdWindows[0];
+    const event = { preventDefault: vi.fn() };
+
+    win.__fireWc('will-navigate', event, 'https://evil.example');
+
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  it('never hands a non-web scheme to the browser', () => {
+    openArtifactWindow({ ...KEY, focus: true });
+    const win = createdWindows[0];
+
+    win.__fireWc('will-navigate', { preventDefault: vi.fn() }, 'file:///etc/passwd');
+    win.__fireWc('will-navigate', { preventDefault: vi.fn() }, 'javascript:alert(1)');
+
+    expect(openExternal).not.toHaveBeenCalled();
   });
 
   it('blocks redirects and downloads and denies permissions', () => {

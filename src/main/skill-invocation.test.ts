@@ -251,3 +251,30 @@ describe('space reuse', () => {
     expect(frontmatterOf(result.canvasContent).instructions).not.toContain('Refreshing an existing report');
   });
 });
+
+describe('concurrent invocation', () => {
+  it('does not let two overlapping runs of one skill interleave', async () => {
+    addSkill('reporter', 'canvas: true');
+
+    // A schedule firing while the user runs the same skill by hand. Reuse asks
+    // "which space should this run use?" and then writes canvas.md — steps that
+    // must not interleave, or the second overwrites the first mid-setup.
+    const [a, b] = await Promise.all([
+      invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any,
+      invokeSkill({ skillId: 'reporter', source: 'api' }) as any,
+    ]);
+
+    // Serialized, the second sees the space the first created and refreshes it.
+    // Unserialized, both take the "first run ever" branch and create their own.
+    expect(b.space.id).toBe(a.space.id);
+  });
+
+  it('still reuses one space when the runs do not overlap', async () => {
+    addSkill('reporter', 'canvas: true');
+
+    const first = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
+    const second = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
+
+    expect(second.space.id).toBe(first.space.id);
+  });
+});

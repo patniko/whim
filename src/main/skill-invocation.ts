@@ -81,6 +81,36 @@ function readSkillCanvasSettings(frontmatter: SkillFrontmatter): {
 }
 
 export async function invokeSkill(input: SkillInvocationInput): Promise<SkillInvocationResult | { error: string }> {
+  // Serialize per skill. Reuse asks "is a run already using this space?" and
+  // then writes canvas.md and launches — but the launch is what makes the run
+  // visible to that question. Two overlapping occurrences of the same skill (a
+  // schedule firing while the user runs it by hand) would both see an idle
+  // space, both claim it, and the second would overwrite the first's
+  // instructions before it had even started.
+  return withSkillLock(input.skillId, () => invokeSkillSerialized(input));
+}
+
+/**
+ * One in-flight invocation per skill id.
+ *
+ * The tail deliberately swallows rejections so a failed invocation cannot
+ * poison later ones, and entries are dropped once nothing is queued behind
+ * them so the map does not grow for the life of the process.
+ */
+const skillLocks = new Map<string, Promise<unknown>>();
+
+async function withSkillLock<T>(skillId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = skillLocks.get(skillId) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  const tail = next.then(() => undefined, () => undefined);
+  skillLocks.set(skillId, tail);
+  void tail.then(() => {
+    if (skillLocks.get(skillId) === tail) skillLocks.delete(skillId);
+  });
+  return next;
+}
+
+async function invokeSkillSerialized(input: SkillInvocationInput): Promise<SkillInvocationResult | { error: string }> {
   const workspace = getConfigValue('workspace');
   if (!workspace) return { error: 'no_workspace' };
 
