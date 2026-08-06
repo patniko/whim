@@ -20,6 +20,8 @@ import { createTray, destroyTray } from './tray';
 import { initAutoUpdater, cleanupAutoUpdater } from './update-service';
 import { syncWebRemoteServer, stopWebRemoteServer } from './web/server';
 import { restoreActiveCloudPollers, stopAllCloudPollers } from './cloud-agent-poller';
+import { registerArtifactSchemePrivileges, registerArtifactProtocol } from './canvas/artifact-protocol';
+import { resolveSpaceLocation } from './canvas/space-location';
 
 let currentToggleAccelerator: string | null = null;
 let toggleShortcutRegistered = false;
@@ -113,6 +115,10 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
+// Canvas artifacts render on their own scheme, and therefore their own origin,
+// so agent-authored HTML can never reach the app renderer's origin or storage.
+registerArtifactSchemePrivileges();
+
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
   '.css': 'text/css',
@@ -183,6 +189,9 @@ app.whenReady().then(async () => {
       headers: { 'Content-Type': mimeType },
     });
   });
+
+  // Serve canvas artifacts from an isolated session on their own origin.
+  registerArtifactProtocol(resolveSpaceLocation);
 
   // Grant microphone permission for Web Speech API
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
