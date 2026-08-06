@@ -98,11 +98,25 @@ describe('skill template canvas', () => {
     expect(canvas.declaration.displayName).toBe('Open questions digest');
   });
 
-  it('offers render rather than publish, since the skill supplies the layout', () => {
-    const canvas = createSkillTemplateCanvas(run(), writeTemplate());
-    const actions = (canvas.declaration.actions ?? []).map(a => a.name);
+  it('offers render rather than publish, since the skill supplies the layout', () => {      const canvas = createSkillTemplateCanvas(run(), writeTemplate());
+  const actions = (canvas.declaration.actions ?? []).map(a => a.name);
 
-    expect(actions).toEqual(['render']);
+  expect(actions).toEqual(['render']);
+  });
+
+  it('puts the documented data shape in front of the model, which cannot see the template', () => {
+  const definition = { ...writeTemplate(), dataShape: '{\n  "title": "The heading."\n}' };
+
+  const canvas = createSkillTemplateCanvas(run(), definition);
+
+  expect(canvas.declaration.description).toContain('"title": "The heading."');
+  });
+
+  it('describes the canvas without a shape when the skill documents none', () => {
+  const canvas = createSkillTemplateCanvas(run(), writeTemplate());
+
+  expect(canvas.declaration.description).toContain('Questions still waiting on you.');
+  expect(canvas.declaration.description).not.toContain('must have this shape');
   });
 
   it('renders the template from a data file and publishes the result', async () => {

@@ -74,7 +74,13 @@ export function createSkillTemplateCanvas(
     displayName: definition.displayName,
     description:
       `${definition.description} Write your findings to a JSON file in the space, then call ` +
-      '`render` with its path — this skill supplies the layout, so do not write HTML yourself.',
+      '`render` with its path — this skill supplies the layout, so do not write HTML yourself.' +
+      // The model cannot see the template, so without the author's documented
+      // shape it is guessing token names and the report renders blank.
+      (definition.dataShape
+        ? `\n\nThe JSON file must have this shape. Each value below describes what to put ` +
+          `there, it is not real data:\n\n${definition.dataShape}`
+        : ''),
     inputSchema: {
       type: 'object',
       properties: {

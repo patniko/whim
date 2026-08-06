@@ -210,6 +210,16 @@ Each agent card shows:
 
 ---
 
+## Scheduled Skills and Reports
+
+A skill can run on a schedule and publish a **report** — a visual summary you open with one click from the space row, the tray, or the notification it fires when it finds something.
+
+Repeat runs refresh the same space by default, so a daily skill leaves one space to complete rather than a hundred. Complete the space when you are done with it; the next run reopens it.
+
+See [Canvas reports](./canvas-artifacts.md) for enabling reports on a skill, shipping a report layout with it, and the security model.
+
+---
+
 ## Remote Web Access
 
 Remote Web Access serves a lightweight mobile site from the running whim desktop app. It is **off by default**.

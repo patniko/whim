@@ -122,6 +122,10 @@ Runs `whisper-tiny.en` locally via `@huggingface/transformers`. Pre-loaded on st
 
 Milkdown (ProseMirror + remark) wrapper: auto-save, file attachments, @mention agent deployment, agent presence indicators, and multi-line comment threads. The Milkdown integration lives under `canvas/editor/` (the editor component plus custom ProseMirror plugins for comments, mentions, presence, and decorations). Comments are stored inline in the markdown via a `:::whim-comments` block (the legacy `:::documint-comments` marker is still read and upgraded on the next save).
 
+### canvas/ — Canvas Reports (`src/main/canvas/`)
+
+A separate concept from the markdown canvas above: SDK-hosted canvases that let a skill run publish a self-contained HTML report into its space, served from an isolated `whim-artifact://` origin and opened from the space list, tray, or a notification. See [canvas-artifacts.md](./canvas-artifacts.md).
+
 ### chat/ — Agent Chat UI
 
 React components: `ChatView`, `MessageList`, `PromptBar`, `SubagentDetailOverlay`, and tile renderers for assistant messages, tools, approvals, reasoning, and sub-agents.

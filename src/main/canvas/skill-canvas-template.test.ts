@@ -10,6 +10,7 @@ import {
   renderTemplate,
   resolveSkillCanvasDefinition,
   MAX_TEMPLATE_BYTES,
+  MAX_DATA_SHAPE_BYTES,
 } from './skill-canvas-template';
 
 let workspace = '';
@@ -166,6 +167,35 @@ describe('loadSkillCanvasDefinition', () => {
       templateId: 'report',
       canvasId: buildSkillCanvasId('minimal', 'report'),
     });
+  });
+
+  it('carries the documented data shape, since the model cannot see the template', () => {
+    writeSkillCanvas('shaped', { data: { headline: 'One line summary.', items: [{ q: 'The question.' }] } });
+
+    const shape = loadSkillCanvasDefinition(workspace, 'shaped')?.dataShape ?? '';
+    expect(JSON.parse(shape)).toEqual({ headline: 'One line summary.', items: [{ q: 'The question.' }] });
+  });
+
+  it('omits the data shape when the definition documents none', () => {
+    writeSkillCanvas('unshaped', { id: 'plain' });
+
+    expect(loadSkillCanvasDefinition(workspace, 'unshaped')?.dataShape).toBeUndefined();
+  });
+
+  it('drops a data shape too large to put in front of the model', () => {
+    writeSkillCanvas('verbose', { data: { blob: 'x'.repeat(MAX_DATA_SHAPE_BYTES + 1) } });
+
+    const loaded = loadSkillCanvasDefinition(workspace, 'verbose');
+    expect(loaded).not.toBeNull();
+    expect(loaded?.dataShape).toBeUndefined();
+  });
+
+  it('ignores a non-object data field rather than rejecting the definition', () => {
+    writeSkillCanvas('odd', { data: 'a paragraph, not a shape' });
+
+    const loaded = loadSkillCanvasDefinition(workspace, 'odd');
+    expect(loaded).not.toBeNull();
+    expect(loaded?.dataShape).toBeUndefined();
   });
 });
 

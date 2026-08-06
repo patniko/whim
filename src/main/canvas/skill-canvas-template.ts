@@ -32,6 +32,11 @@ export interface SkillCanvasDefinition {
   skillId: string;
   displayName: string;
   description: string;
+  /**
+   * The data shape the template expects, as the author documented it, ready to
+   * show the model. Undefined when the definition documents nothing.
+   */
+  dataShape?: string;
   /** Absolute path to the template file. */
   templatePath: string;
 }
@@ -60,6 +65,29 @@ function readJson(filePath: string): Record<string, unknown> | null {
 function readString(source: Record<string, unknown>, key: string): string | undefined {
   const value = source[key];
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/** Hard ceiling on the documented data shape, so a huge one cannot flood the prompt. */
+export const MAX_DATA_SHAPE_BYTES = 8 * 1024;
+
+/**
+ * Read the author's description of the data their template expects.
+ *
+ * Without this the model is asked to fill a template it cannot see, and has to
+ * guess the token names — so the shape the author documented has to reach it.
+ * Values in the shape are prose describing each field, not real data.
+ */
+function readDataShape(definition: Record<string, unknown>): string | undefined {
+  const shape = definition.data;
+  if (!shape || typeof shape !== 'object') return undefined;
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(shape, null, 2);
+  } catch {
+    return undefined;
+  }
+  if (!serialized || Buffer.byteLength(serialized, 'utf-8') > MAX_DATA_SHAPE_BYTES) return undefined;
+  return serialized;
 }
 
 /**
@@ -109,6 +137,8 @@ export function loadSkillCanvasDefinition(
     return null;
   }
 
+  const dataShape = readDataShape(definition);
+
   return {
     canvasId: buildSkillCanvasId(skillId, templateId),
     templateId,
@@ -116,6 +146,7 @@ export function loadSkillCanvasDefinition(
     displayName: readString(definition, 'displayName') ?? readString(definition, 'name') ?? 'Report',
     description: readString(definition, 'description')
       ?? 'A report rendered from this skill\'s own template.',
+    ...(dataShape ? { dataShape } : {}),
     templatePath,
   };
 }
