@@ -315,7 +315,7 @@ describe('status, lookup and deletion', () => {
     });
 
     // A directory with no manifest is not an artifact.
-    fs.mkdirSync(path.join(workspace, FOLDER, '.whim', 'canvases', 'garbage'), { recursive: true });
+    fs.mkdirSync(path.join(workspace, FOLDER, 'reports', 'garbage'), { recursive: true });
 
     const artifacts = listArtifacts(workspace, FOLDER);
     expect(artifacts.map(a => a.artifactId)).toEqual(['second', 'open-questions']);

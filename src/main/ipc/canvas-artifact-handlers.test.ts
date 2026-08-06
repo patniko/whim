@@ -43,7 +43,7 @@ function addArtifact(
   overrides: Record<string, unknown> = {},
   publish = true,
 ): void {
-  const dir = path.join(workspace, spaceId, '.whim', 'canvases', artifactId);
+  const dir = path.join(workspace, spaceId, 'reports', artifactId);
   fs.mkdirSync(dir, { recursive: true });
   if (publish) fs.writeFileSync(path.join(dir, 'index.html'), `<h1>${artifactId}</h1>`);
   fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({

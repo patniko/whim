@@ -779,7 +779,7 @@ export function getMimeType(filePath: string): string {
 // ── Child pages ──────────────────────────────────────────
 
 const PAGE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
-const RESERVED_PAGE_NAMES = new Set(['canvas', 'uploads', '.whim', '.workspace', '.git', '.ds_store']);
+const RESERVED_PAGE_NAMES = new Set(['canvas', 'uploads', 'reports', '.whim', '.workspace', '.git', '.ds_store']);
 
 /** Validate and normalize a page name to a safe filename slug. */
 export function sanitizePageName(name: string): string | null {

@@ -4,7 +4,7 @@
  * An artifact is a self-contained HTML document produced by an agent run and
  * stored inside the owning space folder:
  *
- *   {spaceFolder}/.whim/canvases/{artifactId}/
+ *   {spaceFolder}/reports/{artifactId}/
  *     manifest.json   metadata (title, status, binding, hash)
  *     index.html      the published artifact
  *     data.json       optional structured payload
@@ -12,6 +12,13 @@
  * Disk is the source of truth. Nothing here writes to the event log or the
  * SQLite projection — artifacts are discovered by scanning space folders, so
  * they survive a cold DB rebuild, a git sync, or a workspace move.
+ *
+ * The location is deliberately *outside* the space's `.whim/` directory: that
+ * path is gitignored, and whim auto-commits the workspace. Storing reports
+ * there would leave them out of history and missing entirely on any other
+ * machine the workspace syncs to — for output whose whole value is being
+ * openable days later, that is the wrong trade. Living under `reports/` also
+ * means git supplies version history for free.
  *
  * This module is deliberately free of Electron and SDK imports so it can be
  * unit tested directly.
@@ -21,7 +28,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { resolveSpaceFolder } from '../workspace';
 
-export const CANVASES_DIR = path.join('.whim', 'canvases');
+export const CANVASES_DIR = 'reports';
 export const ARTIFACT_FILE = 'index.html';
 export const ARTIFACT_DATA_FILE = 'data.json';
 export const MANIFEST_FILE = 'manifest.json';

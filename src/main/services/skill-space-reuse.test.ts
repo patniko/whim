@@ -138,10 +138,10 @@ describe('buildRefreshFraming', () => {
 
   it('points the agent at the previous report and its id', () => {
     const framing = buildRefreshFraming([
-      { artifactId: 'open-questions', title: 'Open questions', relativeHtmlPath: '.whim/canvases/open-questions/index.html' },
+      { artifactId: 'open-questions', title: 'Open questions', relativeHtmlPath: 'reports/open-questions/index.html' },
     ]);
 
-    expect(framing).toContain('.whim/canvases/open-questions/index.html');
+    expect(framing).toContain('reports/open-questions/index.html');
     expect(framing).toContain('open-questions');
     expect(framing).toContain('Publish to the same `artifactId`');
     expect(framing).toContain('what changed since last time');
@@ -152,8 +152,8 @@ describe('buildRefreshFraming', () => {
       {
         artifactId: 'open-questions',
         title: 'Open questions',
-        relativeHtmlPath: '.whim/canvases/open-questions/index.html',
-        relativeDataPath: '.whim/canvases/open-questions/data.json',
+        relativeHtmlPath: 'reports/open-questions/index.html',
+        relativeDataPath: 'reports/open-questions/data.json',
       },
     ]);
 

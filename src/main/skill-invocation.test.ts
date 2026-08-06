@@ -224,7 +224,7 @@ describe('space reuse', () => {
     const spaceDir = path.join(workspace, first.space.folder);
 
     // Stand in for a previous run's published artifact.
-    const artifactDir = path.join(spaceDir, '.whim', 'canvases', 'open-questions');
+    const artifactDir = path.join(spaceDir, 'reports', 'open-questions');
     fs.mkdirSync(artifactDir, { recursive: true });
     fs.writeFileSync(path.join(artifactDir, 'index.html'), '<h1>3 open questions</h1>');
     fs.writeFileSync(path.join(artifactDir, 'manifest.json'), JSON.stringify({
