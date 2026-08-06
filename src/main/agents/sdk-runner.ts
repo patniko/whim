@@ -22,6 +22,12 @@ import { listSpaces, updateCanvasContent, listSkills } from '../database';
 import { getWorkspaceRepo } from '../cloud-agent';
 import { parseFrontmatter } from '../frontmatter';
 import { resolveRunCanvasConfig } from '../canvas/canvas-launch';
+import {
+  handleCanvasSessionEvent,
+  initCanvasLifecycle,
+  reconcileOpenCanvases,
+  releaseCanvasInstances,
+} from '../canvas/canvas-lifecycle';
 
 /**
  * Resolve cloud session options from the workspace. Attempts to detect the
@@ -124,6 +130,12 @@ export function initSdkRunner(deps: {
   persistence = deps.persistence;
   broker = deps.broker;
   subagentTracker = deps.subagentTracker;
+
+  // Closing an artifact window has to reach the runtime, so the lifecycle needs
+  // a way back to the live session for a run.
+  initCanvasLifecycle({
+    getSession: (agentId: string) => registry.get(agentId)?.session as any,
+  });
 }
 
 interface InitialPromptOptions {
@@ -1130,6 +1142,15 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
 
     setupAgentEventListeners(session, record);
 
+    // The runtime restores the canvases that were open before the app closed.
+    // Adopting them means a window the user closes after a restart is still
+    // reported back, instead of lingering in the runtime's projection.
+    if (canvasConfig) {
+      try {
+        reconcileOpenCanvases(agentId, (session as any).openCanvases);
+      } catch { /* reconciliation is best-effort */ }
+    }
+
     // For cloud sessions, rediscover the Mission Control URL by re-enabling
     // remote control on the resumed session.  The cloud worker is still
     // running (it didn't die with the app), so `remote.enable({mode:'on'})`
@@ -1573,6 +1594,15 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
         });
       }
     } catch { /* persistence is best-effort */ }
+
+    // Canvas instances are shared state: the agent opens and closes them while
+    // the user closes windows, so both directions have to be reconciled or the
+    // runtime keeps rehydrating canvases the user already dismissed.
+    try {
+      if (typeof event?.type === 'string' && event.type.startsWith('session.canvas.')) {
+        handleCanvasSessionEvent(agentId, event);
+      }
+    } catch { /* canvas reconciliation is best-effort */ }
   });
 
   // SDK events wrap payloads in event.data; fall back to top-level for compat
@@ -1722,7 +1752,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
       // Ephemeral agents: remove from registry after a short delay so the
       // renderer has time to process final events, then they vanish from history.
       if (record.ephemeral) {
-        setTimeout(() => registry.delete(agentId), 30_000);
+        setTimeout(() => { releaseCanvasInstances(agentId); registry.delete(agentId); }, 30_000);
       }
     }
   });
@@ -1754,7 +1784,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     }
 
     if (record.ephemeral) {
-      setTimeout(() => registry.delete(agentId), 30_000);
+      setTimeout(() => { releaseCanvasInstances(agentId); registry.delete(agentId); }, 30_000);
     }
   });
 

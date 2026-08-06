@@ -20,6 +20,8 @@ import {
 export interface CanvasSessionHooks {
   /** Fired once per publish that changed the artifact's bytes. */
   onArtifactPublished?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext; instanceId?: string }) => void;
+  /** Fired when an instance is bound to an artifact, including on reconnect. */
+  onArtifactBound?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext; instanceId: string }) => void;
   /** Fired when an artifact is bound, published again unchanged, or restyled. */
   onArtifactChanged?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext }) => void;
   /** Fired when an instance is closed by the agent, user or runtime. */
@@ -59,7 +61,10 @@ export function buildCanvasSessionConfig(
 
   try {
     const canvas = createArtifactCanvas(run, {
-      onBound: (artifact) => hooks.onArtifactChanged?.(artifact, { run }),
+      onBound: (artifact, ctx) => {
+        hooks.onArtifactBound?.(artifact, { run, instanceId: ctx.instanceId });
+        hooks.onArtifactChanged?.(artifact, { run });
+      },
       onPublished: (artifact, ctx) => {
         hooks.onArtifactChanged?.(artifact, { run });
         if (ctx.changed) hooks.onArtifactPublished?.(artifact, { run, instanceId: ctx.instanceId });

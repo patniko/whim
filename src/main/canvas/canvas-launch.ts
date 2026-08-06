@@ -10,6 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { openArtifactWindow, reloadArtifactWindow, setArtifactWindowTitle } from './artifact-window';
+import { bindCanvasInstance } from './canvas-lifecycle';
 import { resolveCanvasPolicy, type CanvasArtifactPolicy } from './canvas-policy';
 import { buildCanvasSessionConfig, type CanvasSessionConfig, type CanvasSessionHooks } from './canvas-session';
 import type { CanvasArtifact } from './artifact-store';
@@ -47,16 +48,26 @@ function readSpaceDocument(workingDir: string): string {
  * the feature something people turn off.
  */
 function defaultHooks(run: CanvasRunContext, extra?: CanvasSessionHooks): CanvasSessionHooks {
-  const show = (artifact: CanvasArtifact) => {
+  const show = (artifact: CanvasArtifact, instanceId?: string) => {
     if (!artifact.published) return;
     const key = { spaceId: run.spaceId, artifactId: artifact.artifactId };
-    openArtifactWindow({ ...key, title: artifact.title, focus: !run.scheduled });
+    openArtifactWindow({ ...key, title: artifact.title, focus: !run.scheduled, ...(instanceId ? { instanceId } : {}) });
     reloadArtifactWindow(key);
   };
 
   return {
+    onArtifactBound: (artifact, ctx) => {
+      if (run.runId) {
+        bindCanvasInstance(ctx.instanceId, {
+          agentId: run.runId,
+          spaceId: run.spaceId,
+          artifactId: artifact.artifactId,
+        });
+      }
+      extra?.onArtifactBound?.(artifact, ctx);
+    },
     onArtifactPublished: (artifact, ctx) => {
-      show(artifact);
+      show(artifact, ctx.instanceId);
       extra?.onArtifactPublished?.(artifact, ctx);
     },
     onArtifactChanged: (artifact, ctx) => {
