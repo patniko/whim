@@ -89,11 +89,11 @@ describe('resolveRunCanvasConfig', () => {
     const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-a', runId: 'run-1' });
 
     expect(config).not.toBeNull();
-    expect(config!.canvases).toHaveLength(1);
+    expect(config!.session.canvases).toHaveLength(1);
     // Without requestCanvasRenderer the runtime never advertises canvas tools,
     // so the agent could not open a canvas we registered.
-    expect(config!.requestCanvasRenderer).toBe(true);
-    expect(config!.canvasProvider).toEqual({ id: WHIM_CANVAS_PROVIDER_ID, name: 'Whim' });
+    expect(config!.session.requestCanvasRenderer).toBe(true);
+    expect(config!.session.canvasProvider).toEqual({ id: WHIM_CANVAS_PROVIDER_ID, name: 'Whim' });
   });
 
   it('returns null for the shared workspace session, which no skill owns', () => {
@@ -132,14 +132,14 @@ describe('resolveRunCanvasConfig', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-g' });
     expect(config).not.toBeNull();
-    expect(config!.canvases[0].declaration.id).toBe(WHIM_REPORT_CANVAS_ID);
+    expect(config!.session.canvases[0].declaration.id).toBe(WHIM_REPORT_CANVAS_ID);
     warn.mockRestore();
   });
 
   it('shows a published artifact and focuses it for a manual run', async () => {
     const workingDir = makeSpace('space-h', 'canvas_artifacts: true');
     const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-h', runId: 'run-1' })!;
-    const canvas: any = config.canvases[0];
+    const canvas: any = config.session.canvases[0];
 
     await canvas.open({ sessionId: 's', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID, instanceId: 'i1' });
     fs.writeFileSync(path.join(workingDir, 'out.html'), '<p>hello</p>');
@@ -156,7 +156,7 @@ describe('resolveRunCanvasConfig', () => {
   it('opens without focus for a scheduled run, so it cannot interrupt the user', async () => {
     const workingDir = makeSpace('space-i', 'canvas_artifacts: true\nskill_invocation:\n  skill_id: s1\n  source: schedule');
     const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-i', runId: 'run-2' })!;
-    const canvas: any = config.canvases[0];
+    const canvas: any = config.session.canvases[0];
 
     await canvas.open({ sessionId: 's', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID, instanceId: 'i1' });
     fs.writeFileSync(path.join(workingDir, 'out.html'), '<p>hello</p>');
@@ -173,7 +173,7 @@ describe('resolveRunCanvasConfig', () => {
   it('does not open a window merely because a canvas was opened', async () => {
     const workingDir = makeSpace('space-j', 'canvas_artifacts: true');
     const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-j' })!;
-    const canvas: any = config.canvases[0];
+    const canvas: any = config.session.canvases[0];
 
     await canvas.open({ sessionId: 's', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID, instanceId: 'i1' });
 
@@ -183,7 +183,7 @@ describe('resolveRunCanvasConfig', () => {
   it('does not reopen a window when a republish changes nothing', async () => {
     const workingDir = makeSpace('space-k', 'canvas_artifacts: true');
     const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-k' })!;
-    const canvas: any = config.canvases[0];
+    const canvas: any = config.session.canvases[0];
     const publish = (canvas as any).actionHandlers.get('publish');
 
     await canvas.open({ sessionId: 's', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID, instanceId: 'i1' });

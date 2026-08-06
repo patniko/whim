@@ -780,7 +780,7 @@ ${cliToolsPrompt}`;
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
       ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
-      ...(canvasConfig ?? {}),
+      ...(canvasConfig?.session ?? {}),
       systemMessage: {
         mode: 'append',
         content: `\n${systemPrompt}`,
@@ -823,6 +823,7 @@ ${cliToolsPrompt}`;
       ...(sandboxState ? { sandbox: sandboxState } : {}),
       ...(persona?.yolo ? { yoloMode: true } : {}),
       ...(persona?.handle ? { personaHandle: persona.handle } : {}),
+      ...(canvasConfig?.run.scheduled ? { autoApproveCanvasTools: true } : {}),
       canvasSnapshot: { path: canvasPath, hashBefore: canvasHashBefore },
     };
     registry.set(agentId, record);
@@ -1111,7 +1112,7 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
       onPermissionRequest: broker.createPermissionHandler(findRecord),
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
-      ...(canvasConfig ?? {}),
+      ...(canvasConfig?.session ?? {}),
     });
 
     const validStatuses = new Set(['running', 'waiting-approval', 'completed', 'failed']);
@@ -1132,6 +1133,7 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
       pendingApprovals: new Map(),
       summary: persisted.summary || 'Resumed',
       runLocation: isCloud ? 'cloud' : 'local',
+      ...(canvasConfig?.run.scheduled ? { autoApproveCanvasTools: true } : {}),
       ...(persisted.yolo_mode ? { yoloMode: true } : {}),
       ...(persisted.persona_handle ? { personaHandle: persisted.persona_handle } : {}),
       ...(commentContextFromPersisted(persisted, workingDir)
@@ -1397,7 +1399,7 @@ async function restartExpiredSession(
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
       ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
-      ...(canvasConfig ?? {}),
+      ...(canvasConfig?.session ?? {}),
       systemMessage: { mode: 'append', content: systemContent },
     });
 
@@ -1416,6 +1418,7 @@ async function restartExpiredSession(
       pendingApprovals: new Map(),
       summary: persisted.summary || 'Session restarted',
       restarted: true,
+      ...(canvasConfig?.run.scheduled ? { autoApproveCanvasTools: true } : {}),
       // The replacement session is always local — even when the original
       // was cloud — because we no longer have access to the original
       // remote worker.  Record `run_location='local'` so subsequent

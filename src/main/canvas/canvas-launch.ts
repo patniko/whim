@@ -18,6 +18,13 @@ import type { CanvasRunContext } from './sdk-canvas-provider';
 
 const WORKSPACE_SPACE_ID = '__workspace__';
 
+export interface RunCanvasSetup {
+  /** Fields to spread into the SDK session config. */
+  session: CanvasSessionConfig;
+  /** Context the run was built with, for callers that need to know how it runs. */
+  run: CanvasRunContext;
+}
+
 export interface ResolveRunCanvasParams {
   workspaceRoot: string;
   /** Absolute working directory of the run — the space folder. */
@@ -85,7 +92,7 @@ function defaultHooks(run: CanvasRunContext, extra?: CanvasSessionHooks): Canvas
  * supervisor sessions have nowhere to write an artifact, and the workspace-level
  * session is shared rather than owned by any one skill.
  */
-export function resolveRunCanvasConfig(params: ResolveRunCanvasParams): CanvasSessionConfig | null {
+export function resolveRunCanvasConfig(params: ResolveRunCanvasParams): RunCanvasSetup | null {
   const { workspaceRoot, workingDir, spaceId, runId } = params;
   if (!spaceId || spaceId === WORKSPACE_SPACE_ID) return null;
 
@@ -110,5 +117,6 @@ export function resolveRunCanvasConfig(params: ResolveRunCanvasParams): CanvasSe
     scheduled: policy.scheduled,
   };
 
-  return buildCanvasSessionConfig(run, policy, defaultHooks(run, params.hooks));
+  const session = buildCanvasSessionConfig(run, policy, defaultHooks(run, params.hooks));
+  return session ? { session, run } : null;
 }
