@@ -9,7 +9,7 @@ function acceptedReport() {
       '@huggingface/transformers': {
         severity: 'high',
         isDirect: true,
-        via: ['onnxruntime-node'],
+        via: ['onnxruntime-node', 'sharp'],
         effects: [],
       },
       'onnxruntime-node': {
@@ -29,16 +29,27 @@ function acceptedReport() {
         }],
         effects: ['onnxruntime-node'],
       },
+      sharp: {
+        severity: 'high',
+        isDirect: false,
+        via: [{
+          name: 'sharp',
+          dependency: 'sharp',
+          severity: 'high',
+          url: 'https://github.com/advisories/GHSA-f88m-g3jw-g9cj',
+        }],
+        effects: ['@huggingface/transformers'],
+      },
     },
     metadata: {
-      vulnerabilities: { info: 0, low: 0, moderate: 0, high: 3, critical: 0, total: 3 },
+      vulnerabilities: { info: 0, low: 0, moderate: 0, high: 4, critical: 0, total: 4 },
     },
   };
 }
 
 test('accepts only the expected advisory and dependency chain', () => {
   const accepted = evaluateAuditResult({ status: 1, stdout: JSON.stringify(acceptedReport()) });
-  assert.deepEqual(accepted.sort(), ['@huggingface/transformers', 'adm-zip', 'onnxruntime-node'].sort());
+  assert.deepEqual(accepted.sort(), ['@huggingface/transformers', 'adm-zip', 'onnxruntime-node', 'sharp'].sort());
 });
 
 test('rejects a different advisory for an allowlisted package', () => {
@@ -47,6 +58,15 @@ test('rejects a different advisory for an allowlisted package', () => {
   assert.throws(
     () => evaluateAuditResult({ status: 1, stdout: JSON.stringify(report) }),
     /only GHSA-xcpc-8h2w-3j85 is allowed/,
+  );
+});
+
+test('rejects a different advisory for sharp', () => {
+  const report = acceptedReport();
+  report.vulnerabilities.sharp.via[0].url = 'https://github.com/advisories/GHSA-0000-0000-0000';
+  assert.throws(
+    () => evaluateAuditResult({ status: 1, stdout: JSON.stringify(report) }),
+    /only GHSA-f88m-g3jw-g9cj is allowed/,
   );
 });
 
