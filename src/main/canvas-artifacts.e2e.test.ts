@@ -38,6 +38,9 @@ vi.mock('./database', () => ({
     if (space) space.folder = folder;
   },
   getSkill: (id: string) => skills.get(id) ?? null,
+  getLatestSpaceForSkill: (skillId: string) =>
+    [...spaces].reverse().find(s => s.source_skill_id === skillId) ?? null,
+  hasActiveAgentForSpace: () => false,
   updateCanvasContent: vi.fn(),
 }));
 

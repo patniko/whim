@@ -23,10 +23,14 @@ vi.mock('./database', () => ({
     if (space) space.folder = folder;
   },
   getSkill: (id: string) => skills.get(id) ?? null,
+  getLatestSpaceForSkill: (skillId: string) =>
+    [...spaces].reverse().find(s => s.source_skill_id === skillId) ?? null,
+  hasActiveAgentForSpace: () => false,
   updateCanvasContent: vi.fn(),
 }));
 
-vi.mock('./workspace', () => ({
+vi.mock('./workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./workspace')>()),
   createSpaceFolder: (root: string, spaceId: string, _description: string) => {
     fs.mkdirSync(path.join(root, spaceId), { recursive: true });
     return spaceId;
@@ -159,8 +163,7 @@ describe('the canvas contract', () => {
   });
 });
 
-describe('run provenance', () => {
-  it('stamps each occurrence, so a reused space can tell new output from old', async () => {
+describe('run provenance', () => {  it('stamps each occurrence, so a reused space can tell new output from old', async () => {
     addSkill('reporter', 'canvas: true');
     const first = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
     const second = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
@@ -177,5 +180,74 @@ describe('run provenance', () => {
     const result = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
 
     expect(frontmatterOf(result.canvasContent).skill_invocation.source).toBe('schedule');
+  });
+});
+
+describe('space reuse', () => {
+  it('refreshes the skill\'s existing space instead of creating one per run', async () => {
+    addSkill('reporter', 'canvas: true');
+    const first = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
+    const second = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
+
+    expect(second.space.id).toBe(first.space.id);
+    expect(spaces).toHaveLength(1);
+  });
+
+  it('creates a new space each run when the skill asks for one', async () => {
+    addSkill('reporter', 'canvas: true\nspace_mode: new');
+    const first = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
+    const second = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
+
+    expect(second.space.id).not.toBe(first.space.id);
+    expect(spaces).toHaveLength(2);
+  });
+
+  it('leaves skills without canvases on the existing one-space-per-run behaviour', async () => {
+    addSkill('plain', '');
+    const first = await invokeSkill({ skillId: 'plain' }) as any;
+    const second = await invokeSkill({ skillId: 'plain' }) as any;
+
+    expect(second.space.id).not.toBe(first.space.id);
+  });
+
+  it('opts a non-canvas skill into reuse when it asks explicitly', async () => {
+    addSkill('plain', 'space_mode: reuse');
+    const first = await invokeSkill({ skillId: 'plain' }) as any;
+    const second = await invokeSkill({ skillId: 'plain' }) as any;
+
+    expect(second.space.id).toBe(first.space.id);
+  });
+
+  it('tells the refreshing run about the report already in the space', async () => {
+    addSkill('reporter', 'canvas: true');
+    const first = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
+    const spaceDir = path.join(workspace, first.space.folder);
+
+    // Stand in for a previous run's published artifact.
+    const artifactDir = path.join(spaceDir, '.whim', 'canvases', 'open-questions');
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.writeFileSync(path.join(artifactDir, 'index.html'), '<h1>3 open questions</h1>');
+    fs.writeFileSync(path.join(artifactDir, 'manifest.json'), JSON.stringify({
+      artifactId: 'open-questions',
+      spaceId: first.space.id,
+      title: 'Open questions',
+      createdAt: '2024-01-01T00:00:00.000Z',
+      updatedAt: '2024-01-01T00:00:00.000Z',
+      publishedAt: '2024-01-01T00:00:00.000Z',
+    }));
+
+    const second = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
+    const instructions = frontmatterOf(second.canvasContent).instructions as string;
+
+    expect(instructions).toContain('Refreshing an existing report');
+    expect(instructions).toContain('open-questions');
+    expect(instructions).toContain('Publish to the same `artifactId`');
+  });
+
+  it('does not add refresh framing to a first run', async () => {
+    addSkill('reporter', 'canvas: true');
+    const result = await invokeSkill({ skillId: 'reporter', source: 'schedule' }) as any;
+
+    expect(frontmatterOf(result.canvasContent).instructions).not.toContain('Refreshing an existing report');
   });
 });

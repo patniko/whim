@@ -5,9 +5,12 @@ import { getConfigValue } from './config';
 import { assignSpaceFolder, createSpace, getSkill, updateCanvasContent } from './database';
 import { parseFrontmatter, serializeFrontmatter } from './frontmatter';
 import { createSpaceFolder, scheduleAutoCommit } from './workspace';
+import { listArtifacts, ARTIFACT_FILE, ARTIFACT_DATA_FILE, CANVASES_DIR } from './canvas/artifact-store';
+import { buildRefreshFraming, resolveSpaceForSkill } from './services/skill-space-reuse';
 import { withCanvasContract } from './canvas/canvas-contract';
 import { WHIM_REPORT_CANVAS_ID } from './canvas/sdk-canvas-provider';
 import type {
+  Space,
   SkillFrontmatter,
   SkillInvocationFrontmatter,
   SkillInvocationInput,
@@ -23,6 +26,28 @@ function buildInvocationInstructions(skillName: string, intent: string): string 
     return `Run the ${skillName} skill for this request:\n\n${intent}`;
   }
   return `Run the ${skillName} skill using its default instructions.`;
+}
+
+/** Prior artifacts in a reused space, described by path for the prompt. */
+function describePriorArtifacts(workspaceRoot: string, folder: string) {
+  try {
+    return listArtifacts(workspaceRoot, folder)
+      .filter(a => a.published)
+      .map(a => ({
+        artifactId: a.artifactId,
+        title: a.title,
+        relativeHtmlPath: path.posix.join(CANVASES_DIR.split(path.sep).join('/'), a.artifactId, ARTIFACT_FILE),
+        ...(a.hasData
+          ? {
+            relativeDataPath: path.posix.join(
+              CANVASES_DIR.split(path.sep).join('/'), a.artifactId, ARTIFACT_DATA_FILE,
+            ),
+          }
+          : {}),
+      }));
+  } catch {
+    return [];
+  }
 }
 
 function buildCanvasBody(title: string): string {
@@ -79,20 +104,48 @@ export async function invokeSkill(input: SkillInvocationInput): Promise<SkillInv
   const preferredAgent = input.preferredAgent?.trim() || skillPreferredAgent;
   const canvasArtifacts = canvasSettings.canvasArtifacts;
   const wantsCanvas = typeof canvasArtifacts === 'string';
-  // Registering a canvas does not make a model use it, so a canvas run carries
-  // an explicit obligation to publish one.
-  const instructions = wantsCanvas
-    ? withCanvasContract(buildInvocationInstructions(skill.name, intent))
-    : buildInvocationInstructions(skill.name, intent);
   const source = input.source ?? 'api';
   // Distinguishes this occurrence from earlier ones, so completion can tell a
   // freshly published report from one left by a previous run.
   const runId = crypto.randomUUID();
   const titleSeed = intent ? `${skill.name}: ${intent}` : skill.name;
-  const space = createSpace({ body: titleSeed }, skill.id);
-  const folder = createSpaceFolder(workspace, space.id, skill.name);
-  assignSpaceFolder(space.id, folder);
-  space.folder = folder;
+
+  // Only skills that produce artifacts reuse their space by default. A skill
+  // that runs daily would otherwise leave a space per occurrence, and a hundred
+  // near-identical spaces is worse than no report: the user stops reading them.
+  const wantsReuse = canvasSettings.spaceMode === 'reuse'
+    || (wantsCanvas && canvasSettings.spaceMode !== 'new');
+  const resolution = wantsReuse
+    ? await resolveSpaceForSkill({
+      skillId: skill.id,
+      workspaceRoot: workspace,
+      ...(canvasSettings.spaceMode ? { spaceMode: canvasSettings.spaceMode } : {}),
+    })
+    : null;
+
+  let space: Space;
+  let folder: string;
+  if (resolution?.space?.folder) {
+    space = resolution.space;
+    folder = resolution.space.folder;
+  } else {
+    space = createSpace({ body: titleSeed }, skill.id);
+    folder = createSpaceFolder(workspace, space.id, skill.name);
+    assignSpaceFolder(space.id, folder);
+    space.folder = folder;
+  }
+
+  const reusedSpace = !!resolution?.space?.folder;
+  // Registering a canvas does not make a model use it, so a canvas run carries
+  // an explicit obligation to publish one.
+  let instructions = wantsCanvas
+    ? withCanvasContract(buildInvocationInstructions(skill.name, intent))
+    : buildInvocationInstructions(skill.name, intent);
+  if (reusedSpace) {
+    // Without this the agent treats the space as blank and rewrites the report
+    // from scratch, losing what the user had already read and acted on.
+    instructions += buildRefreshFraming(describePriorArtifacts(workspace, folder));
+  }
 
   const frontmatter: SkillInvocationFrontmatter = {
     skills: [skill.id],
