@@ -11,6 +11,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { openArtifactWindow, reloadArtifactWindow, setArtifactWindowTitle } from './artifact-window';
 import { bindCanvasInstance } from './canvas-lifecycle';
+import { beginCanvasRun, recordCanvasPublication } from './canvas-outcome';
+import { emitArtifactPublished } from './canvas-events';
 import { resolveCanvasPolicy, type CanvasArtifactPolicy } from './canvas-policy';
 import { buildCanvasSessionConfig, type CanvasSessionConfig, type CanvasSessionHooks } from './canvas-session';
 import type { CanvasArtifact } from './artifact-store';
@@ -65,12 +67,10 @@ function defaultHooks(run: CanvasRunContext, agentId: string | undefined, extra?
 
   const announce = (artifact: CanvasArtifact) => {
     if (!artifact.published) return;
+    const event = { spaceId: run.spaceId, artifactId: artifact.artifactId, title: artifact.title };
+    emitArtifactPublished(event);
     try {
-      sendToAllWindows('canvas-artifact:published', {
-        spaceId: run.spaceId,
-        artifactId: artifact.artifactId,
-        title: artifact.title,
-      });
+      sendToAllWindows('canvas-artifact:published', event);
     } catch { /* the renderer may not exist yet; the list reloads on next read */ }
   };
 
@@ -88,6 +88,7 @@ function defaultHooks(run: CanvasRunContext, agentId: string | undefined, extra?
     onArtifactPublished: (artifact, ctx) => {
       show(artifact, ctx.instanceId);
       announce(artifact);
+      if (agentId) recordCanvasPublication(agentId, artifact);
       extra?.onArtifactPublished?.(artifact, ctx);
     },
     onArtifactChanged: (artifact, ctx) => {
@@ -132,5 +133,17 @@ export function resolveRunCanvasConfig(params: ResolveRunCanvasParams): RunCanva
   };
 
   const session = buildCanvasSessionConfig(run, policy, defaultHooks(run, agentId, params.hooks));
-  return session ? { session, run } : null;
+  if (!session) return null;
+
+  if (agentId) {
+    beginCanvasRun({
+      agentId,
+      spaceId: run.spaceId,
+      ...(run.skillId ? { skillId: run.skillId } : {}),
+      ...(run.runId ? { runId: run.runId } : {}),
+      scheduled: run.scheduled ?? false,
+    });
+  }
+
+  return { session, run };
 }

@@ -9,11 +9,17 @@ import {
   openAgentChatInMainWindow,
 } from './window-manager';
 import { listTrayWorkers, onAgentListChanged, type TrayWorker } from './agent-service';
+import { listActiveArtifacts } from './ipc/canvas-artifact-handlers';
+import { openArtifactWindow } from './canvas/artifact-window';
+import { onArtifactPublished } from './canvas/canvas-events';
 import { getConfigValue } from './config';
 
 let tray: Tray | null = null;
 const unsubscribers: Array<() => void> = [];
 let rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** How many reports the tray lists before it stops, so the menu stays usable. */
+const MAX_TRAY_REPORTS = 8;
 
 /** Max characters shown for a worker/canvas label in the menu. */
 const LABEL_MAX = 50;
@@ -85,6 +91,30 @@ function buildContextMenu(): Menu {
     }
   }
 
+  // ── Reports ──────────────────────────────────────────
+  // Backed by the artifact index rather than open windows: the point is to
+  // reach a report the user has *not* opened yet.
+  let reports: ReturnType<typeof listActiveArtifacts> = [];
+  try {
+    reports = listActiveArtifacts();
+  } catch { /* no workspace yet */ }
+
+  if (reports.length > 0) {
+    pushSeparator();
+    template.push({ label: 'Reports', enabled: false });
+    for (const report of reports.slice(0, MAX_TRAY_REPORTS)) {
+      template.push({
+        label: `📊  ${truncate(report.status?.trim() || report.title)}`,
+        click: () => openArtifactWindow({
+          spaceId: report.spaceId,
+          artifactId: report.artifactId,
+          title: report.title,
+          focus: true,
+        }),
+      });
+    }
+  }
+
   pushSeparator();
   template.push(
     {
@@ -134,6 +164,7 @@ export function createTray(): void {
   // Keep the menu fresh as workers and canvases come and go.
   unsubscribers.push(onAgentListChanged(scheduleRebuild));
   unsubscribers.push(onCanvasWindowsChanged(scheduleRebuild));
+  unsubscribers.push(onArtifactPublished(scheduleRebuild));
 }
 
 /** Destroy the tray icon (called on app quit). */

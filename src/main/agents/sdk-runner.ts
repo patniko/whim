@@ -28,6 +28,35 @@ import {
   reconcileOpenCanvases,
   releaseCanvasInstances,
 } from '../canvas/canvas-lifecycle';
+import { endCanvasRun, reportCanvasRun } from '../canvas/canvas-outcome';
+import { notifyCanvasRun } from '../canvas/canvas-notifier';
+
+/**
+ * Tell the user about a canvas run that has finished, once.
+ *
+ * Completion is observed here rather than at launch because the scheduler
+ * reports success as soon as a run starts, which says nothing about whether a
+ * report was ever produced.
+ */
+function reportFinishedCanvasRun(agentId: string, spaceId: string | null | undefined): void {
+  const result = reportCanvasRun(agentId);
+  if (!result) return;
+
+  if (result.outcome === 'no-output') {
+    console.warn(`[canvas] run ${agentId} finished without publishing an artifact (space ${result.spaceId})`);
+    endCanvasRun(agentId);
+    return;
+  }
+
+  let label: string | undefined;
+  try {
+    const { getSpace } = require('../database');
+    label = spaceId ? getSpace(spaceId)?.description ?? undefined : undefined;
+  } catch { /* DB may be unavailable during shutdown */ }
+
+  notifyCanvasRun(result, label);
+  endCanvasRun(agentId);
+}
 
 /**
  * Resolve cloud session options from the workspace. Attempts to detect the
@@ -1752,10 +1781,12 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
         } catch { /* non-fatal: file may not exist */ }
       }
 
+      reportFinishedCanvasRun(agentId, record.spaceId);
+
       // Ephemeral agents: remove from registry after a short delay so the
       // renderer has time to process final events, then they vanish from history.
       if (record.ephemeral) {
-        setTimeout(() => { releaseCanvasInstances(agentId); registry.delete(agentId); }, 30_000);
+        setTimeout(() => { releaseCanvasInstances(agentId); endCanvasRun(agentId); registry.delete(agentId); }, 30_000);
       }
     }
   });
@@ -1786,8 +1817,12 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
       cleanupSandboxConfigs(agentId);
     }
 
+    // A failed run may still have published before it broke; the user should
+    // hear about work that survived rather than lose it to the failure.
+    reportFinishedCanvasRun(agentId, record.spaceId);
+
     if (record.ephemeral) {
-      setTimeout(() => { releaseCanvasInstances(agentId); registry.delete(agentId); }, 30_000);
+      setTimeout(() => { releaseCanvasInstances(agentId); endCanvasRun(agentId); registry.delete(agentId); }, 30_000);
     }
   });
 
