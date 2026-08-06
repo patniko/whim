@@ -1,11 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { mockExistsSync, mockStatSync, mockMkdirSync, mockExecSync, mockReaddirSync } = vi.hoisted(() => ({
+const { mockExistsSync, mockStatSync, mockMkdirSync, mockExecSync, mockReaddirSync, mockRealpathSync } = vi.hoisted(() => ({
   mockExistsSync: vi.fn<(p: unknown) => boolean>(),
   mockStatSync: vi.fn(),
   mockMkdirSync: vi.fn(),
   mockExecSync: vi.fn(),
   mockReaddirSync: vi.fn<(p: unknown) => string[]>(),
+  // The mocked fs is driven by an allow-set of paths, so every path it admits
+  // is already canonical. Without this, realpathSync would reach the real disk
+  // and rewrite e.g. /opt/homebrew/bin/copilot to whatever the developer's
+  // machine happens to have symlinked there.
+  mockRealpathSync: vi.fn((p: unknown) => p as string),
 }));
 vi.mock('electron', () => ({
   app: { getPath: () => '/mock/space-test', getAppPath: () => '/mock/app' },
@@ -13,7 +18,7 @@ vi.mock('electron', () => ({
 
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
-  return { ...actual, existsSync: mockExistsSync, statSync: mockStatSync, mkdirSync: mockMkdirSync, readdirSync: mockReaddirSync };
+  return { ...actual, existsSync: mockExistsSync, statSync: mockStatSync, mkdirSync: mockMkdirSync, readdirSync: mockReaddirSync, realpathSync: mockRealpathSync };
 });
 
 vi.mock('child_process', async () => {
@@ -323,7 +328,11 @@ describe('session', () => {
 
     it('lists every install with its version, origin and compatibility', async () => {
       const cacheBase = `/Users/test/.copilot/pkg/darwin-${process.arch}`;
-      const selfUpdated = `${cacheBase}/1.0.75/index.js`;
+      // Tied to the current minimum rather than a literal: this test is about
+      // whether compatibility is reported, and hardcoding a version means it
+      // starts failing the next time the minimum moves.
+      const compatibleVersion = MIN_CLI_VERSION;
+      const selfUpdated = `${cacheBase}/${compatibleVersion}/index.js`;
       mockExistsSync.mockImplementation((p: unknown) => {
         const s = String(p);
         if (s === cacheBase) return true;
@@ -331,12 +340,12 @@ describe('session', () => {
         return s === '/opt/homebrew/bin/copilot';
       });
       mockReaddirSync.mockImplementation((p: unknown) =>
-        String(p) === cacheBase ? ['1.0.75'] : []);
+        String(p) === cacheBase ? [compatibleVersion] : []);
       mockStatSync.mockReturnValue({ isDirectory: () => true });
       mockExecSync.mockImplementation((cmd: unknown) => {
         const s = String(cmd);
         if (s.includes('which -a') || s.includes('command -v')) throw new Error('not found');
-        if (s.includes(selfUpdated)) return Buffer.from('GitHub Copilot CLI 1.0.75');
+        if (s.includes(selfUpdated)) return Buffer.from(`GitHub Copilot CLI ${compatibleVersion}`);
         if (s.includes('/opt/homebrew/bin/copilot')) return Buffer.from('GitHub Copilot CLI 1.0.20');
         throw new Error('unexpected');
       });
@@ -347,7 +356,9 @@ describe('session', () => {
       expect(paths).toContain('/opt/homebrew/bin/copilot');
 
       const cache = result.find(r => r.path === selfUpdated)!;
-      expect(cache).toMatchObject({ version: '1.0.75', origin: 'Self-updated', source: 'path', compatible: true });
+      expect(cache).toMatchObject({
+        version: compatibleVersion, origin: 'Self-updated', source: 'path', compatible: true,
+      });
 
       const brew = result.find(r => r.path === '/opt/homebrew/bin/copilot')!;
       expect(brew).toMatchObject({ version: '1.0.20', origin: 'Homebrew', compatible: false });
