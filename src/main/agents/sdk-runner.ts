@@ -21,6 +21,7 @@ import { SANDBOX_WORKSPACE_SYSTEM_PROMPT } from './sandbox-policies';
 import { listSpaces, updateCanvasContent, listSkills } from '../database';
 import { getWorkspaceRepo } from '../cloud-agent';
 import { parseFrontmatter } from '../frontmatter';
+import { resolveRunCanvasConfig } from '../canvas/canvas-launch';
 
 /**
  * Resolve cloud session options from the workspace. Attempts to detect the
@@ -726,6 +727,12 @@ export async function launchDocumentAgent(
     const useMxcOnlyAutoApprove = isSandboxed && enforcementMode === 'mxc-only';
     const cloudOpts = isCloudSandbox ? await resolveCloudSessionOptions(workingDir) : undefined;
     const personaPreamble = persona ? `${persona.instructions}\n\n` : '';
+    const canvasConfig = resolveRunCanvasConfig({
+      workspaceRoot,
+      workingDir,
+      spaceId,
+      runId: agentId,
+    });
     const baseSystemPrompt = `${personaPreamble}The user has pressed "Run" on their space document. Execute all instructions in the document below. The full document is also available as canvas.md in your working directory.
 
 Invocation instructions:
@@ -761,6 +768,7 @@ ${cliToolsPrompt}`;
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
       ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
+      ...(canvasConfig ?? {}),
       systemMessage: {
         mode: 'append',
         content: `\n${systemPrompt}`,
@@ -1073,6 +1081,17 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
 
     // Use resumeSession to restore full conversation history (not createSession
     // which would start a fresh session with no history).
+    // Canvases are re-registered from the space document, not from persisted
+    // instances: the runtime restores open canvases from its own durable
+    // projection and re-issues `canvas.open` against whatever provider
+    // reconnects, so a resumed run keeps refreshing its artifact only if the
+    // provider comes back with it.
+    const canvasConfig = resolveRunCanvasConfig({
+      workspaceRoot,
+      workingDir,
+      spaceId: persisted.space_id,
+      runId: agentId,
+    });
     const session = await client.resumeSession(persisted.session_id, {
       workingDirectory: workingDir,
       mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
@@ -1080,6 +1099,7 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
       onPermissionRequest: broker.createPermissionHandler(findRecord),
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
+      ...(canvasConfig ?? {}),
     });
 
     const validStatuses = new Set(['running', 'waiting-approval', 'completed', 'failed']);
@@ -1304,6 +1324,19 @@ async function restartExpiredSession(
       } catch { /* proceed without skills */ }
     }
 
+    // A restarted session is a new runtime session for the same space, so it
+    // must re-register canvases or the run would come back unable to refresh
+    // the artifact it was created to maintain.
+    const restartWorkspaceRoot = getConfig().workspace;
+    const canvasConfig = restartWorkspaceRoot
+      ? resolveRunCanvasConfig({
+        workspaceRoot: restartWorkspaceRoot,
+        workingDir,
+        spaceId: persisted.space_id,
+        runId: agentId,
+      })
+      : null;
+
     // Build system message with previous context.  Prefer the rich
     // persisted transcript when available; fall back to prompt+summary
     // when the transcript is empty (e.g. agent crashed before producing
@@ -1343,6 +1376,7 @@ async function restartExpiredSession(
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
       ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
+      ...(canvasConfig ?? {}),
       systemMessage: { mode: 'append', content: systemContent },
     });
 
