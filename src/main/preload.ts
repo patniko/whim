@@ -117,6 +117,12 @@ export interface WhimAPI {
   onGitSyncChanged(callback: (status: IpcEventPayload<'workspace:git-sync-changed'>) => void): void;
 
   // ── Canvas ───────────────────────────────────────────────
+  /** Published canvas artifacts for a space. */
+  listCanvasArtifacts(spaceId: string): Promise<IpcCommandResult<'canvas-artifact:list'>>;
+  /** Published canvas artifacts across every space the user has not completed. */
+  listAllCanvasArtifacts(): Promise<IpcCommandResult<'canvas-artifact:list-all'>>;
+  /** Open a published canvas artifact in its own window. */
+  openCanvasArtifact(spaceId: string, artifactId: string): Promise<IpcCommandResult<'canvas-artifact:open'>>;
   readCanvas(spaceId: string): Promise<IpcCommandResult<'canvas:read'>>;
   canvasHasContent(spaceId: string): Promise<IpcCommandResult<'canvas:has-content'>>;
   writeCanvas(spaceId: string, content: string): Promise<IpcCommandResult<'canvas:write'>>;
@@ -385,6 +391,9 @@ const api: WhimAPI = {
   },
 
   // ── Canvas ───────────────────────────────────────────────
+  listCanvasArtifacts: (spaceId) => ipcRenderer.invoke('canvas-artifact:list', spaceId),
+  listAllCanvasArtifacts: () => ipcRenderer.invoke('canvas-artifact:list-all'),
+  openCanvasArtifact: (spaceId, artifactId) => ipcRenderer.invoke('canvas-artifact:open', spaceId, artifactId),
   readCanvas: (spaceId) => ipcRenderer.invoke('canvas:read', spaceId),
   canvasHasContent: (spaceId) => ipcRenderer.invoke('canvas:has-content', spaceId),
   writeCanvas: (spaceId, content) => ipcRenderer.invoke('canvas:write', spaceId, content),

@@ -192,6 +192,26 @@ export interface LinkPreviewMeta {
   favicon: string | null;
 }
 
+/**
+ * A canvas artifact — the durable HTML report a run leaves in a space.
+ *
+ * Distinct from whim's markdown canvas: this is produced through the SDK canvas
+ * surface and rendered in its own window on an isolated origin.
+ */
+export interface SpaceCanvasArtifact {
+  artifactId: string;
+  spaceId: string;
+  title: string;
+  status?: string;
+  skillId?: string;
+  /** Whether an HTML file has actually been published, as opposed to merely bound. */
+  published: boolean;
+  updatedAt: string;
+  publishedAt?: string;
+  /** URL on the isolated artifact origin. */
+  url: string;
+}
+
 export interface Space {
   id: string;
   description: string;

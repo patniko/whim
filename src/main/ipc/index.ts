@@ -1,6 +1,7 @@
 import { registerSpaceHandlers } from './space-handlers';
 import { registerAgentHandlers } from './agent-handlers';
 import { registerCanvasHandlers } from './canvas-handlers';
+import { registerCanvasArtifactHandlers } from './canvas-artifact-handlers';
 import { registerSettingsHandlers } from './settings-handlers';
 import { registerChatHandlers } from './chat-handlers';
 import { registerWorkspaceHandlers } from './workspace-handlers';
@@ -11,6 +12,7 @@ export function registerIpcHandlers(): void {
   registerSpaceHandlers();
   registerAgentHandlers();
   registerCanvasHandlers();
+  registerCanvasArtifactHandlers();
   registerSettingsHandlers();
   registerChatHandlers();
   registerWorkspaceHandlers();
