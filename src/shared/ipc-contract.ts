@@ -598,6 +598,7 @@ export interface IpcEvents {
   'agent:presence-started': { agentId: string; spaceId: string; persona: { name: string; handle: string }; anchor: AgentAnchor; threadId?: string };
   'agent:presence-ended': { agentId: string; spaceId: string };
   'agent:reply-ready': { agentId: string; spaceId: string; threadId: string | null; body: string };
+  'canvas-artifact:published': { spaceId: string; artifactId: string; title: string };
   'canvas:content-updated': { spaceId: string; content: string };
   'space:processed': { spaceId: string };
   'space:title-updated': { spaceId: string; title: string };

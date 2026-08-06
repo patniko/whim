@@ -389,6 +389,7 @@ import {
   installIpcBridge,
   loadSpacesSnapshot,
   loadHistorySnapshot,
+  loadCanvasArtifactsSnapshot,
 } from './state/ipc-bridge';
 import { mountLists } from './views/mount.tsx';
 import type { WhimAPI as PreloadWhimAPI } from '../main/preload';
@@ -8921,6 +8922,9 @@ function mountReactLists(): void {
         onToggleStatus: (id) => (window as any).toggleStatus?.(id),
         onDelete: (id) => (window as any).deleteSpace?.(id),
         onFocus: (id) => (window as any).setFocus?.(id),
+        onOpenArtifact: (spaceId, artifactId) => {
+          void whimAPI.openCanvasArtifact(spaceId, artifactId);
+        },
         onAgentClick: (agentId, selectedText, status, source, spaceId) =>
           (window as any).openAgentChat?.(agentId, selectedText, status, source, spaceId),
       },
@@ -9030,6 +9034,7 @@ Promise.all([
     await loadSpaces();
     mountReactLists();
     refreshGitSync();
+    void loadCanvasArtifactsSnapshot(bridgeApi);
   }
 });
 

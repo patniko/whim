@@ -14,6 +14,7 @@ import { bindCanvasInstance } from './canvas-lifecycle';
 import { resolveCanvasPolicy, type CanvasArtifactPolicy } from './canvas-policy';
 import { buildCanvasSessionConfig, type CanvasSessionConfig, type CanvasSessionHooks } from './canvas-session';
 import type { CanvasArtifact } from './artifact-store';
+import { sendToAllWindows } from '../ipc/typed-handler';
 import type { CanvasRunContext } from './sdk-canvas-provider';
 
 const WORKSPACE_SPACE_ID = '__workspace__';
@@ -62,6 +63,17 @@ function defaultHooks(run: CanvasRunContext, agentId: string | undefined, extra?
     reloadArtifactWindow(key);
   };
 
+  const announce = (artifact: CanvasArtifact) => {
+    if (!artifact.published) return;
+    try {
+      sendToAllWindows('canvas-artifact:published', {
+        spaceId: run.spaceId,
+        artifactId: artifact.artifactId,
+        title: artifact.title,
+      });
+    } catch { /* the renderer may not exist yet; the list reloads on next read */ }
+  };
+
   return {
     onArtifactBound: (artifact, ctx) => {
       if (agentId) {
@@ -75,10 +87,12 @@ function defaultHooks(run: CanvasRunContext, agentId: string | undefined, extra?
     },
     onArtifactPublished: (artifact, ctx) => {
       show(artifact, ctx.instanceId);
+      announce(artifact);
       extra?.onArtifactPublished?.(artifact, ctx);
     },
     onArtifactChanged: (artifact, ctx) => {
       setArtifactWindowTitle({ spaceId: run.spaceId, artifactId: artifact.artifactId }, artifact.title);
+      announce(artifact);
       extra?.onArtifactChanged?.(artifact, ctx);
     },
     onInstanceClosed: (ctx) => extra?.onInstanceClosed?.(ctx),

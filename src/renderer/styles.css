@@ -3636,6 +3636,30 @@ body.dark .skill-action:hover {
   white-space: nowrap;
 }
 
+/* ── Canvas artifact chip ─────────────────────────────── */
+
+.canvas-artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: var(--fs-meta);
+  font-family: inherit;
+  color: #0369a1;
+  background: rgba(3, 105, 161, 0.09);
+  border: none;
+  padding: 1px 6px;
+  border-radius: 8px;
+  white-space: nowrap;
+  cursor: pointer;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.canvas-artifact-chip:hover {
+  background: rgba(3, 105, 161, 0.18);
+}
+
 /* ── Session badge ────────────────────────────────────── */
 
 .session-badge {

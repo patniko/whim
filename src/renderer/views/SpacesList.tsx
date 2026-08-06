@@ -2,10 +2,11 @@ import React from 'react';
 import { spaceStore } from '../state/space-store';
 import { agentStore } from '../state/agent-store';
 import { skillStore } from '../state/skill-store';
+import { canvasArtifactStore } from '../state/canvas-artifact-store';
 import { useStore } from './useStore';
 import { formatDueDate, timeAgo } from './list-utils';
 import { EmptyState, focusCaptureInput } from './EmptyState';
-import type { Space } from '../../shared/types';
+import type { Space, SpaceCanvasArtifact } from '../../shared/types';
 import type { AgentListAllItem } from '../../shared/ipc-contract';
 import type { RecallMatch } from '../../shared/types';
 
@@ -14,6 +15,7 @@ export interface SpacesListActions {
   onToggleStatus: (spaceId: string) => void;
   onDelete: (spaceId: string) => void;
   onFocus: (spaceId: string) => void;
+  onOpenArtifact: (spaceId: string, artifactId: string) => void;
   onAgentClick: (
     agentId: string,
     selectedText: string,
@@ -79,6 +81,7 @@ const SpaceRow = React.memo(function SpaceRow({
   isSelected,
   spaceAgents,
   sourceSkill,
+  artifact,
   recallHint,
   actions,
 }: {
@@ -88,6 +91,7 @@ const SpaceRow = React.memo(function SpaceRow({
   isSelected: boolean;
   spaceAgents: AgentListAllItem[];
   sourceSkill: { name: string; emoji: string } | null;
+  artifact: SpaceCanvasArtifact | null;
   recallHint: RecallMatch | undefined;
   actions: SpacesListActions;
 }) {
@@ -135,6 +139,16 @@ const SpaceRow = React.memo(function SpaceRow({
             <span className="source-skill-badge" title={`From skill: ${sourceSkill.name}`}>
               {sourceSkill.emoji || '🧩'} {sourceSkill.name}
             </span>
+          ) : null}
+          {artifact ? (
+            <button
+              type="button"
+              className="canvas-artifact-chip"
+              title={artifact.status ? `${artifact.title} — ${artifact.status}` : `Open ${artifact.title}`}
+              onClick={(e) => { e.stopPropagation(); actions.onOpenArtifact(space.id, artifact.artifactId); }}
+            >
+              📊 {artifact.status || 'Report'}
+            </button>
           ) : null}
           {space.client ? <span>👤 {space.client}</span> : null}
           {hasDue ? <span className={`due-badge ${dueInfo.overdue ? 'overdue' : ''}`}>📅 {dueInfo.text}</span> : null}
@@ -201,6 +215,7 @@ export function SpacesList(props: SpacesListProps): React.ReactElement {
   const { spaces, focusedSpaceId, recallHints, selectedIndex } = useStore(spaceStore);
   const agentState = useStore(agentStore);
   const { skills } = useStore(skillStore);
+  useStore(canvasArtifactStore);
 
   const displayList = React.useMemo<Space[]>(() => {
     if (props.searchResults) return props.searchResults;
@@ -242,6 +257,7 @@ export function SpacesList(props: SpacesListProps): React.ReactElement {
           isSelected={idx === selectedIndex}
           spaceAgents={agentsBySpace.get(space.id) || []}
           sourceSkill={space.source_skill_id ? skillByid.get(space.source_skill_id) || null : null}
+          artifact={canvasArtifactStore.getPrimary(space.id)}
           recallHint={recallHints.get(space.id)}
           actions={props}
         />
