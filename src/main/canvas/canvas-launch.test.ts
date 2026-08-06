@@ -180,6 +180,39 @@ describe('resolveRunCanvasConfig', () => {
     expect(windowCalls.some(c => c.kind === 'open')).toBe(false);
   });
 
+  function makeSkillTemplate(skillId: string, templateId: string, template = '<h1>{{title}}</h1>'): void {
+    const dir = path.join(workspaceRoot, '.agents', 'skills', skillId, 'canvas');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'canvas.json'), JSON.stringify({ id: templateId, displayName: 'Digest' }));
+    fs.writeFileSync(path.join(dir, 'template.html'), template);
+  }
+
+  it('gives a skill that ships a template its own canvas', () => {
+    makeSkillTemplate('questions', 'digest');
+    const workingDir = makeSpace('space-t', 'canvas_artifacts: digest\nskill_invocation:\n  skill_id: questions');
+
+    const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-t' })!;
+
+    expect(config.session.canvases[0]!.declaration.id).toBe('skill.questions.digest');
+  });
+
+  it('offers only the skill template, so the model cannot pick the generic report instead', () => {
+    makeSkillTemplate('questions', 'digest');
+    const workingDir = makeSpace('space-u', 'canvas_artifacts: digest\nskill_invocation:\n  skill_id: questions');
+
+    const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-u' })!;
+
+    expect(config.session.canvases).toHaveLength(1);
+  });
+
+  it('falls back to the built-in report when the named template is not there', () => {
+    const workingDir = makeSpace('space-v', 'canvas_artifacts: missing\nskill_invocation:\n  skill_id: questions');
+
+    const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-v' })!;
+
+    expect(config.session.canvases[0]!.declaration.id).toBe(WHIM_REPORT_CANVAS_ID);
+  });
+
   it('does not reopen a window when a republish changes nothing', async () => {
     const workingDir = makeSpace('space-k', 'canvas_artifacts: true');
     const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-k' })!;

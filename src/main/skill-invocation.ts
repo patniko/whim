@@ -9,6 +9,7 @@ import { listArtifacts, ARTIFACT_FILE, ARTIFACT_DATA_FILE, CANVASES_DIR } from '
 import { buildRefreshFraming, resolveSpaceForSkill } from './services/skill-space-reuse';
 import { withCanvasContract } from './canvas/canvas-contract';
 import { WHIM_REPORT_CANVAS_ID } from './canvas/sdk-canvas-provider';
+import { resolveSkillCanvasDefinition } from './canvas/skill-canvas-template';
 import type {
   Space,
   SkillFrontmatter,
@@ -138,8 +139,16 @@ export async function invokeSkill(input: SkillInvocationInput): Promise<SkillInv
   const reusedSpace = !!resolution?.space?.folder;
   // Registering a canvas does not make a model use it, so a canvas run carries
   // an explicit obligation to publish one.
+  // The contract has to name the canvas the agent will actually see, which is
+  // namespaced when the skill ships its own template.
+  const skillCanvas = wantsCanvas && canvasArtifacts !== WHIM_REPORT_CANVAS_ID
+    ? resolveSkillCanvasDefinition(workspace, skill.id, canvasArtifacts as string)
+    : null;
   let instructions = wantsCanvas
-    ? withCanvasContract(buildInvocationInstructions(skill.name, intent))
+    ? withCanvasContract(
+      buildInvocationInstructions(skill.name, intent),
+      skillCanvas?.canvasId ?? WHIM_REPORT_CANVAS_ID,
+    )
     : buildInvocationInstructions(skill.name, intent);
   if (reusedSpace) {
     // Without this the agent treats the space as blank and rewrites the report

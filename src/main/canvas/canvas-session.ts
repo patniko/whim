@@ -9,11 +9,14 @@
 import type { Canvas } from '@github/copilot-sdk';
 import type { CanvasArtifact } from './artifact-store';
 import type { CanvasArtifactPolicy } from './canvas-policy';
+import { createSkillTemplateCanvas } from './skill-canvas-provider';
+import { resolveSkillCanvasDefinition } from './skill-canvas-template';
 import {
   createArtifactCanvas,
   WHIM_CANVAS_PROVIDER_ID,
   WHIM_CANVAS_PROVIDER_NAME,
   WHIM_REPORT_CANVAS_ID,
+  type CanvasProviderEvents,
   type CanvasRunContext,
 } from './sdk-canvas-provider';
 
@@ -51,16 +54,8 @@ export function buildCanvasSessionConfig(
 ): CanvasSessionConfig | null {
   if (!policy.enabled) return null;
 
-  if (policy.canvasId && policy.canvasId !== WHIM_REPORT_CANVAS_ID) {
-    // Skill-defined canvas types are not implemented yet. Fall back to the
-    // built-in rather than launching with a canvas the agent cannot open.
-    console.warn(
-      `[canvas] unknown canvas type "${policy.canvasId}" — falling back to ${WHIM_REPORT_CANVAS_ID}`,
-    );
-  }
-
   try {
-    const canvas = createArtifactCanvas(run, {
+    const events: CanvasProviderEvents = {
       onBound: (artifact, ctx) => {
         hooks.onArtifactBound?.(artifact, { run, instanceId: ctx.instanceId });
         hooks.onArtifactChanged?.(artifact, { run });
@@ -71,7 +66,25 @@ export function buildCanvasSessionConfig(
       },
       onStatusChanged: (artifact) => hooks.onArtifactChanged?.(artifact, { run }),
       onClosed: (ctx) => hooks.onInstanceClosed?.({ instanceId: ctx.instanceId, run }),
-    });
+    };
+
+    // A skill that ships a template gets that canvas *instead of* the built-in
+    // one. Offering both would leave the model to choose, and it would
+    // sometimes choose the generic one — which is exactly the inconsistency
+    // the skill author shipped a template to avoid.
+    const definition = policy.canvasId !== WHIM_REPORT_CANVAS_ID && run.skillId
+      ? resolveSkillCanvasDefinition(run.workspaceRoot, run.skillId, policy.canvasId)
+      : null;
+
+    if (policy.canvasId !== WHIM_REPORT_CANVAS_ID && !definition) {
+      console.warn(
+        `[canvas] no template found for canvas type "${policy.canvasId}" — falling back to ${WHIM_REPORT_CANVAS_ID}`,
+      );
+    }
+
+    const canvas = definition
+      ? createSkillTemplateCanvas(run, definition, events)
+      : createArtifactCanvas(run, events);
 
     return {
       canvases: [canvas],

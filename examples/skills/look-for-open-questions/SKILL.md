@@ -4,7 +4,7 @@ description: Sweeps the places people ask you things and publishes a report of w
 emoji: "❓"
 schedule: weekdays
 schedule_time: "08:30"
-canvas: true
+canvas: open-questions
 space_mode: reuse
 ---
 
@@ -54,19 +54,45 @@ again.
 
 ## The report
 
+This skill ships its own layout in `canvas/`, so write the findings as JSON and
+let whim render them — do not write HTML. `canvas/canvas.json` documents every
+field; the shape is:
+
+```json
+{
+  "headline": "4 people are blocked on you, 9 questions total",
+  "generatedAt": "Monday 8:30am",
+  "empty": false,
+  "groups": [
+    {
+      "name": "Blocking someone else",
+      "items": [
+        {
+          "id": "gh-1234",
+          "question": "Should the migration ship before the release?",
+          "asker": "Dana",
+          "asked": "6 days ago",
+          "source": "GitHub",
+          "why": "Waiting on your call",
+          "answer": "The release notes say the migration lands after, so probably not.",
+          "link": "https://github.com/...",
+          "isNew": true
+        }
+      ]
+    }
+  ]
+}
+```
+
 Group items by how urgent they are — blocking someone else, waiting on me, and
 worth a look — and sort each group oldest first, since an old question is
 usually the more embarrassing one.
 
-For each item show: the question, who asked and when, why it is open, the
-candidate answer if there is one, and the link.
+Use the `headline` as the report `status` too, so I can read it from the tray
+without opening anything.
 
-Open with a one-line summary of the shape of things, for example "4 people are
-blocked on you, 9 questions total". Use that same line as the report `status` so
-I can read it from the tray without opening anything.
-
-If nothing is open, publish a report that says so. That is a genuine result and
-I want to see it, not silence.
+If nothing is open, set `empty` to true and render the report anyway. That is a
+genuine result and I want to see it, not silence.
 
 ## Refreshing
 
@@ -78,5 +104,5 @@ piling up new ones. Before writing, read the previous report and its
 - Mark what is newly open since the last run, and what has been resolved.
 - Preserve any answer I already drafted rather than overwriting it.
 
-Alongside the HTML, write a `data.json` containing the structured items, so the
-next run has something better than the rendered page to compare against.
+The JSON you render from is kept next to the report, so the next run always has
+the previous findings to compare against — that is what the `id` field is for.

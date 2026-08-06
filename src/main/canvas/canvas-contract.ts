@@ -9,8 +9,44 @@
  */
 import { WHIM_REPORT_CANVAS_ID, WHIM_CANVAS_PROVIDER_ID } from './sdk-canvas-provider';
 
+/**
+ * The contract for a run whose skill ships its own report template.
+ *
+ * The obligation is the same; what changes is that presentation is already
+ * decided. Telling the model to write HTML here would waste its effort and
+ * produce a report that ignores the layout the skill author chose.
+ */
+function buildTemplateContract(canvasId: string): string {
+  return [
+    '',
+    '## Report artifact (required)',
+    '',
+    `This run must leave behind exactly one report. This skill ships its own report layout as the`,
+    `\`${canvasId}\` canvas from the \`${WHIM_CANVAS_PROVIDER_ID}\` provider, so you supply the findings`,
+    'and whim renders them. Do not write HTML.',
+    '',
+    '1. Write your findings as a single JSON file inside this space folder, for example `report.json`.',
+    '   Use the field names the template expects; `list_canvas_capabilities` describes the canvas.',
+    '2. Call `open_canvas` with that canvas and a `title` describing the report.',
+    '3. Call `invoke_canvas_action` with the `render` action, passing `dataPath` relative to the space',
+    '   folder, plus a `title` and a short `status` such as "7 open questions".',
+    '4. Do not finish until `render` has returned successfully.',
+    '',
+    'Two cases people get wrong:',
+    '',
+    '- If you found nothing, still render a report that says so. A missing report is',
+    '  indistinguishable from a run that failed.',
+    '- If `render` returns an error, say so plainly in your final message and explain what failed.',
+    '  Do not finish as if the report exists.',
+    '',
+    'To refresh a report from an earlier run, reuse the same `artifactId` rather than creating a new one.',
+  ].join('\n');
+}
+
 /** Appended to a canvas-enabled run's instructions. */
-export function buildCanvasContract(): string {
+export function buildCanvasContract(canvasId: string = WHIM_REPORT_CANVAS_ID): string {
+  if (canvasId !== WHIM_REPORT_CANVAS_ID) return buildTemplateContract(canvasId);
+
   return [
     '',
     '## Report artifact (required)',
@@ -50,7 +86,7 @@ export function hasCanvasContract(instructions: string): boolean {
 }
 
 /** Append the contract to a run's instructions, once. */
-export function withCanvasContract(instructions: string): string {
+export function withCanvasContract(instructions: string, canvasId: string = WHIM_REPORT_CANVAS_ID): string {
   if (hasCanvasContract(instructions)) return instructions;
-  return `${instructions.trimEnd()}\n${buildCanvasContract()}\n`;
+  return `${instructions.trimEnd()}\n${buildCanvasContract(canvasId)}\n`;
 }

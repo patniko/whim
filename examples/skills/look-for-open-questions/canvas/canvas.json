@@ -1,0 +1,30 @@
+{
+  "id": "open-questions",
+  "displayName": "Open questions",
+  "description": "Questions from across your integrations that are still waiting on you, grouped by how urgent they are.",
+  "template": "template.html",
+  "data": {
+    "headline": "One line summarising the whole sweep, e.g. \"4 people are blocked on you, 9 questions total\".",
+    "generatedAt": "Human-readable timestamp for when the sweep ran.",
+    "empty": "Set to true when nothing is open, so the report says so explicitly.",
+    "groups": [
+      {
+        "name": "Group heading, e.g. \"Blocking someone else\".",
+        "note": "Optional one-line explanation of what belongs in this group.",
+        "items": [
+          {
+            "id": "Stable id for this question, so it can be matched against the previous run.",
+            "question": "What is actually being asked, in one plain sentence.",
+            "asker": "Who asked.",
+            "asked": "When they asked, e.g. \"6 days ago\".",
+            "source": "Where it came from, e.g. \"GitHub\" or \"Slack\".",
+            "why": "Why it is still open.",
+            "answer": "Candidate answer, or empty if it needs your judgement.",
+            "link": "URL to the original message or thread.",
+            "isNew": "True when this question was not present in the previous run."
+          }
+        ]
+      }
+    ]
+  }
+}
