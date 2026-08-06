@@ -26,6 +26,8 @@ export interface CanvasArtifactPolicy {
   skillId?: string;
   /** True when the scheduler started the run, so it must not steal focus. */
   scheduled: boolean;
+  /** Identifies this occurrence, so a fresh report can be told from a stale one. */
+  runId?: string;
 }
 
 export const DISABLED_CANVAS_POLICY: CanvasArtifactPolicy = {
@@ -36,7 +38,7 @@ export const DISABLED_CANVAS_POLICY: CanvasArtifactPolicy = {
 
 interface CanvasFrontmatter extends Record<string, unknown> {
   canvas_artifacts?: unknown;
-  skill_invocation?: { skill_id?: unknown; source?: unknown };
+  skill_invocation?: { skill_id?: unknown; source?: unknown; run_id?: unknown };
 }
 
 /**
@@ -66,10 +68,15 @@ export function resolveCanvasPolicy(documentContent: string): CanvasArtifactPoli
     ? invocation.skill_id.trim()
     : undefined;
 
+  const runId = typeof invocation?.run_id === 'string' && invocation.run_id.trim()
+    ? invocation.run_id.trim()
+    : undefined;
+
   return {
     enabled: true,
     canvasId,
     ...(skillId ? { skillId } : {}),
     scheduled: invocation?.source === 'schedule',
+    ...(runId ? { runId } : {}),
   };
 }

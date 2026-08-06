@@ -297,12 +297,22 @@ export interface SkillInvocationProvenance {
   source: 'side-panel' | 'skill-card' | 'skill-editor' | 'schedule' | 'api';
   source_prompt?: string;
   created_at: string;
+  /**
+   * Identifies one occurrence of a scheduled skill.  A reused space keeps the
+   * artifact from previous runs, so without this there is no way to tell a
+   * report published by this run from one left behind by the last.
+   */
+  run_id?: string;
 }
 
 export interface SkillInvocationFrontmatter {
   skills: string[];
   instructions: string;
   preferred_agent?: string;
+  /** Canvas type this run may publish to, or false to opt out. */
+  canvas_artifacts?: string | false;
+  /** Whether repeat runs refresh this space or start a new one. */
+  space_mode?: 'new' | 'reuse';
   skill_invocation: SkillInvocationProvenance;
   [key: string]: unknown;
 }

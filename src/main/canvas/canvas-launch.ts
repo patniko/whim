@@ -30,8 +30,8 @@ export interface ResolveRunCanvasParams {
   /** Absolute working directory of the run — the space folder. */
   workingDir: string;
   spaceId: string | null | undefined;
-  /** Identifies this run so completion can tell fresh output from a prior run's. */
-  runId?: string;
+  /** The agent running this session, used to reach it when a window closes. */
+  agentId?: string;
   /** Extra behaviour on top of the default window handling. */
   hooks?: CanvasSessionHooks;
 }
@@ -54,7 +54,7 @@ function readSpaceDocument(workingDir: string): string {
  * is that the user is elsewhere; stealing the foreground mid-task would make
  * the feature something people turn off.
  */
-function defaultHooks(run: CanvasRunContext, extra?: CanvasSessionHooks): CanvasSessionHooks {
+function defaultHooks(run: CanvasRunContext, agentId: string | undefined, extra?: CanvasSessionHooks): CanvasSessionHooks {
   const show = (artifact: CanvasArtifact, instanceId?: string) => {
     if (!artifact.published) return;
     const key = { spaceId: run.spaceId, artifactId: artifact.artifactId };
@@ -64,9 +64,9 @@ function defaultHooks(run: CanvasRunContext, extra?: CanvasSessionHooks): Canvas
 
   return {
     onArtifactBound: (artifact, ctx) => {
-      if (run.runId) {
+      if (agentId) {
         bindCanvasInstance(ctx.instanceId, {
-          agentId: run.runId,
+          agentId,
           spaceId: run.spaceId,
           artifactId: artifact.artifactId,
         });
@@ -93,7 +93,7 @@ function defaultHooks(run: CanvasRunContext, extra?: CanvasSessionHooks): Canvas
  * session is shared rather than owned by any one skill.
  */
 export function resolveRunCanvasConfig(params: ResolveRunCanvasParams): RunCanvasSetup | null {
-  const { workspaceRoot, workingDir, spaceId, runId } = params;
+  const { workspaceRoot, workingDir, spaceId, agentId } = params;
   if (!spaceId || spaceId === WORKSPACE_SPACE_ID) return null;
 
   const document = readSpaceDocument(workingDir);
@@ -113,10 +113,10 @@ export function resolveRunCanvasConfig(params: ResolveRunCanvasParams): RunCanva
     folder,
     spaceId,
     ...(policy.skillId ? { skillId: policy.skillId } : {}),
-    ...(runId ? { runId } : {}),
+    ...(policy.runId ? { runId: policy.runId } : {}),
     scheduled: policy.scheduled,
   };
 
-  const session = buildCanvasSessionConfig(run, policy, defaultHooks(run, params.hooks));
+  const session = buildCanvasSessionConfig(run, policy, defaultHooks(run, agentId, params.hooks));
   return session ? { session, run } : null;
 }

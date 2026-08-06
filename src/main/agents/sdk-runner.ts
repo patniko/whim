@@ -743,7 +743,7 @@ export async function launchDocumentAgent(
       workspaceRoot,
       workingDir,
       spaceId,
-      runId: agentId,
+      agentId,
     });
     const baseSystemPrompt = `${personaPreamble}The user has pressed "Run" on their space document. Execute all instructions in the document below. The full document is also available as canvas.md in your working directory.
 
@@ -1103,7 +1103,7 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
       workspaceRoot,
       workingDir,
       spaceId: persisted.space_id,
-      runId: agentId,
+      agentId,
     });
     const session = await client.resumeSession(persisted.session_id, {
       workingDirectory: workingDir,
@@ -1356,7 +1356,7 @@ async function restartExpiredSession(
         workspaceRoot: restartWorkspaceRoot,
         workingDir,
         spaceId: persisted.space_id,
-        runId: agentId,
+        agentId,
       })
       : null;
 
