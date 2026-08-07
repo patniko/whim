@@ -131,7 +131,22 @@ function CommentMentionTextarea({
   const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
-    if (autoFocus) textareaRef.current?.focus();
+    if (!autoFocus) return;
+    // The popover is rendered `visibility: hidden` until its anchored position
+    // has been measured, and focusing a hidden element is a silent no-op — the
+    // caret stayed in the document and the first thing typed went into the
+    // canvas instead of the comment. Retry across a few frames so the focus
+    // lands as soon as the popover is actually visible.
+    let frame = 0;
+    let attempts = 0;
+    const attempt = () => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      if (document.activeElement !== el && attempts++ < 10) frame = requestAnimationFrame(attempt);
+    };
+    attempt();
+    return () => cancelAnimationFrame(frame);
   }, [autoFocus]);
 
   const refreshMention = useCallback((textarea: HTMLTextAreaElement, nextValue = value) => {
