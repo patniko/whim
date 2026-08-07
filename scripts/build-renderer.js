@@ -199,6 +199,52 @@ function writeServiceWorkerShell(distDir, html) {
   fs.writeFileSync(swPath, preamble + fs.readFileSync(swPath, 'utf-8'));
 }
 
+/**
+ * The preload runs in Electron's sandbox, where `require` resolves only a
+ * short list of built-ins — not files from the app. Its API surface lives in
+ * `src/shared/whim-api.ts` so the web remote can expose the same one, but tsc
+ * emits that as a bare `require('../shared/whim-api')`, which the sandbox
+ * cannot resolve: the preload throws, `window.whimAPI` is never defined, and
+ * the entire UI comes up dead.
+ *
+ * So bundle it into one self-contained CJS file. This overwrites tsc's output,
+ * which is why it has to run after `tsc` in the build script.
+ */
+const preloadOptions = {
+  entryPoints: [path.join(__dirname, '..', 'src', 'main', 'preload.ts')],
+  bundle: true,
+  outfile: path.join(__dirname, '..', 'dist', 'main', 'preload.js'),
+  format: 'cjs',
+  platform: 'node',
+  target: 'node20',
+  sourcemap: true,
+  minify,
+  // Supplied by the sandbox itself; bundling it would shadow the real one.
+  external: ['electron'],
+  logLevel: 'info',
+};
+
+/**
+ * A sandboxed preload may only require what the sandbox provides. Anything
+ * else means the bundle did not actually inline its dependencies, and the app
+ * would boot with no `whimAPI` at all — so fail the build instead.
+ */
+function assertPreloadSelfContained(outfile = preloadOptions.outfile) {
+  const source = fs.readFileSync(outfile, 'utf-8');
+  const SANDBOX_PROVIDED = new Set(['electron', 'events', 'timers', 'url']);
+
+  const required = [...source.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)].map((m) => m[1]);
+  const unresolvable = [...new Set(required)].filter((id) => !SANDBOX_PROVIDED.has(id));
+
+  if (unresolvable.length > 0) {
+    throw new Error(
+      `dist/main/preload.js requires ${unresolvable.map((id) => `'${id}'`).join(', ')}, ` +
+      `which Electron's sandboxed preload loader cannot resolve. ` +
+      `The preload must be fully bundled.`
+    );
+  }
+}
+
 async function main() {
   if (watch) {
     copyRendererAssets();
@@ -206,7 +252,8 @@ async function main() {
     const rendererCtx = await esbuild.context(rendererOptions);
     const webCtx = await esbuild.context(webOptions);
     const desktopCtx = await esbuild.context(desktopBootOptions);
-    await Promise.all([rendererCtx.watch(), webCtx.watch(), desktopCtx.watch()]);
+    const preloadCtx = await esbuild.context(preloadOptions);
+    await Promise.all([rendererCtx.watch(), webCtx.watch(), desktopCtx.watch(), preloadCtx.watch()]);
     assembleDesktopBundle();
     for (const asset of ['index.html', 'styles.css']) {
       fs.watchFile(path.join(__dirname, '..', 'src', 'renderer', asset), { interval: 300 }, assembleDesktopBundle);
@@ -220,7 +267,9 @@ async function main() {
       esbuild.build(rendererOptions),
       esbuild.build(webOptions),
       esbuild.build(desktopBootOptions),
+      esbuild.build(preloadOptions),
     ]);
+    assertPreloadSelfContained();
     copyRendererAssets();
     copyWebAssets();
     fingerprintWebAssets();
@@ -229,7 +278,11 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { assertPreloadSelfContained, assertDesktopBundleSane };
