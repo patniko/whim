@@ -671,6 +671,123 @@ describe('replayLog', () => {
 
       expect(() => replayLog(logRoot, db)).toThrow(/Corrupt event log at .*:2/);
     });
+
+    /*
+     * A snapshot is a single very long line, so when an *apply* failure was
+     * misreported as a corrupt final line the whole snapshot was silently
+     * dropped — and with it every space the user had. The list came up empty.
+     */
+    it('does not report an apply failure as a corrupt line', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      // Well-formed JSON, but the row violates a NOT NULL constraint.
+      const line = JSON.stringify({
+        ts: '2024-01-01T00:00:00.000Z',
+        op: 'space.create',
+        data: {
+          id: 'apply-fail', description: null, body: '',
+          status: 'captured',
+          created_at: '2024-01-01T00:00:00.000Z',
+          updated_at: '2024-01-01T00:00:00.000Z',
+        },
+      });
+      fs.writeFileSync(logPath, line + '\n', 'utf-8');
+
+      expect(() => replayLog(logRoot, db)).toThrow(/Failed to apply event at .*:1 \(op=space\.create\)/);
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('Ignoring corrupt final line')
+      );
+
+      warnSpy.mockRestore();
+    });
+    /*
+     * snapshot.jsonl is written to a temp file and renamed into place, so a
+     * malformed one is real corruption rather than a torn append — and since
+     * it is a single line, "skip the bad last line" would silently discard
+     * every space the user has.
+     */
+    it('refuses to skip a malformed snapshot', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.writeFileSync(path.join(logRoot, 'snapshot.jsonl'), '{"op":"snapshot","data":{trunc\n', 'utf-8');
+
+      expect(() => replayLog(logRoot, db)).toThrow(/Corrupt event log at .*snapshot\.jsonl:1/);
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('Ignoring corrupt final line')
+      );
+
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('orphaned rows', () => {
+    /*
+     * Snapshots dump each table wholesale, so one written by an older build
+     * can carry child rows whose parent has since been deleted. That used to
+     * abort replay with "FOREIGN KEY constraint failed", which meant the app
+     * could not start and the space list was empty.
+     */
+    it('replays a snapshot whose children reference a missing space', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const snapshot = JSON.stringify({
+        ts: '2024-01-01T00:00:00.000Z',
+        op: 'snapshot',
+        data: {
+          spaces: [{
+            id: 'live', description: 'Live space', body: '',
+            status: 'captured', attachments: '[]',
+            created_at: '2024-01-01T00:00:00.000Z',
+            updated_at: '2024-01-01T00:00:00.000Z',
+          }],
+          space_events: [
+            { id: 'e1', space_id: 'live', event_type: 'created', created_at: '2024-01-01T00:00:00.000Z' },
+            { id: 'e2', space_id: 'deleted-long-ago', event_type: 'created', created_at: '2024-01-01T00:00:00.000Z' },
+          ],
+          canvas_agents: [{
+            id: 'a1', space_id: 'also-gone', selected_text: 't', session_id: 's',
+            status: 'completed',
+            created_at: '2024-01-01T00:00:00.000Z',
+            updated_at: '2024-01-01T00:00:00.000Z',
+          }],
+        },
+      });
+      fs.writeFileSync(logPath, snapshot + '\n', 'utf-8');
+
+      expect(() => replayLog(logRoot, db)).not.toThrow();
+
+      // The good data survives...
+      expect(getSpace('live')).toBeTruthy();
+      expect(db.prepare('SELECT id FROM space_events').all()).toEqual([{ id: 'e1' }]);
+      // ...and the unreachable rows are gone rather than left behind.
+      expect(db.prepare('SELECT COUNT(*) c FROM canvas_agents').get()).toEqual({ c: 0 });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('orphaned space_events'));
+
+      warnSpy.mockRestore();
+    });
+
+    it('leaves foreign key enforcement on after replay', () => {
+      db.pragma('foreign_keys = ON');
+      fs.writeFileSync(logPath, JSON.stringify({
+        ts: '2024-01-01T00:00:00.000Z',
+        op: 'space.create',
+        data: {
+          id: 'k1', description: 'Keeps FKs', body: '', status: 'captured',
+          created_at: '2024-01-01T00:00:00.000Z',
+          updated_at: '2024-01-01T00:00:00.000Z',
+        },
+      }) + '\n', 'utf-8');
+
+      replayLog(logRoot, db);
+
+      expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+      // The restored constraint still rejects a bad write.
+      expect(() =>
+        db.prepare(
+          `INSERT INTO space_events (id, space_id, event_type, created_at)
+           VALUES ('bad', 'nope', 'created', '2024-01-01T00:00:00.000Z')`
+        ).run()
+      ).toThrow(/FOREIGN KEY/);
+    });
   });
 
   // ── intent_event.log ──────────────────────────────────

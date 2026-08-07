@@ -1,6 +1,7 @@
 import type { IpcCommandChannel } from '../../shared/ipc-contract';
 import { webAccessFor } from '../../shared/web-access';
 import { canReadSetting } from '../../shared/settings-access';
+import { redactWebResult } from '../../shared/web-redaction';
 import { readSetting } from '../services/settings';
 import { callRegisteredHandler, hasRegisteredHandler } from '../ipc/registry';
 import type { AgentAnchor, CreateSpaceInput, Space } from '../../shared/types';
@@ -362,7 +363,10 @@ export async function invokeWebRemoteCommand(channel: string, args: unknown[]): 
   // entry here as a decision to maintain two implementations.
   const gatewayHandler = HANDLERS[channel as IpcCommandChannel];
   const result = gatewayHandler ? await gatewayHandler(args) : await callRegisteredHandler(channel, args);
-  return JSON.parse(JSON.stringify(result ?? null));
+  // Redact after serialization, so a redactor always sees the plain object the
+  // browser would have received and cannot be defeated by a getter or a class
+  // instance that survives the handler but not the round trip.
+  return redactWebResult(channel, JSON.parse(JSON.stringify(result ?? null)));
 }
 
 function createSpaceFromArgs(args: unknown[]): Space | { error: string } {

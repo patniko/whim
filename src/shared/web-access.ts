@@ -101,7 +101,12 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   'cli:resolve-path': 'deny',
   'cli:check-version': 'deny',
   'cli:check-mxc-capable': 'deny',
-  'cli:runtime-status': 'deny',
+  // The reply names an absolute path on the host, which is why this was
+  // denied. But the renderer's boot reads it to choose between the setup flow
+  // and the real interface, so denying it did not hide a path — it stopped
+  // the browser interface from starting. web-redaction.ts replaces the path
+  // and passes the rest through, which is the part a paired device needs.
+  'cli:runtime-status': 'allow',
   'cli:test-connection': 'deny',
   // Enumerates CLI installs by absolute path on the host filesystem, and only
   // feeds the Settings window, which is itself denied.

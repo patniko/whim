@@ -27,7 +27,13 @@ export async function establishSession(token: string): Promise<void> {
     headers: { 'Authorization': `Bearer ${token}` },
   });
   if (!res.ok) {
-    throw new Error(res.status === 401 ? 'That token was not accepted.' : `Sign-in failed (${res.status})`);
+    // The server explains itself in the envelope; a bare status code left the
+    // user guessing between "wrong token", "pairing refused" and "the host is
+    // unreachable", which are three different things to do next.
+    const body = await res.json().catch(() => null) as { error?: { message?: string } } | null;
+    const detail = body?.error?.message;
+    if (res.status === 401) throw new Error(detail || 'That token was not accepted.');
+    throw new Error(detail ? `${detail} (${res.status})` : `Sign-in failed (${res.status})`);
   }
 }
 

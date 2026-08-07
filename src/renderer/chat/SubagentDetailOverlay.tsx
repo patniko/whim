@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import type { SubagentInfo, SubagentType } from '../../shared/subagent-types';
 import type { ChatMessage } from '../../shared/chat-types';
 import { MessageList } from './MessageList';
+import { backupPollIntervalMs } from '../transport-mode';
 
 declare const whimAPI: {
   subagentAPI: {
@@ -126,7 +127,8 @@ export function SubagentDetailOverlay({ parentAgentId, agentId, onClose }: Subag
     hasInitiallyScrolled.current = false;
     if (!agentId) return;
     refresh();
-    const interval = setInterval(refresh, 1500);
+    // A safety net behind the subscription below, not the primary source.
+    const interval = setInterval(refresh, backupPollIntervalMs(1500));
     const unsubscribe = whimAPI.subagentAPI.onChanged(parentAgentId, refresh);
     return () => {
       clearInterval(interval);

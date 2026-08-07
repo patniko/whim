@@ -1,6 +1,7 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import Database from 'better-sqlite3';
-import { resolveActiveSegment, listLogFiles } from './log-store';
+import { resolveActiveSegment, listLogFiles, SNAPSHOT_FILENAME } from './log-store';
 
 export interface LogEvent {
   ts: string;
@@ -51,13 +52,72 @@ export function replayLog(logRoot: string, db: Database.Database): void {
   const files = listLogFiles(logRoot);
   if (files.length === 0) return;
 
-  const replay = db.transaction(() => {
-    for (const file of files) {
-      replayOneFile(file, db);
-    }
-  });
+  // Foreign keys are enforced on the live database, but replay is a different
+  // situation: the log is a chronological record, and a snapshot written by an
+  // older schema can legitimately contain child rows whose parent has since
+  // been deleted. Enforcing constraints mid-replay turns that recoverable junk
+  // into a fatal startup failure that empties the user's entire space list.
+  //
+  // So rebuild with enforcement off, then drop the unreachable rows to restore
+  // the invariant the constraints describe. The pragma is a no-op inside a
+  // transaction, hence the toggle out here.
+  const fkEnforced = db.pragma('foreign_keys', { simple: true }) === 1;
+  if (fkEnforced) db.pragma('foreign_keys = OFF');
 
-  replay();
+  try {
+    const replay = db.transaction(() => {
+      for (const file of files) {
+        replayOneFile(file, db);
+      }
+      purgeOrphanedRows(db);
+    });
+
+    replay();
+  } finally {
+    if (fkEnforced) db.pragma('foreign_keys = ON');
+  }
+}
+
+/**
+ * Delete child rows whose parent no longer exists.
+ *
+ * These are unreachable either way — every read path joins through the parent
+ * — so removing them loses nothing and lets foreign key enforcement be turned
+ * back on for the live session.
+ */
+function purgeOrphanedRows(db: Database.Database): void {
+  const relations: Array<{ table: string; column: string; parent: string }> = [
+    { table: 'space_events', column: 'space_id', parent: 'spaces' },
+    { table: 'canvas_agents', column: 'space_id', parent: 'spaces' },
+    { table: 'subagent_tool_calls', column: 'subagent_id', parent: 'subagent_records' },
+  ];
+
+  for (const { table, column, parent } of relations) {
+    // Replay also runs against partial schemas (tests, older databases), so
+    // only touch pairs that are actually present.
+    if (!tableExists(db, table) || !tableExists(db, parent)) continue;
+
+    const result = db
+      .prepare(
+        `DELETE FROM ${table}
+         WHERE ${column} IS NOT NULL
+           AND ${column} NOT IN (SELECT id FROM ${parent})`
+      )
+      .run();
+    if (result.changes > 0) {
+      console.warn(
+        `[eventlog] Dropped ${result.changes} orphaned ${table} row(s) with no matching ${parent}`
+      );
+    }
+  }
+}
+
+function tableExists(db: Database.Database, table: string): boolean {
+  return (
+    db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .get(table) !== undefined
+  );
 }
 
 /**
@@ -75,21 +135,42 @@ function replayOneFile(filePath: string, db: Database.Database): void {
   const content = fs.readFileSync(filePath, 'utf-8');
   const lines = content.split('\n');
 
+  // Tolerating a torn last line only makes sense for the append-only segments,
+  // where a crash mid-append is expected. The snapshot is written to a temp
+  // file and renamed into place, so it is either wholly there or not there at
+  // all — a malformed one is real corruption. It is also a single very long
+  // line, so "skip the bad last line" would throw away every space the user
+  // has and start them at empty, which is the worst possible response.
+  const isAtomicFile = path.basename(filePath) === SNAPSHOT_FILENAME;
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
 
+    // Parsing and applying fail for very different reasons, and conflating
+    // them was hiding real bugs: a SQL error from `applyEvent` was reported as
+    // a "corrupt final line" and silently dropped, which quietly discarded a
+    // whole snapshot — and with it every space the user had.
+    let event: LogEvent;
     try {
-      const event: LogEvent = JSON.parse(line);
+      event = JSON.parse(line);
+    } catch (err) {
+      const remaining = lines.slice(i + 1).some(l => l.trim());
+      if (!remaining && !isAtomicFile) {
+        console.warn(`[eventlog] Ignoring corrupt final line ${i + 1} of ${filePath}`);
+        continue;
+      }
+      throw new Error(`Corrupt event log at ${filePath}:${i + 1}: ${(err as Error).message}`);
+    }
+
+    try {
       applyEvent(db, event);
     } catch (err) {
-      // Only tolerate corruption on the final line (crash during append)
-      const remaining = lines.slice(i + 1).some(l => l.trim());
-      if (!remaining) {
-        console.warn(`[eventlog] Ignoring corrupt final line ${i + 1} of ${filePath}`);
-      } else {
-        throw new Error(`Corrupt event log at ${filePath}:${i + 1}: ${(err as Error).message}`);
-      }
+      // The line was well-formed, so this is our bug, not a damaged file.
+      // Never swallow it: replay is how the database is rebuilt.
+      throw new Error(
+        `Failed to apply event at ${filePath}:${i + 1} (op=${event.op}): ${(err as Error).message}`
+      );
     }
   }
 }

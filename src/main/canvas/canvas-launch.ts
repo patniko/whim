@@ -24,6 +24,8 @@ const WORKSPACE_SPACE_ID = '__workspace__';
 export interface RunCanvasSetup {
   /** Fields to spread into the SDK session config. */
   session: CanvasSessionConfig;
+  /** The canvas the agent will see, for the instruction contract. */
+  canvasId: string;
   /** Context the run was built with, for callers that need to know how it runs. */
   run: CanvasRunContext;
 }
@@ -35,6 +37,16 @@ export interface ResolveRunCanvasParams {
   spaceId: string | null | undefined;
   /** The agent running this session, used to reach it when a window closes. */
   agentId?: string;
+  /**
+   * Capability decided by the caller instead of read from the space document.
+   *
+   * Comment-launched runs take this path: the persona carries the capability,
+   * and the document is the user's own writing, which says nothing about
+   * reports and may not exist on disk yet.
+   */
+  policy?: CanvasArtifactPolicy;
+  /** Pins every artifact of this run to one id. See `CanvasRunContext`. */
+  pinnedArtifactId?: string;
   /** Extra behaviour on top of the default window handling. */
   hooks?: CanvasSessionHooks;
 }
@@ -119,10 +131,18 @@ export function resolveRunCanvasConfig(params: ResolveRunCanvasParams): RunCanva
   const { workspaceRoot, workingDir, spaceId, agentId } = params;
   if (!spaceId || spaceId === WORKSPACE_SPACE_ID) return null;
 
-  const document = readSpaceDocument(workingDir);
-  if (!document) return null;
-
-  const policy: CanvasArtifactPolicy = resolveCanvasPolicy(document);
+  // An explicit policy skips the document entirely, including the
+  // empty-document check below: a comment run may be the first thing to happen
+  // in a space whose canvas.md is still empty, and refusing it there would make
+  // the feature work only on documents the user had already written into.
+  let policy: CanvasArtifactPolicy;
+  if (params.policy) {
+    policy = params.policy;
+  } else {
+    const document = readSpaceDocument(workingDir);
+    if (!document) return null;
+    policy = resolveCanvasPolicy(document);
+  }
   if (!policy.enabled) return null;
 
   const folder = path.relative(workspaceRoot, workingDir);
@@ -138,11 +158,11 @@ export function resolveRunCanvasConfig(params: ResolveRunCanvasParams): RunCanva
     ...(policy.skillId ? { skillId: policy.skillId } : {}),
     ...(policy.runId ? { runId: policy.runId } : {}),
     scheduled: policy.scheduled,
+    ...(params.pinnedArtifactId ? { pinnedArtifactId: params.pinnedArtifactId } : {}),
   };
 
   const session = buildCanvasSessionConfig(run, policy, defaultHooks(run, agentId, params.hooks));
   if (!session) return null;
-
   if (agentId) {
     beginCanvasRun({
       agentId,
@@ -153,5 +173,5 @@ export function resolveRunCanvasConfig(params: ResolveRunCanvasParams): RunCanva
     });
   }
 
-  return { session, run };
+  return { session: session.config, canvasId: session.canvasId, run };
 }

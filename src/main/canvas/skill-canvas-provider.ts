@@ -40,7 +40,15 @@ function readString(input: Record<string, unknown> | undefined, key: string): st
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
-function resolveArtifactId(input: Record<string, unknown> | undefined, fallback = DEFAULT_ARTIFACT_ID): string {
+function resolveArtifactId(
+  input: Record<string, unknown> | undefined,
+  run: CanvasRunContext,
+  fallback = DEFAULT_ARTIFACT_ID,
+): string {
+  // See `pinnedArtifactId` on CanvasRunContext: the host owns the id for runs
+  // where the model cannot know what distinguishes one report from another.
+  if (run.pinnedArtifactId) return run.pinnedArtifactId;
+
   const requested = readString(input, 'artifactId');
   // Validated, not slugified: slugifying makes "Q&A" and "Q A" the same
   // directory, so one report silently overwrites another.
@@ -135,7 +143,7 @@ export function createSkillTemplateCanvas(
           }
 
           try {
-            const artifactId = resolveArtifactId(input);
+            const artifactId = resolveArtifactId(input, run);
             const title = readString(input, 'title')
               ?? getArtifact(run.workspaceRoot, run.folder, artifactId)?.title
               ?? definition.displayName;
@@ -177,7 +185,7 @@ export function createSkillTemplateCanvas(
     ],
     open: async ctx => {
       const input = ctx.input as Record<string, unknown> | undefined;
-      const artifactId = resolveArtifactId(input);
+      const artifactId = resolveArtifactId(input, run);
       const title = readString(input, 'title') ?? definition.displayName;
 
       const artifact = await bindArtifact({

@@ -16,6 +16,22 @@ export function pageCanvasSpaceId(spaceId: string, pageName: string): string {
   return `__page__${spaceId}/${encodeURIComponent(pageName)}`;
 }
 
+/** Split a synthetic page id back into the space it belongs to and its page. */
+export function parseSyntheticPageId(spaceId: string): { realSpaceId: string; pageName: string } | null {
+  if (!spaceId.startsWith('__page__')) return null;
+  const rest = spaceId.slice('__page__'.length);
+  const slashIdx = rest.indexOf('/');
+  if (slashIdx <= 0) return null;
+  try {
+    return {
+      realSpaceId: rest.slice(0, slashIdx),
+      pageName: decodeURIComponent(rest.slice(slashIdx + 1)),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function resolveCommentLaunchTarget(spaceId: string, workspace: string): CommentLaunchTarget | { error: string } {
   let launchSpaceId = spaceId;
   let realSpaceId = spaceId;

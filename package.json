@@ -13,7 +13,7 @@
     "format": "oxfmt src/",
     "typecheck": "tsc -p tsconfig.main.json --noEmit",
     "audit:dependencies": "node scripts/audit-dependencies.js",
-    "test:reliability-scripts": "node --test scripts/audit-dependencies.test.js scripts/workflow-config.test.js",
+    "test:reliability-scripts": "node --test scripts/audit-dependencies.test.js scripts/workflow-config.test.js scripts/build-renderer.test.js",
     "release:preflight": "node scripts/release-preflight.js",
     "smoke:package": "node scripts/verify-package.js",
     "postinstall": "node -e \"if(process.platform==='darwin'){require('child_process').execSync('bash scripts/codesign-dev.sh',{stdio:'inherit'})}else{console.log('[codesign] Skipping — not macOS')}\"",

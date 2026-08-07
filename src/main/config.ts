@@ -46,6 +46,15 @@ export interface AgentPersona {
   yolo?: boolean;
   /** When true, session state is kept in-memory only — nothing persisted to disk or DB. */
   ephemeral?: boolean;
+  /**
+   * Whether an agent launched with this persona may publish canvas reports,
+   * and which canvas type it uses. `true` selects the built-in `whim-report`.
+   *
+   * Skill runs derive the same capability from their space's frontmatter. A
+   * persona carries it instead for comment-launched runs, which have no
+   * invocation frontmatter to read it from.
+   */
+  canvas?: boolean | string;
 }
 
 /**
@@ -150,6 +159,7 @@ export interface AppConfig {
   personasSeeded: boolean;          // true after default personas have been injected once
   personasMigratedV2: boolean;      // true after legacy runLocation rename (cloud→cca) has run
   personasSandboxSeeded: boolean;   // true after @sandbox demo persona has been topped up once for existing installs
+  personasArtifactSeeded: boolean;  // true after @artifact persona has been topped up once for existing installs
   cliRuntimes: CliRuntime[];
   cliTools: CliToolDefinition[];
   mcpServers: CustomMcpServer[];   // user-added MCP servers
@@ -211,6 +221,29 @@ Guidelines:
     model: '',
     runLocation: 'local',
     emoji: '✏️',
+  },
+  {
+    id: 'default-artifact',
+    handle: 'artifact',
+    instructions: `You turn writing into a visual report the user can open later.
+
+You are mentioned from a comment on a space document. The comment and the text it is anchored to tell you what to analyse — treat them as the brief, and treat the rest of the document as context.
+
+Workflow:
+1. Read the passage the comment is anchored to, then the surrounding document.
+2. Do the actual work the comment asks for: gather data, run the analysis, follow references.
+3. Present the result as a report — the required steps for publishing one are described below.
+
+Guidelines:
+- Report on what you found, not on what you did. The user wants the analysis, not a transcript.
+- Lead with the answer. Put the supporting detail underneath it.
+- Use structure the eye can scan: headings, tables, and short sections beat paragraphs.
+- Do not edit the document. The report is your output; the user decides what to fold back into their writing.
+- If the brief is ambiguous, pick the most useful reading and say in your reply which one you chose.`,
+    model: '',
+    runLocation: 'local',
+    emoji: '📊',
+    canvas: true,
   },
   {
     id: 'default-dev',
@@ -342,6 +375,7 @@ const DEFAULT_CONFIG: AppConfig = {
   personasSeeded: false,
   personasMigratedV2: false,
   personasSandboxSeeded: false,
+  personasArtifactSeeded: false,
   cliRuntimes: [],
   cliTools: [],
   mcpServers: [],

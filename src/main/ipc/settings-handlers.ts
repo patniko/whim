@@ -256,6 +256,20 @@ export function registerSettingsHandlers(): void {
       setConfigValue('personasSandboxSeeded', true);
     }
 
+    // Same top-up for @artifact, added after @sandbox. Kept as its own flag so
+    // a user who deletes one persona doesn't get the other re-added.
+    const artifactSeeded = getConfigValue('personasArtifactSeeded');
+    if (seeded && !artifactSeeded) {
+      if (!personas.some((p: AgentPersona) => p.handle === 'artifact')) {
+        const def = DEFAULT_PERSONAS.find(p => p.handle === 'artifact');
+        if (def) {
+          personas = [def, ...personas];
+          setConfigValue('personas', personas);
+        }
+      }
+      setConfigValue('personasArtifactSeeded', true);
+    }
+
     if (!seeded) {
       // One-time seed: merge any defaults whose handle doesn't already exist
       const existing = new Set(personas.map((p: AgentPersona) => p.handle));
@@ -266,6 +280,7 @@ export function registerSettingsHandlers(): void {
       // First-time seed includes @sandbox via DEFAULT_PERSONAS, so the
       // existing-install top-up never needs to run for this user.
       setConfigValue('personasSandboxSeeded', true);
+      setConfigValue('personasArtifactSeeded', true);
       return merged;
     }
 
@@ -304,6 +319,15 @@ export function registerSettingsHandlers(): void {
 
       const emoji = typeof raw.emoji === 'string' ? raw.emoji.trim().slice(0, 8) : '';
       const cliRuntime = typeof raw.cliRuntime === 'string' ? raw.cliRuntime.trim() : '';
+      // `canvas` is a boolean or a canvas id, mirroring the `canvas_artifacts`
+      // frontmatter field. An id is length-capped rather than pattern-checked:
+      // an unknown id falls back to the built-in report canvas at launch, so a
+      // typo degrades to the default instead of dropping the capability.
+      const canvas = raw.canvas === true
+        ? true
+        : typeof raw.canvas === 'string' && raw.canvas.trim() && raw.canvas.trim() !== 'false'
+          ? raw.canvas.trim().slice(0, 64)
+          : undefined;
 
       if (!id || !HANDLE_RE.test(handle) || !instructions) continue;
       if (seen.has(handle)) continue;
@@ -322,6 +346,7 @@ export function registerSettingsHandlers(): void {
           : {}),
         ...(raw.yolo === true ? { yolo: true } : {}),
         ...(raw.ephemeral === true ? { ephemeral: true } : {}),
+        ...(canvas !== undefined ? { canvas } : {}),
       });
     }
 

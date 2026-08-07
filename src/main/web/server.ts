@@ -21,6 +21,7 @@ import {
   setConfigValue,
 } from '../config';
 import {
+  extractHttpToken,
   extractWebSocketProtocolToken,
   getRemoteAddress,
   WebRemoteAuthenticator,
@@ -83,7 +84,20 @@ const authenticator = new WebRemoteAuthenticator(
 );
 
 export const auditLog = new WebRemoteAuditLog();
-const rateLimiter = new WebRemoteRateLimiter();
+/**
+ * Sized from what the interface actually does, not from a round number.
+ *
+ * A cold load spends roughly a dozen calls before it paints, a reload spends
+ * them again immediately, and each open subagent view adds a timer — so the
+ * burst allowance has to cover several page loads back to back or the app
+ * rate-limits itself while behaving normally. The sustained ceiling is what
+ * bounds a runaway loop or a hostile client, and 600/min is still an order of
+ * magnitude below anything that could be used to hammer the host.
+ */
+const RATE_LIMIT_BURST = 240;
+const RATE_LIMIT_PER_MINUTE = 600;
+export const rateLimitPolicy = { burst: RATE_LIMIT_BURST, perMinute: RATE_LIMIT_PER_MINUTE };
+const rateLimiter = new WebRemoteRateLimiter(RATE_LIMIT_BURST, 60_000, Date.now, RATE_LIMIT_PER_MINUTE);
 
 const binder = new WebRemoteBinder({
   listen: (address, port) => startListener(address, port),
@@ -400,7 +414,27 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
       // named device, so revoking the device you knew about left the attacker
       // holding a credential you never saw — which defeats the point of making
       // sessions individually revocable.
-      if (auth.via !== 'token') {
+      //
+      // That rule is about what the caller *presented*, which is why the token
+      // is re-checked here rather than reusing the result above. The shared
+      // authenticator prefers a session cookie when it finds one, so a browser
+      // that was already paired and then opened the QR link again arrived with
+      // both credentials and was reported as `via: 'session'` — and refused,
+      // despite having supplied the very token pairing asks for. Re-pairing a
+      // known device is a thing people do (a new token, a cookie they are not
+      // sure about, a shared machine), and it failed with a 403 they could do
+      // nothing about. Requiring the token directly keeps the property the
+      // comment above describes: a stolen cookie on its own still cannot mint
+      // a session, because with no valid token this call now fails outright.
+      const presentedToken = extractHttpToken(req.headers, url);
+      // No token at all is refused without being counted as a failed attempt:
+      // the lockout exists to blunt token guessing, and a client that never
+      // offered a token has not guessed at one. A *wrong* token below is a
+      // different matter and is counted.
+      const pairing = presentedToken
+        ? authenticator.authenticate(presentedToken, getRemoteAddress(req))
+        : null;
+      if (!pairing?.ok) {
         sendJson(res, 403, {
           ok: false,
           error: { code: 'pairing_required', message: 'Pairing token required to create a session.' },

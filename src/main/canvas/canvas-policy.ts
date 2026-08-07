@@ -10,10 +10,12 @@
  *   would mean a schema-version bump plus snapshot and replay changes in
  *   compaction, which is far more machinery than this needs.
  *
- * Canvases are scoped deliberately: only skill-launched document runs get them.
- * Quick, selection, comment and supervisor sessions have no owning space to
- * write into, and adding canvas tools to ordinary chat would push the model
- * toward opening canvases nobody asked for.
+ * Canvases are scoped deliberately: a run gets them only when something asked
+ * for them. That is either the skill invocation that created the space, via
+ * frontmatter, or the persona a user mentioned in a comment. Quick, selection
+ * and supervisor sessions get none — they have no owning space to write into,
+ * and adding canvas tools to ordinary chat would push the model toward opening
+ * canvases nobody asked for.
  */
 import { parseFrontmatter } from '../frontmatter';
 import { WHIM_REPORT_CANVAS_ID } from './sdk-canvas-provider';
@@ -39,6 +41,34 @@ export const DISABLED_CANVAS_POLICY: CanvasArtifactPolicy = {
 interface CanvasFrontmatter extends Record<string, unknown> {
   canvas_artifacts?: unknown;
   skill_invocation?: { skill_id?: unknown; source?: unknown; run_id?: unknown };
+}
+
+/**
+ * The canvas capability carried by a persona rather than by frontmatter.
+ *
+ * Comment-launched runs have no invocation frontmatter — the user mentioned a
+ * handle on a passage of their own writing, and nothing about that document
+ * says anything about reports. The persona is the only thing in that flow that
+ * can express the intent, so it carries the capability.
+ *
+ * A comment run is never scheduled and never belongs to a skill, so those
+ * fields are fixed here rather than plumbed through.
+ */
+export function personaCanvasPolicy(canvas: boolean | string | undefined, runId?: string): CanvasArtifactPolicy {
+  if (canvas === undefined || canvas === false || canvas === '' || canvas === 'false') {
+    return DISABLED_CANVAS_POLICY;
+  }
+
+  const canvasId = typeof canvas === 'string' && canvas.trim() && canvas.trim() !== 'true'
+    ? canvas.trim()
+    : WHIM_REPORT_CANVAS_ID;
+
+  return {
+    enabled: true,
+    canvasId,
+    scheduled: false,
+    ...(runId ? { runId } : {}),
+  };
 }
 
 /**

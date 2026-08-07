@@ -440,6 +440,7 @@ import {
   openCanvasArtifact as openCanvasArtifactAndReconcile,
 } from './state/ipc-bridge';
 import { mountLists } from './views/mount.tsx';
+import { bootValue, UNKNOWN_CLI_RUNTIME } from './boot-guard';
 import type { WhimAPI as PreloadWhimAPI } from '../shared/whim-api';
 import type { Skill as SharedSkill, CanvasAgentStateSnapshot, ExportFormat, ExportDestination, SkillInvocationInput, SkillInvocationResult, UpdateState } from '../shared/types';
 
@@ -512,9 +513,10 @@ let activeSessionSpaces = new Set<string>();
 let agentsBySpace = new Map<string, Array<{ agentId: string; status: string; summary: string; selectedText: string; quotedText?: string; source?: string }>>();
 // Current filter
 let currentFilter: 'open' | 'agents' | 'skills' | 'closed' = 'open';
-const filterOrder: Array<'open' | 'agents' | 'skills' | 'closed'> = ['open', 'agents', 'skills', 'closed'];
+const filterOrder: Array<'open' | 'agents' | 'skills' | 'closed'> = ['open', 'skills', 'agents', 'closed'];
 let renderGeneration = 0;
 const filterBar = document.getElementById('filter-bar') as HTMLDivElement;
+const workspaceTabNameEl = document.getElementById('workspace-tab-name') as HTMLSpanElement | null;
 const newAgentBtn = document.getElementById('new-agent-btn') as HTMLButtonElement;
 const launchCliBtn = document.getElementById('launch-cli-btn') as HTMLButtonElement;
 
@@ -878,6 +880,13 @@ function setFilter(filter: typeof currentFilter): void {
   render();
 }
 
+function visibleFilterOrder(): Array<typeof currentFilter> {
+  const fromDom = Array.from(filterBar.querySelectorAll<HTMLElement>('.filter-btn'))
+    .map(b => b.dataset.filter as typeof currentFilter)
+    .filter(f => filterOrder.includes(f));
+  return fromDom.length ? fromDom : filterOrder;
+}
+
 function focusActiveFilter(): void {
   const btn = filterBar.querySelector('.filter-btn.active') as HTMLElement;
   if (btn) btn.focus();
@@ -887,16 +896,17 @@ filterBar.addEventListener('click', (e) => {
   const btn = (e.target as HTMLElement).closest('.filter-btn') as HTMLElement;
   if (!btn) return;
   const filter = btn.dataset.filter as typeof currentFilter;
-  setFilter(filter);
+  if (filter) setFilter(filter);
 });
 
 filterBar.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
     e.preventDefault();
-    const idx = filterOrder.indexOf(currentFilter);
+    const order = visibleFilterOrder();
+    const idx = order.indexOf(currentFilter);
     const next = e.key === 'ArrowRight'
-      ? filterOrder[(idx + 1) % filterOrder.length]
-      : filterOrder[(idx - 1 + filterOrder.length) % filterOrder.length];
+      ? order[(idx + 1) % order.length]
+      : order[(idx - 1 + order.length) % order.length];
     setFilter(next);
     focusActiveFilter();
     return;
@@ -4445,8 +4455,17 @@ async function launchSession(spaceId: string): Promise<void> {
 const workspacePathEl = document.getElementById('workspace-path') as HTMLSpanElement;
 const workspaceBtn = document.getElementById('workspace-btn') as HTMLButtonElement;
 const workspaceClearBtn = document.getElementById('workspace-clear-btn') as HTMLButtonElement;
+let currentWorkspacePath: string | null = null;
+
+/** Folder name of the active workspace, used to label the Spaces tab. */
+function workspaceTabLabel(): string {
+  if (!currentWorkspacePath) return 'Spaces';
+  const parts = currentWorkspacePath.replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts[parts.length - 1] ?? 'Spaces';
+}
 
 function updateWorkspaceDisplay(path: string | null): void {
+  currentWorkspacePath = path;
   if (path) {
     // Show last 2 path segments for brevity
     const parts = path.replace(/\\/g, '/').split('/');
@@ -4461,6 +4480,7 @@ function updateWorkspaceDisplay(path: string | null): void {
     workspacePathEl.classList.remove('clickable');
     workspaceClearBtn.classList.add('hidden');
   }
+  renderWorkspaceTab();
 }
 
 workspaceBtn.addEventListener('click', async () => {
@@ -4540,6 +4560,28 @@ function renderProfileBrand(): void {
   const canCycle = (profilesState?.profiles.length ?? 0) > 1;
   brandLogo.classList.toggle('clickable', canCycle);
   brandLogo.title = canCycle ? 'Switch profile' : 'whim';
+}
+
+/**
+ * Label the leading Spaces tab with the active workspace so the user is
+ * oriented. Switching workspaces stays explicit (logo click / hotkey).
+ */
+function renderWorkspaceTab(): void {
+  if (!workspaceTabNameEl) return;
+  const active = getActiveProfile();
+  const label = active?.displayName ?? workspaceTabLabel();
+  workspaceTabNameEl.textContent = label;
+  const tab = workspaceTabNameEl.closest('.filter-btn') as HTMLElement | null;
+  if (tab) tab.title = active ? `${label}\n${active.path}` : label;
+  const dot = tab?.querySelector('.workspace-tab-dot') as HTMLElement | null;
+  if (dot) {
+    if (active?.tint && isValidTint(active.tint)) {
+      dot.style.background = active.tint;
+      dot.classList.remove('hidden');
+    } else {
+      dot.classList.add('hidden');
+    }
+  }
 }
 
 /** Brief visual confirmation that the profile switched. */
@@ -4669,6 +4711,7 @@ async function refreshProfiles(): Promise<void> {
     profilesState = { profiles: [], activeProfileId: null };
   }
   renderProfileBrand();
+  renderWorkspaceTab();
   applyActiveProfileTint();
   renderProfilesSettings();
 }
@@ -4677,6 +4720,7 @@ function handleProfilesChanged(state: ProfilesState): void {
   const prevActive = profilesState?.activeProfileId ?? null;
   profilesState = state;
   renderProfileBrand();
+  renderWorkspaceTab();
   applyActiveProfileTint();
   renderProfilesSettings();
   if (state.activeProfileId && state.activeProfileId !== prevActive) {
@@ -9282,10 +9326,15 @@ function mountReactLists(): void {
   });
 }
 
+/*
+ * Each input is read independently: over the web remote one of the three can
+ * be refused, and a `Promise.all` turned that into a page that never started.
+ * See boot-guard.ts.
+ */
 Promise.all([
-  whimAPI.getSetting('workspace_root'),
-  whimAPI.getSetting('model'),
-  whimAPI.getCliRuntimeStatus(),
+  bootValue(() => whimAPI.getSetting('workspace_root'), null, 'workspace_root'),
+  bootValue(() => whimAPI.getSetting('model'), null, 'model'),
+  bootValue(() => whimAPI.getCliRuntimeStatus(), UNKNOWN_CLI_RUNTIME, 'cli runtime status'),
 ]).then(async ([ws, model, cli]) => {
   // Install the IPC -> store bridge once at boot. The bridge runs alongside
   // the legacy IPC handlers during the migration (Phase 6).
@@ -9313,6 +9362,13 @@ Promise.all([
     refreshGitSync();
     void loadCanvasArtifactsSnapshot(bridgeApi);
   }
+}).catch((err) => {
+  // Last line of defence. Everything above is now individually guarded, but
+  // an unguarded call added to this block later would otherwise reproduce the
+  // exact failure this catch exists to end: a page that renders nothing and
+  // says nothing. Mounting is idempotent, so recovering here is safe.
+  console.error('[boot] startup failed; mounting the interface anyway', err);
+  mountReactLists();
 });
 
 // Load personas in the main window so the @-mention dropdown on the Workers

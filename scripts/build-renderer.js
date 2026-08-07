@@ -182,6 +182,12 @@ function fingerprintWebAssets() {
  * The service worker precaches the shell, but the bundle filenames are only
  * known after fingerprinting — so inject the resolved list (and a build id
  * derived from it, which is what invalidates the old cache) at build time.
+ *
+ * The build id also folds in the *content* of the desktop remote's assets.
+ * They are served under stable, unhashed URLs, so their names alone can never
+ * signal that they changed; without this, a desktop-only change left the cache
+ * name identical, `activate` kept the old cache, and browsers that had already
+ * stored those files went on serving the previous build.
  */
 function writeServiceWorkerShell(distDir, html) {
   const swPath = path.join(distDir, 'sw.js');
@@ -193,10 +199,103 @@ function writeServiceWorkerShell(distDir, html) {
     .map((href) => (href.startsWith('/') ? href : `/${href}`));
 
   const shell = ['/index.html', ...hashed, '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
-  const buildId = crypto.createHash('sha256').update(shell.join('|')).digest('hex').slice(0, 12);
+  const buildId = crypto
+    .createHash('sha256')
+    .update([...shell, ...desktopAssetFingerprints(distDir)].join('|'))
+    .digest('hex')
+    .slice(0, 12);
   const preamble = `self.__WHIM_SHELL__ = ${JSON.stringify(shell)};\nself.__WHIM_BUILD__ = ${JSON.stringify(buildId)};\n`;
 
   fs.writeFileSync(swPath, preamble + fs.readFileSync(swPath, 'utf-8'));
+}
+
+/**
+ * Content hashes for the desktop remote's unhashed assets, so a change to the
+ * renderer rotates the service worker cache name.
+ */
+function desktopAssetFingerprints(distDir) {
+  const desktopDir = path.join(distDir, 'desktop');
+  if (!fs.existsSync(desktopDir)) return [];
+
+  return fs
+    .readdirSync(desktopDir)
+    .filter((name) => /\.(js|css|html)$/.test(name))
+    .sort()
+    .map((name) => `desktop/${name}:${contentHash(path.join(desktopDir, name))}`);
+}
+
+/**
+ * The preload runs in Electron's sandbox, where `require` resolves only a
+ * short list of built-ins — not files from the app. Its API surface lives in
+ * `src/shared/whim-api.ts` so the web remote can expose the same one, but tsc
+ * emits that as a bare `require('../shared/whim-api')`, which the sandbox
+ * cannot resolve: the preload throws, `window.whimAPI` is never defined, and
+ * the entire UI comes up dead.
+ *
+ * So bundle it into one self-contained CJS file. This overwrites tsc's output,
+ * which is why it has to run after `tsc` in the build script.
+ */
+const preloadOptions = {
+  entryPoints: [path.join(__dirname, '..', 'src', 'main', 'preload.ts')],
+  bundle: true,
+  outfile: path.join(__dirname, '..', 'dist', 'main', 'preload.js'),
+  format: 'cjs',
+  platform: 'node',
+  target: 'node20',
+  sourcemap: true,
+  minify,
+  // Supplied by the sandbox itself; bundling it would shadow the real one.
+  external: ['electron'],
+  logLevel: 'info',
+  plugins: [{
+    name: 'assert-preload-self-contained',
+    setup(build) {
+      // As a plugin rather than a call after `esbuild.build`, so watch
+      // rebuilds are checked too — otherwise `npm run dev` could quietly
+      // reload Electron into the same inert state the guard exists to catch.
+      build.onEnd((result) => {
+        if (result.errors.length > 0) return;
+        assertPreloadSelfContained();
+      });
+    },
+  }],
+};
+
+/**
+ * A sandboxed preload may only require what the sandbox provides. Anything
+ * else means the bundle did not actually inline its dependencies, and the app
+ * would boot with no `whimAPI` at all — so fail the build instead.
+ */
+function assertPreloadSelfContained(outfile = preloadOptions.outfile) {
+  const source = fs.readFileSync(outfile, 'utf-8');
+  // `node:`-prefixed spellings resolve to the same built-ins.
+  const SANDBOX_PROVIDED = new Set([
+    'electron',
+    'events', 'timers', 'url',
+    'node:events', 'node:timers', 'node:url',
+  ]);
+
+  const problems = [];
+  // Match the call site rather than a quoted specifier, so a computed
+  // argument is *seen* instead of skipped. Silently ignoring the forms we
+  // cannot evaluate is how a guard ends up not guarding.
+  for (const match of source.matchAll(/(?:^|[^.\w$])require\(([^)]*)\)/g)) {
+    const argument = match[1].trim();
+    const literal = /^(["'])([^"']*)\1$/.exec(argument);
+    if (!literal) {
+      problems.push(`a computed specifier (\`require(${argument})\`)`);
+      continue;
+    }
+    if (!SANDBOX_PROVIDED.has(literal[2])) problems.push(`'${literal[2]}'`);
+  }
+
+  if (problems.length > 0) {
+    throw new Error(
+      `dist/main/preload.js requires ${[...new Set(problems)].join(', ')}, ` +
+      `which Electron's sandboxed preload loader cannot resolve. ` +
+      `The preload must be fully bundled.`
+    );
+  }
 }
 
 async function main() {
@@ -206,7 +305,8 @@ async function main() {
     const rendererCtx = await esbuild.context(rendererOptions);
     const webCtx = await esbuild.context(webOptions);
     const desktopCtx = await esbuild.context(desktopBootOptions);
-    await Promise.all([rendererCtx.watch(), webCtx.watch(), desktopCtx.watch()]);
+    const preloadCtx = await esbuild.context(preloadOptions);
+    await Promise.all([rendererCtx.watch(), webCtx.watch(), desktopCtx.watch(), preloadCtx.watch()]);
     assembleDesktopBundle();
     for (const asset of ['index.html', 'styles.css']) {
       fs.watchFile(path.join(__dirname, '..', 'src', 'renderer', asset), { interval: 300 }, assembleDesktopBundle);
@@ -220,16 +320,22 @@ async function main() {
       esbuild.build(rendererOptions),
       esbuild.build(webOptions),
       esbuild.build(desktopBootOptions),
+      esbuild.build(preloadOptions),
     ]);
     copyRendererAssets();
     copyWebAssets();
-    fingerprintWebAssets();
-    // After fingerprinting, which only rewrites the lightweight client's HTML.
+    // Before fingerprinting: the service worker's build id folds in the hashes
+    // of the desktop assets, so they have to exist first.
     assembleDesktopBundle();
+    fingerprintWebAssets();
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { assertPreloadSelfContained, assertDesktopBundleSane };

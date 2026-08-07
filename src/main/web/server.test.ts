@@ -67,6 +67,7 @@ import {
   cacheControlFor,
   getWebRemoteState,
   listWebRemoteListeners,
+  rateLimitPolicy,
   startWebRemoteServer,
   stopWebRemoteServer,
 } from './server';
@@ -388,6 +389,65 @@ describe('web remote server', () => {
       const after = await request('/api/health', { headers: { Cookie: cookie } });
       expect(after.status).toBe(401);
     });
+
+    /**
+     * Re-opening the QR link on a browser that is already paired sends both
+     * credentials at once. The authenticator prefers the cookie when it finds
+     * one, so this arrived labelled as a cookie request and was refused with a
+     * 403 the user could do nothing about, on an ordinary action. Pairing asks
+     * for the token, and the token was right there.
+     */
+    it('re-pairs a browser that already holds a session cookie', async () => {
+      const first = await request('/api/session', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      const cookie = (first.setCookie ?? '').split(';')[0];
+
+      const again = await request('/api/session', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}`, Cookie: cookie },
+      });
+
+      expect(again.status).toBe(200);
+      expect(again.setCookie).toContain('HttpOnly');
+    });
+
+    /**
+     * The property that refusal exists for, and the one that has to survive
+     * the fix: a stolen cookie must not mint a second, separately named
+     * device, or revoking the device you knew about leaves the attacker
+     * holding a credential you never saw.
+     */
+    it('refuses to mint a session for a cookie with no token behind it', async () => {
+      const issued = await request('/api/session', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      const cookie = (issued.setCookie ?? '').split(';')[0];
+
+      const cloned = await request('/api/session', { method: 'POST', headers: { Cookie: cookie } });
+
+      expect(cloned.status).toBe(403);
+      expect((cloned.json() as { error: { code: string } }).error.code).toBe('pairing_required');
+      expect(cloned.setCookie).toBeUndefined();
+    });
+
+    it('refuses to mint a session for a cookie presented with a wrong token', async () => {
+      const issued = await request('/api/session', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      const cookie = (issued.setCookie ?? '').split(';')[0];
+
+      const cloned = await request('/api/session', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer not-the-token', Cookie: cookie },
+      });
+
+      expect(cloned.status).toBe(403);
+      expect(cloned.setCookie).toBeUndefined();
+    });
   });
 
   describe('security headers', () => {
@@ -524,15 +584,30 @@ describe('web remote server', () => {
         body: JSON.stringify({ channel: 'space:list', args: [] }),
       });
 
+      // Derived from the policy rather than hardcoded: the burst allowance is
+      // tuned to what a real page load costs, so a literal here would have to
+      // be chased every time that changes. The headroom covers tokens the
+      // sustained rate hands back while the loop is running.
+      const ceiling = rateLimitPolicy.burst * 3;
       let limited: Awaited<ReturnType<typeof send>> | null = null;
-      for (let i = 0; i < 80 && !limited; i += 1) {
+      let allowedBeforeLimit = 0;
+      for (let i = 0; i < ceiling && !limited; i += 1) {
         const res = await send();
         if (res.status === 429) limited = res;
+        else allowedBeforeLimit += 1;
       }
 
       expect(limited).not.toBeNull();
       expect(limited!.headers['retry-after']).toBeDefined();
       expect((limited!.json() as { error: { code: string } }).error.code).toBe('rate_limited');
+
+      // The ceiling is there to stop a runaway client, not to interrupt a
+      // normal one. A cold page load spends roughly a dozen calls before it
+      // paints and a reload spends them again immediately, so anything that
+      // cuts in around a few page loads is a limit the app trips over itself.
+      // Asserted here rather than in its own test because the bucket is
+      // process-wide and a separate test would depend on execution order.
+      expect(allowedBeforeLimit).toBeGreaterThan(15 * 4);
     });
   });
 

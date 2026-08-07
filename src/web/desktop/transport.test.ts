@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createWebTransport, DeniedError, DesktopOnlyError } from './transport';
+import { createWebTransport, DeniedError, DesktopOnlyError, retryDelayMs } from './transport';
 import type { WebRemoteEvent } from '../../main/web/event-hub';
 
 function event(channel: string, args: unknown[]): WebRemoteEvent {
@@ -103,6 +103,113 @@ describe('web transport', () => {
       });
       const { transport } = createWebTransport();
       await expect(transport.invoke('space:list')).rejects.toThrow(/502/);
+    });
+
+    /**
+     * boot reads this to decide between the setup flow and the interface. It
+     * used to be denied outright, which took the whole boot down with it; the
+     * host path is now stripped server-side instead.
+     */
+    it('sends the CLI runtime status to the server rather than refusing it', async () => {
+      const { transport } = createWebTransport();
+      await transport.invoke('cli:runtime-status');
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body).channel).toBe('cli:runtime-status');
+    });
+  });
+
+  /**
+   * A 429 means "ask again shortly", which is not the same as a failure.
+   * Surfacing it raw made a momentary budget dip look like a broken app.
+   */
+  describe('rate limiting', () => {
+    function rateLimited(retryAfter: string | null) {
+      return {
+        ok: false,
+        status: 429,
+        headers: { get: (name: string) => (name === 'Retry-After' ? retryAfter : null) },
+        json: async () => ({ ok: false, error: { code: 'rate_limited', message: 'Too many requests. Slow down.' } }),
+      };
+    }
+
+    const ok = {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({ ok: true, result: ['a-space'] }),
+    };
+
+    it('waits for Retry-After and succeeds on the second attempt', async () => {
+      fetchMock.mockResolvedValueOnce(rateLimited('1')).mockResolvedValueOnce(ok);
+      const { transport } = createWebTransport();
+
+      await expect(transport.invoke('space:list')).resolves.toEqual(['a-space']);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    /** One retry, not a loop — the client must not become the pile-on. */
+    it('gives up after a single retry rather than hammering', async () => {
+      fetchMock.mockResolvedValue(rateLimited('1'));
+      const { transport } = createWebTransport();
+
+      await expect(transport.invoke('space:list')).rejects.toThrow(/Too many requests/);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    /**
+     * The wait is server-supplied, so an absurd value must not park a promise
+     * indefinitely; a user staring at a spinner deserves to be told.
+     */
+    it('reports the error instead of waiting out an implausible Retry-After', async () => {
+      fetchMock.mockResolvedValue(rateLimited('3600'));
+      const { transport } = createWebTransport();
+
+      await expect(transport.invoke('space:list')).rejects.toThrow(/Too many requests/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not retry when the server sent no Retry-After to honour', async () => {
+      fetchMock.mockResolvedValue(rateLimited(null));
+      const { transport } = createWebTransport();
+
+      await expect(transport.invoke('space:list')).rejects.toThrow(/Too many requests/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * The authenticator answers 429 for a lockout after repeated bad tokens,
+     * which looks identical to a rate limit by status alone. Retrying it would
+     * extend the lockout and tell the user nothing, so the retry keys off the
+     * error code instead.
+     */
+    it('does not retry an auth lockout that shares the 429 status', async () => {
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 429,
+        headers: { get: () => '1' },
+        json: async () => ({ ok: false, error: { code: 'auth_failed', message: 'Too many failed attempts. Try again later.' } }),
+      });
+      const { transport } = createWebTransport();
+
+      await expect(transport.invoke('space:list')).rejects.toThrow(/failed attempts/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('retryDelayMs', () => {
+    it('floors a sub-second wait so a retry cannot be immediate', () => {
+      expect(retryDelayMs('0')).toBe(250);
+    });
+
+    it('converts seconds to milliseconds', () => {
+      expect(retryDelayMs('2')).toBe(2000);
+    });
+
+    it('refuses a header that is not a number', () => {
+      expect(retryDelayMs('Wed, 21 Oct 2015 07:28:00 GMT')).toBeNull();
+    });
+
+    it('refuses a negative wait', () => {
+      expect(retryDelayMs('-5')).toBeNull();
     });
   });
 

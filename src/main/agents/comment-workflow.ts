@@ -13,6 +13,12 @@ import { buildCliToolsPrompt, sendInitialPrompt, enableRemoteControl } from './s
 import { buildSandboxLaunchSetup } from './sandbox-launch';
 import { SANDBOX_SYSTEM_PROMPT } from './sandbox-policies';
 import { getWorkspaceRepo } from '../cloud-agent';
+import { resolveRunCanvasConfig } from '../canvas/canvas-launch';
+import { personaCanvasPolicy } from '../canvas/canvas-policy';
+import { withCanvasContract } from '../canvas/canvas-contract';
+import { toArtifactId } from '../canvas/artifact-store';
+import { linkArtifactIntoDocument, buildArtifactLinkUrl } from '../canvas/artifact-linkback';
+import { parseSyntheticPageId } from '../services/comment-launch-target';
 
 /** Shared dependencies injected from agent-service at init time. */
 let registry: AgentRegistry;
@@ -67,6 +73,18 @@ export async function launchCommentAgent(
   const documentLabel = documentTarget?.documentLabel ?? 'canvas document';
   const isCloudSandbox = persona.runLocation === 'cloud';
 
+  // A comment on a child page still belongs to the page's space. Artifacts are
+  // stored and served per real space — `getSpace` cannot resolve a synthetic
+  // page id — so the canvas run is given the real one, while the comment thread
+  // keeps the synthetic id it was raised against.
+  const pageTarget = parseSyntheticPageId(spaceId);
+  const realSpaceId = pageTarget?.realSpaceId ?? spaceId;
+
+  // Each thread gets its own report. Two comments on the same document are two
+  // different questions, and both would otherwise default to the same artifact
+  // id, so the second run would overwrite the first report with no trace of it.
+  const artifactId = toArtifactId(`comment-${threadId ?? agentId}`, `comment-${agentId}`);
+
   // Snapshot canvas hash for change detection
   let canvasHashBefore = '';
   try {
@@ -101,6 +119,8 @@ export async function launchCommentAgent(
       canvasPath,
       documentDisplayName,
       documentLabel,
+      publishedArtifacts: [],
+      artifactSpaceId: realSpaceId,
     },
   };
 
@@ -200,6 +220,45 @@ export async function launchCommentAgent(
     const useHostPathAwareHandler = isSandboxed && enforcementMode === 'both';
     const useMxcOnlyAutoApprove = isSandboxed && enforcementMode === 'mxc-only';
 
+    // Canvas capability comes from the persona here, not from frontmatter: the
+    // document is the user's own writing and says nothing about reports, so the
+    // handle they mentioned is what expresses the intent.
+    const canvasConfig = resolveRunCanvasConfig({
+      workspaceRoot,
+      workingDir,
+      spaceId: realSpaceId,
+      agentId,
+      policy: personaCanvasPolicy(persona.canvas, agentId),
+      pinnedArtifactId: artifactId,
+      hooks: {
+        onArtifactPublished: (artifact) => {
+          record.commentContext?.publishedArtifacts?.push({
+            artifactId: artifact.artifactId,
+            title: artifact.title,
+            ...(artifact.status ? { status: artifact.status } : {}),
+          });
+          linkArtifactIntoDocument({
+            workspaceRoot,
+            spaceId: realSpaceId,
+            folder: intentFolder,
+            ...(pageTarget ? { pageName: pageTarget.pageName } : {}),
+            link: {
+              spaceId: realSpaceId,
+              artifactId: artifact.artifactId,
+              title: artifact.title,
+              ...(artifact.status ? { status: artifact.status } : {}),
+            },
+          });
+        },
+      },
+    });
+    if (canvasConfig) {
+      // The user named a persona whose whole job is producing a report; being
+      // asked to approve the tools that do it is a prompt with one sensible
+      // answer. Deliberately narrow — every other permission still prompts.
+      record.autoApproveCanvasTools = true;
+    }
+
     const systemPrompt = `${persona.instructions}
 
 You are responding to a comment on a ${documentLabel}. The user wrote:
@@ -209,6 +268,12 @@ On this text: "${quotedText}"
 
 The full ${documentLabel} is available as ${documentDisplayName} in the working directory.
 If you make changes to ${documentDisplayName}, clearly describe what you changed.${cliToolsPrompt}`;
+
+    // Registering a canvas does not make a model use it, so the obligation to
+    // publish is stated explicitly — the same contract skill runs carry.
+    const finalSystemPrompt = canvasConfig
+      ? withCanvasContract(systemPrompt, canvasConfig.canvasId)
+      : systemPrompt;
 
     // Resolve cloud session options for cloud personas
     let cloudOpts: { repository?: { owner: string; name: string } } | undefined;
@@ -228,6 +293,7 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
       ...(persona.model ? { model: persona.model } : {}),
       ...(hooks ? { hooks } : {}),
       ...(cloudOpts ? { cloud: cloudOpts } : {}),
+      ...canvasConfig?.session,
       onPermissionRequest: useHostPathAwareHandler
         ? broker.createPathAwareSandboxPermissionHandler(findRecord)
         : useMxcOnlyAutoApprove
@@ -242,8 +308,8 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
         // otherwise we can't observe MXC's own denials. Only append the
         // [SANDBOX MODE] fragment when host-side guards are also active.
         content: isSandboxed && enforcementMode === 'both'
-          ? `\n${systemPrompt}${SANDBOX_SYSTEM_PROMPT}`
-          : `\n${systemPrompt}`,
+          ? `\n${finalSystemPrompt}${SANDBOX_SYSTEM_PROMPT}`
+          : `\n${finalSystemPrompt}`,
       },
     });
     if (!launchStillWanted()) {
@@ -399,9 +465,19 @@ export function handleCommentAgentCompletion(record: AgentRecord): void {
   }
 
   // Send reply to renderer
-  const replyBody = documentChanged
-    ? `[bot] I've made changes to the ${ctx.documentLabel ?? 'document'}. Ready for your review.`
-    : `[bot] ${record.summary}`;
+  const published = ctx.publishedArtifacts ?? [];
+  const replyBody = published.length > 0
+    // A report is the answer, so the reply is the way into it — the user is
+    // looking at this thread, not at the space list where the chip appears.
+    ? `[bot] ${published
+      .map(a => {
+        const url = buildArtifactLinkUrl(ctx.artifactSpaceId ?? record.spaceId, a.artifactId);
+        return `[${a.title}](${url})${a.status ? ` — ${a.status}` : ''}`;
+      })
+      .join('\n')}`
+    : documentChanged
+      ? `[bot] I've made changes to the ${ctx.documentLabel ?? 'document'}. Ready for your review.`
+      : `[bot] ${record.summary}`;
 
   notifier.notifyRenderer('agent:reply-ready', {
     agentId: record.agentId,

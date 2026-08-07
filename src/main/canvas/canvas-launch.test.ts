@@ -16,7 +16,7 @@ vi.mock('./artifact-window', () => ({
   setArtifactWindowTitle: (key: any, title: string) => { windowCalls.push({ kind: 'title', ...key, title }); },
 }));
 
-import { resolveCanvasPolicy, DISABLED_CANVAS_POLICY } from './canvas-policy';
+import { resolveCanvasPolicy, personaCanvasPolicy, DISABLED_CANVAS_POLICY } from './canvas-policy';
 import { resolveRunCanvasConfig } from './canvas-launch';
 import { WHIM_REPORT_CANVAS_ID, WHIM_CANVAS_PROVIDER_ID } from './sdk-canvas-provider';
 
@@ -62,6 +62,28 @@ describe('resolveCanvasPolicy', () => {
     );
     expect(scheduled.scheduled).toBe(true);
     expect(manual.scheduled).toBe(false);
+  });
+});
+
+describe('personaCanvasPolicy', () => {
+  it('is disabled for a persona that never opted in, which is most of them', () => {
+    expect(personaCanvasPolicy(undefined)).toEqual(DISABLED_CANVAS_POLICY);
+    expect(personaCanvasPolicy(false)).toEqual(DISABLED_CANVAS_POLICY);
+  });
+
+  it('enables the built-in canvas for a persona that opted in', () => {
+    const policy = personaCanvasPolicy(true, 'run-1');
+    expect(policy.enabled).toBe(true);
+    expect(policy.canvasId).toBe(WHIM_REPORT_CANVAS_ID);
+    expect(policy.runId).toBe('run-1');
+  });
+
+  it('reads a named canvas type from the persona', () => {
+    expect(personaCanvasPolicy('question-board').canvasId).toBe('question-board');
+  });
+
+  it('is never scheduled, so a comment run always shows its report', () => {
+    expect(personaCanvasPolicy(true).scheduled).toBe(false);
   });
 });
 
@@ -227,5 +249,75 @@ describe('resolveRunCanvasConfig', () => {
     await publish({ instanceId: 'i1', actionName: 'publish', input: { path: 'out.html', title: 'Findings' } });
 
     expect(windowCalls.some(c => c.kind === 'open')).toBe(false);
+  });
+  it('lets a caller-supplied policy stand in for frontmatter, for comment runs', () => {
+    const workingDir = makeSpace('space-p1', 'title: Notes');
+
+    const config = resolveRunCanvasConfig({
+      workspaceRoot,
+      workingDir,
+      spaceId: 'space-p1',
+      policy: personaCanvasPolicy(true, 'run-p1'),
+    });
+
+    expect(config).not.toBeNull();
+    expect(config!.canvasId).toBe(WHIM_REPORT_CANVAS_ID);
+    expect(config!.run.runId).toBe('run-p1');
+  });
+
+  it('works in a space whose document is still empty, since a comment can be the first thing in it', () => {
+    const workingDir = path.join(workspaceRoot, 'space-p2');
+    fs.mkdirSync(workingDir, { recursive: true });
+
+    const config = resolveRunCanvasConfig({
+      workspaceRoot,
+      workingDir,
+      spaceId: 'space-p2',
+      policy: personaCanvasPolicy(true),
+    });
+
+    expect(config).not.toBeNull();
+  });
+
+  it('still refuses a disabled policy, so a persona cannot be opted in by accident', () => {
+    const workingDir = makeSpace('space-p3', 'canvas_artifacts: true');
+
+    expect(resolveRunCanvasConfig({
+      workspaceRoot,
+      workingDir,
+      spaceId: 'space-p3',
+      policy: personaCanvasPolicy(undefined),
+    })).toBeNull();
+  });
+
+  it('pins every artifact of a run to one id, whatever the model asks for', async () => {
+    const workingDir = makeSpace('space-p4', 'title: Notes');
+    const config = resolveRunCanvasConfig({
+      workspaceRoot,
+      workingDir,
+      spaceId: 'space-p4',
+      policy: personaCanvasPolicy(true),
+      pinnedArtifactId: 'comment-thread-7',
+    })!;
+    const canvas: any = config.session.canvases[0];
+
+    const opened = await canvas.open({
+      sessionId: 's', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID, instanceId: 'i1',
+      input: { title: 'Some other name' },
+    });
+    expect(opened.url).toContain('comment-thread-7');
+
+    fs.writeFileSync(path.join(workingDir, 'out.html'), '<p>hello</p>');
+    // The model naming a different artifact must not create a second report:
+    // the id identifies the thread, which the model knows nothing about.
+    const result: any = await (canvas as any).actionHandlers.get('publish')({
+      instanceId: 'i1',
+      actionName: 'publish',
+      input: { path: 'out.html', title: 'Findings', artifactId: 'something-else' },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.artifactId).toBe('comment-thread-7');
+    expect(fs.existsSync(path.join(workingDir, 'reports', 'something-else'))).toBe(false);
   });
 });

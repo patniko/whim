@@ -615,6 +615,7 @@ describe('IPC handlers', () => {
       expect(result).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: 'default-agent', handle: 'agent' }),
         expect.objectContaining({ id: 'default-editor', handle: 'editor', emoji: '✏️' }),
+        expect.objectContaining({ id: 'default-artifact', handle: 'artifact', canvas: true, emoji: '📊' }),
         expect.objectContaining({ id: 'default-dev', handle: 'dev', emoji: '🛠️' }),
         expect.objectContaining({ id: 'default-pr', handle: 'pr', runLocation: 'cca', emoji: '🔀' }),
         expect.objectContaining({ id: 'default-cloud', handle: 'cloud', runLocation: 'cloud', emoji: '☁️' }),
@@ -635,11 +636,12 @@ describe('IPC handlers', () => {
           }),
         }),
       ]));
-      expect(result).toHaveLength(7);
+      expect(result).toHaveLength(8);
 
       expect(setConfigValue).toHaveBeenCalledWith('personas', expect.arrayContaining([
         expect.objectContaining({ id: 'default-agent', handle: 'agent' }),
         expect.objectContaining({ handle: 'editor' }),
+        expect.objectContaining({ handle: 'artifact' }),
         expect.objectContaining({ handle: 'dev' }),
         expect.objectContaining({ handle: 'pr' }),
         expect.objectContaining({ handle: 'cloud' }),
@@ -650,6 +652,7 @@ describe('IPC handlers', () => {
       // First-time seed also flips personasSandboxSeeded so the existing-install
       // top-up never runs as a no-op on subsequent loads.
       expect(setConfigValue).toHaveBeenCalledWith('personasSandboxSeeded', true);
+      expect(setConfigValue).toHaveBeenCalledWith('personasArtifactSeeded', true);
     });
 
     it('does not re-seed when personasSeeded flag is true', () => {
@@ -666,6 +669,7 @@ describe('IPC handlers', () => {
         // migration would write personas + flip the flag and break this
         // assertion. The top-up has its own dedicated test below.
         if (key === 'personasSandboxSeeded') return true as any;
+        if (key === 'personasArtifactSeeded') return true as any;
         return null as any;
       });
 
@@ -697,6 +701,7 @@ describe('IPC handlers', () => {
         if (key === 'personas') return noAgent as any;
         if (key === 'personasSeeded') return true as any;
         if (key === 'personasSandboxSeeded') return true as any;
+        if (key === 'personasArtifactSeeded') return true as any;
         return null as any;
       });
 
@@ -744,8 +749,9 @@ describe('IPC handlers', () => {
         expect.objectContaining({ handle: 'cloud' }),
         expect.objectContaining({ handle: 'secret-agent' }),
         expect.objectContaining({ handle: 'sandbox' }),
+        expect.objectContaining({ handle: 'artifact' }),
       ]));
-      expect(result).toHaveLength(8);
+      expect(result).toHaveLength(9);
       expect(setConfigValue).toHaveBeenCalledWith('personasSeeded', true);
       expect(setConfigValue).toHaveBeenCalledWith('personasSandboxSeeded', true);
 
@@ -774,6 +780,7 @@ describe('IPC handlers', () => {
         if (key === 'personasSeeded') return true as any;
         if (key === 'personasMigratedV2') return true as any;
         if (key === 'personasSandboxSeeded') return false as any;
+        if (key === 'personasArtifactSeeded') return true as any;
         return null as any;
       });
 
@@ -812,6 +819,74 @@ describe('IPC handlers', () => {
       });
     });
 
+    it('tops up @artifact for installs that predate it', () => {
+      vi.mocked(setConfigValue).mockClear();
+      const cfg = vi.mocked(getConfigValue);
+      const preArtifact = [
+        { id: 'default-agent', handle: 'agent', instructions: 'a', model: '', runLocation: 'local' as const },
+      ];
+      cfg.mockImplementation((key: string) => {
+        if (key === 'personas') return preArtifact as any;
+        if (key === 'personasSeeded') return true as any;
+        if (key === 'personasMigratedV2') return true as any;
+        if (key === 'personasSandboxSeeded') return true as any;
+        if (key === 'personasArtifactSeeded') return false as any;
+        return null as any;
+      });
+
+      const result = invoke('personas:list');
+      // The top-up must carry `canvas: true` — without it the persona is just
+      // @agent with a different emoji and produces no reports.
+      expect(result).toEqual(expect.arrayContaining([
+        expect.objectContaining({ handle: 'artifact', canvas: true }),
+      ]));
+      expect(setConfigValue).toHaveBeenCalledWith('personasArtifactSeeded', true);
+
+      // Restore default mock
+      cfg.mockImplementation((key: string) => {
+        if (key === 'workspace') return '/mock/workspace';
+        if (key === 'theme') return 'dark';
+        if (key === 'model') return 'gpt-4';
+        if (key === 'personas') return [];
+        if (key === 'mcpServers') return [];
+        if (key === 'cliTools') return [];
+        return null;
+      });
+    });
+
+    it('does not re-add @artifact after its top-up has run', () => {
+      // A user who deleted @artifact on purpose must not get it back.
+      vi.mocked(setConfigValue).mockClear();
+      const cfg = vi.mocked(getConfigValue);
+      const withoutArtifact = [
+        { id: 'default-agent', handle: 'agent', instructions: 'a', model: '', runLocation: 'local' as const },
+      ];
+      cfg.mockImplementation((key: string) => {
+        if (key === 'personas') return withoutArtifact as any;
+        if (key === 'personasSeeded') return true as any;
+        if (key === 'personasMigratedV2') return true as any;
+        if (key === 'personasSandboxSeeded') return true as any;
+        if (key === 'personasArtifactSeeded') return true as any;
+        return null as any;
+      });
+
+      const result = invoke('personas:list');
+      expect(result).toEqual(withoutArtifact);
+      expect(setConfigValue).not.toHaveBeenCalledWith('personas',
+        expect.arrayContaining([expect.objectContaining({ handle: 'artifact' })]));
+
+      // Restore default mock
+      cfg.mockImplementation((key: string) => {
+        if (key === 'workspace') return '/mock/workspace';
+        if (key === 'theme') return 'dark';
+        if (key === 'model') return 'gpt-4';
+        if (key === 'personas') return [];
+        if (key === 'mcpServers') return [];
+        if (key === 'cliTools') return [];
+        return null;
+      });
+    });
+
     it('does not re-add @sandbox after top-up has run', () => {
       // User intentionally deleted @sandbox post-top-up — respect that.
       vi.mocked(setConfigValue).mockClear();
@@ -824,6 +899,7 @@ describe('IPC handlers', () => {
         if (key === 'personasSeeded') return true as any;
         if (key === 'personasMigratedV2') return true as any;
         if (key === 'personasSandboxSeeded') return true as any;
+        if (key === 'personasArtifactSeeded') return true as any;
         return null as any;
       });
 
@@ -899,6 +975,42 @@ describe('IPC handlers', () => {
       expect(setConfigValue).toHaveBeenCalledWith('personas', [
         DEFAULT_AGENT_PERSONA,
         { id: 'p1', handle: 'normal-bot', instructions: 'Do things', model: '', runLocation: 'local' },
+      ]);
+    });
+
+    it('keeps a persona opted into canvas reports', () => {
+      const personas = [
+        { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: true },
+      ];
+      const result = invoke('personas:save', personas);
+      expect(result).toEqual({ ok: true });
+      expect(setConfigValue).toHaveBeenCalledWith('personas', [
+        DEFAULT_AGENT_PERSONA,
+        { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: true },
+      ]);
+    });
+
+    it('keeps a named canvas type, so a persona can select its own layout', () => {
+      const personas = [
+        { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: 'digest' },
+      ];
+      invoke('personas:save', personas);
+      expect(setConfigValue).toHaveBeenCalledWith('personas', [
+        DEFAULT_AGENT_PERSONA,
+        { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: 'digest' },
+      ]);
+    });
+
+    it('drops the canvas flag when off, so a persona is never opted in by accident', () => {
+      const personas = [
+        { id: 'p1', handle: 'plain', instructions: 'Do things', model: '', runLocation: 'local', canvas: false },
+        { id: 'p2', handle: 'plain-two', instructions: 'Do things', model: '', runLocation: 'local', canvas: 'false' },
+      ];
+      invoke('personas:save', personas);
+      expect(setConfigValue).toHaveBeenCalledWith('personas', [
+        DEFAULT_AGENT_PERSONA,
+        { id: 'p1', handle: 'plain', instructions: 'Do things', model: '', runLocation: 'local' },
+        { id: 'p2', handle: 'plain-two', instructions: 'Do things', model: '', runLocation: 'local' },
       ]);
     });
 

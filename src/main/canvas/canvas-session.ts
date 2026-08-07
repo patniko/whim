@@ -38,6 +38,20 @@ export interface CanvasSessionConfig {
   canvasProvider: { id: string; name: string };
 }
 
+export interface CanvasSessionSetup {
+  /** Spread into the SDK session config verbatim. */
+  config: CanvasSessionConfig;
+  /**
+   * The canvas the agent will actually see.
+   *
+   * Returned separately because it can differ from the requested one — a
+   * template that failed to resolve falls back to the built-in report canvas —
+   * and the instruction contract has to name the canvas that exists, not the
+   * one that was asked for.
+   */
+  canvasId: string;
+}
+
 /**
  * Produce the canvas session fields for a run, or `null` when the run is not
  * allowed to produce artifacts.
@@ -51,7 +65,7 @@ export function buildCanvasSessionConfig(
   run: CanvasRunContext,
   policy: CanvasArtifactPolicy,
   hooks: CanvasSessionHooks = {},
-): CanvasSessionConfig | null {
+): CanvasSessionSetup | null {
   if (!policy.enabled) return null;
 
   try {
@@ -87,9 +101,12 @@ export function buildCanvasSessionConfig(
       : createArtifactCanvas(run, events);
 
     return {
-      canvases: [canvas],
-      requestCanvasRenderer: true,
-      canvasProvider: { id: WHIM_CANVAS_PROVIDER_ID, name: WHIM_CANVAS_PROVIDER_NAME },
+      config: {
+        canvases: [canvas],
+        requestCanvasRenderer: true,
+        canvasProvider: { id: WHIM_CANVAS_PROVIDER_ID, name: WHIM_CANVAS_PROVIDER_NAME },
+      },
+      canvasId: definition?.canvasId ?? WHIM_REPORT_CANVAS_ID,
     };
   } catch (err: any) {
     console.warn(`[canvas] canvas support unavailable, continuing without it: ${err?.message ?? err}`);
