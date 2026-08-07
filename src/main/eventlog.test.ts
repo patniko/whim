@@ -700,9 +700,24 @@ describe('replayLog', () => {
 
       warnSpy.mockRestore();
     });
-  });
+    /*
+     * snapshot.jsonl is written to a temp file and renamed into place, so a
+     * malformed one is real corruption rather than a torn append — and since
+     * it is a single line, "skip the bad last line" would silently discard
+     * every space the user has.
+     */
+    it('refuses to skip a malformed snapshot', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fs.writeFileSync(path.join(logRoot, 'snapshot.jsonl'), '{"op":"snapshot","data":{trunc\n', 'utf-8');
 
-  // ── Orphaned rows ─────────────────────────────────────
+      expect(() => replayLog(logRoot, db)).toThrow(/Corrupt event log at .*snapshot\.jsonl:1/);
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('Ignoring corrupt final line')
+      );
+
+      warnSpy.mockRestore();
+    });
+  });
 
   describe('orphaned rows', () => {
     /*

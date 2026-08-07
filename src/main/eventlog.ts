@@ -1,6 +1,7 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import Database from 'better-sqlite3';
-import { resolveActiveSegment, listLogFiles } from './log-store';
+import { resolveActiveSegment, listLogFiles, SNAPSHOT_FILENAME } from './log-store';
 
 export interface LogEvent {
   ts: string;
@@ -134,6 +135,14 @@ function replayOneFile(filePath: string, db: Database.Database): void {
   const content = fs.readFileSync(filePath, 'utf-8');
   const lines = content.split('\n');
 
+  // Tolerating a torn last line only makes sense for the append-only segments,
+  // where a crash mid-append is expected. The snapshot is written to a temp
+  // file and renamed into place, so it is either wholly there or not there at
+  // all — a malformed one is real corruption. It is also a single very long
+  // line, so "skip the bad last line" would throw away every space the user
+  // has and start them at empty, which is the worst possible response.
+  const isAtomicFile = path.basename(filePath) === SNAPSHOT_FILENAME;
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
@@ -146,9 +155,8 @@ function replayOneFile(filePath: string, db: Database.Database): void {
     try {
       event = JSON.parse(line);
     } catch (err) {
-      // A torn write can only ever be the last line (crash during append).
       const remaining = lines.slice(i + 1).some(l => l.trim());
-      if (!remaining) {
+      if (!remaining && !isAtomicFile) {
         console.warn(`[eventlog] Ignoring corrupt final line ${i + 1} of ${filePath}`);
         continue;
       }

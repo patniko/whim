@@ -222,6 +222,18 @@ const preloadOptions = {
   // Supplied by the sandbox itself; bundling it would shadow the real one.
   external: ['electron'],
   logLevel: 'info',
+  plugins: [{
+    name: 'assert-preload-self-contained',
+    setup(build) {
+      // As a plugin rather than a call after `esbuild.build`, so watch
+      // rebuilds are checked too — otherwise `npm run dev` could quietly
+      // reload Electron into the same inert state the guard exists to catch.
+      build.onEnd((result) => {
+        if (result.errors.length > 0) return;
+        assertPreloadSelfContained();
+      });
+    },
+  }],
 };
 
 /**
@@ -231,14 +243,30 @@ const preloadOptions = {
  */
 function assertPreloadSelfContained(outfile = preloadOptions.outfile) {
   const source = fs.readFileSync(outfile, 'utf-8');
-  const SANDBOX_PROVIDED = new Set(['electron', 'events', 'timers', 'url']);
+  // `node:`-prefixed spellings resolve to the same built-ins.
+  const SANDBOX_PROVIDED = new Set([
+    'electron',
+    'events', 'timers', 'url',
+    'node:events', 'node:timers', 'node:url',
+  ]);
 
-  const required = [...source.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)].map((m) => m[1]);
-  const unresolvable = [...new Set(required)].filter((id) => !SANDBOX_PROVIDED.has(id));
+  const problems = [];
+  // Match the call site rather than a quoted specifier, so a computed
+  // argument is *seen* instead of skipped. Silently ignoring the forms we
+  // cannot evaluate is how a guard ends up not guarding.
+  for (const match of source.matchAll(/(?:^|[^.\w$])require\(([^)]*)\)/g)) {
+    const argument = match[1].trim();
+    const literal = /^(["'])([^"']*)\1$/.exec(argument);
+    if (!literal) {
+      problems.push(`a computed specifier (\`require(${argument})\`)`);
+      continue;
+    }
+    if (!SANDBOX_PROVIDED.has(literal[2])) problems.push(`'${literal[2]}'`);
+  }
 
-  if (unresolvable.length > 0) {
+  if (problems.length > 0) {
     throw new Error(
-      `dist/main/preload.js requires ${unresolvable.map((id) => `'${id}'`).join(', ')}, ` +
+      `dist/main/preload.js requires ${[...new Set(problems)].join(', ')}, ` +
       `which Electron's sandboxed preload loader cannot resolve. ` +
       `The preload must be fully bundled.`
     );
@@ -269,7 +297,6 @@ async function main() {
       esbuild.build(desktopBootOptions),
       esbuild.build(preloadOptions),
     ]);
-    assertPreloadSelfContained();
     copyRendererAssets();
     copyWebAssets();
     fingerprintWebAssets();

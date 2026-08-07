@@ -41,3 +41,29 @@ test('allows the other modules the sandbox provides', () => {
   const file = fixture('require("events"); require("url"); require("timers");');
   assert.doesNotThrow(() => assertPreloadSelfContained(file));
 });
+
+test('allows node: prefixed built-ins', () => {
+  const file = fixture('require("node:events"); require("node:url");');
+  assert.doesNotThrow(() => assertPreloadSelfContained(file));
+});
+
+/*
+ * A guard that only understands string literals silently ignores exactly the
+ * calls it cannot reason about, which is the opposite of what a guard should
+ * do. Anything non-literal is reported rather than skipped.
+ */
+test('rejects a computed require it cannot evaluate', () => {
+  const file = fixture('const name = "fs"; require(name);');
+  assert.throws(() => assertPreloadSelfContained(file), /computed specifier/);
+});
+
+test('rejects a template-literal require', () => {
+  const file = fixture('require(`./${name}`);');
+  assert.throws(() => assertPreloadSelfContained(file), /computed specifier/);
+});
+
+test('ignores property calls such as module.require', () => {
+  // `foo.require(x)` is not the CJS loader, so it must not trip the guard.
+  const file = fixture('custom.require(somethingElse); require("electron");');
+  assert.doesNotThrow(() => assertPreloadSelfContained(file));
+});
