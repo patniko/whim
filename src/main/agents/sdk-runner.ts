@@ -937,13 +937,36 @@ export async function sendChatMessage(
 ): Promise<{ error?: string; restarted?: boolean }> {
   let record = registry.get(agentId);
   let restarted = false;
+
+  // Stopping an agent is not the same as one failing, but `abortAgent` records
+  // it as a failure: it tears the session down and marks the record failed, so
+  // by status alone a deliberate stop is indistinguishable from a crash. The
+  // abort flag is what tells them apart — an agent the user put down is one
+  // they can pick back up, so drop the spent record and take the same resume
+  // path a restarted app would take.
+  const stoppedByUser = record?.aborted === true;
+  const stoppedRecord = record;
+  if (stoppedByUser) {
+    registry.delete(agentId);
+    record = undefined;
+  }
+
   if (!record) {
-    // Agent not in memory — might be historical (app restarted).
-    // Try to re-create a session for it.
+    // Agent not in memory — might be historical (app restarted), or just
+    // stopped by the user. Try to re-create a session for it.
     const result = await resumeAgentSession(agentId);
-    if (!result) return { error: 'Agent session expired — open in CLI to resume' };
+    if (!result) {
+      // Put the stopped record back rather than leaving the agent missing from
+      // the registry entirely — the send failed, the agent should not.
+      if (stoppedRecord) registry.set(agentId, stoppedRecord);
+      return { error: 'Agent session expired — open in CLI to resume' };
+    }
     restarted = result === 'restarted';
     record = registry.get(agentId)!;
+    // A session we just rebuilt is live regardless of the status it was
+    // persisted with; the guard below is about records we did not rebuild.
+    record.status = 'running';
+    record.aborted = false;
   }
   if (record.status !== 'completed' && record.status !== 'running') {
     return { error: `Agent is ${record.status}, cannot send message` };
