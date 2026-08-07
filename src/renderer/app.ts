@@ -112,13 +112,48 @@ interface DiscoveredMcpServer {
   url?: string;
 }
 
+type InterfaceScope = 'loopback' | 'private' | 'vpn' | 'public';
+
 interface WebRemoteInterface {
   name: string;
   address: string;
   family: 'IPv4' | 'IPv6';
   internal: boolean;
-  tailscale: boolean;
+  scope: InterfaceScope;
   label: string;
+}
+
+type WebRemoteBindSelection =
+  | { kind: 'interface'; interfaceName: string; family: 'IPv4' | 'IPv6' }
+  | { kind: 'address'; address: string }
+  | { kind: 'all'; family: 'IPv4' | 'IPv6' };
+
+interface WebRemoteBindingStatus {
+  selection: WebRemoteBindSelection;
+  label: string;
+  scope: InterfaceScope;
+  state: 'listening' | 'pending' | 'failed';
+  addresses: string[];
+  detail: string | null;
+}
+
+type WebRemoteTlsMode = 'auto' | 'off' | 'custom';
+
+interface WebRemoteTlsState {
+  mode: WebRemoteTlsMode;
+  active: boolean;
+  fingerprint: string | null;
+  expiresAt: string | null;
+  error: string | null;
+}
+
+interface WebRemoteDevice {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastSeenAt: string;
+  lastAddress: string | null;
+  userAgent: string | null;
 }
 
 interface WebRemoteState {
@@ -126,11 +161,15 @@ interface WebRemoteState {
   running: boolean;
   port: number;
   token: string;
-  bindAddresses: string[];
+  selections: WebRemoteBindSelection[];
+  bindings: WebRemoteBindingStatus[];
   interfaces: WebRemoteInterface[];
   urls: string[];
   qrDataUrl: string | null;
   error: string | null;
+  tls: WebRemoteTlsState;
+  allowedHosts: string[];
+  devices: WebRemoteDevice[];
 }
 
 interface FolderCommit {
@@ -153,8 +192,16 @@ interface WhimAPI {
   setSetting(key: string, value: string): Promise<string | null | undefined>;
   getWebRemoteState(): Promise<WebRemoteState>;
   setWebRemoteEnabled(enabled: boolean): Promise<WebRemoteState>;
-  setWebRemoteConfig(config: { port?: number; bindAddresses?: string[] }): Promise<WebRemoteState | { error: string }>;
+  setWebRemoteConfig(config: {
+    port?: number;
+    selections?: WebRemoteBindSelection[];
+    tlsMode?: WebRemoteTlsMode;
+    tlsCertPath?: string;
+    tlsKeyPath?: string;
+    allowedHosts?: string[];
+  }): Promise<WebRemoteState | { error: string }>;
   regenerateWebRemoteToken(): Promise<WebRemoteState>;
+  revokeWebRemoteDevice(deviceId: string): Promise<WebRemoteState>;
   listWebRemoteInterfaces(): Promise<WebRemoteInterface[]>;
   getHotkeys(): Promise<Record<string, string>>;
   setHotkey(key: string, accelerator: string): Promise<{ ok?: boolean; error?: string }>;
@@ -393,7 +440,7 @@ import {
   openCanvasArtifact as openCanvasArtifactAndReconcile,
 } from './state/ipc-bridge';
 import { mountLists } from './views/mount.tsx';
-import type { WhimAPI as PreloadWhimAPI } from '../main/preload';
+import type { WhimAPI as PreloadWhimAPI } from '../shared/whim-api';
 import type { Skill as SharedSkill, CanvasAgentStateSnapshot, ExportFormat, ExportDestination, SkillInvocationInput, SkillInvocationResult, UpdateState } from '../shared/types';
 
 // The local `interface WhimAPI` declared near the top of this file shadows the
@@ -4954,6 +5001,14 @@ const webRemoteInterfaceList = document.getElementById('web-remote-interface-lis
 const webRemoteUrlList = document.getElementById('web-remote-url-list') as HTMLDivElement | null;
 const webRemoteQr = document.getElementById('web-remote-qr') as HTMLImageElement | null;
 const webRemoteStatus = document.getElementById('web-remote-status') as HTMLDivElement | null;
+const webRemoteTlsMode = document.getElementById('web-remote-tls-mode') as HTMLSelectElement | null;
+const webRemoteTlsCustom = document.getElementById('web-remote-tls-custom') as HTMLDivElement | null;
+const webRemoteTlsCert = document.getElementById('web-remote-tls-cert') as HTMLInputElement | null;
+const webRemoteTlsKey = document.getElementById('web-remote-tls-key') as HTMLInputElement | null;
+const webRemoteTlsStatus = document.getElementById('web-remote-tls-status') as HTMLDivElement | null;
+const webRemoteAllowedHosts = document.getElementById('web-remote-allowed-hosts') as HTMLInputElement | null;
+const webRemoteDeviceList = document.getElementById('web-remote-device-list') as HTMLDivElement | null;
+const webRemoteActivityList = document.getElementById('web-remote-activity-list') as HTMLDivElement | null;
 
 function setWebRemoteStatus(message: string, error = false): void {
   if (!webRemoteStatus) return;
@@ -4961,19 +5016,81 @@ function setWebRemoteStatus(message: string, error = false): void {
   webRemoteStatus.classList.toggle('web-remote-error', error);
 }
 
-function selectedWebRemoteAddresses(): string[] {
-  if (!webRemoteInterfaceList) return [];
-  return Array.from(webRemoteInterfaceList.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked'))
-    .map(input => input.value);
+const SCOPE_WARNINGS: Record<InterfaceScope, string> = {
+  loopback: 'Only reachable from this machine.',
+  private: 'Reachable by any device on this local network.',
+  vpn: 'Reachable by devices on this VPN or tunnel.',
+  public: 'Warning: this address may be reachable from the public internet.',
+};
+
+const BINDING_STATE_LABELS: Record<WebRemoteBindingStatus['state'], string> = {
+  listening: 'Listening',
+  pending: 'Waiting for interface',
+  failed: 'Failed',
+};
+
+/**
+ * Selections are keyed by a stable string so the checkbox list can round-trip
+ * them without smuggling raw addresses through the DOM. Addresses change; the
+ * user's intent shouldn't.
+ */
+function selectionKey(selection: WebRemoteBindSelection): string {
+  switch (selection.kind) {
+    case 'interface': return `i:${selection.interfaceName}:${selection.family}`;
+    case 'address': return `a:${selection.address}`;
+    case 'all': return `*:${selection.family}`;
+  }
 }
 
+let webRemoteSelectionIndex = new Map<string, WebRemoteBindSelection>();
+
+function selectedWebRemoteSelections(): WebRemoteBindSelection[] {
+  if (!webRemoteInterfaceList) return [];
+  return Array.from(webRemoteInterfaceList.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked'))
+    .map(input => webRemoteSelectionIndex.get(input.value))
+    .filter((selection): selection is WebRemoteBindSelection => selection !== undefined);
+}
+
+/**
+ * Build the option list from the union of live interfaces and saved selections,
+ * so an interface that is currently down still shows up (checked, pending)
+ * rather than silently vanishing from the user's configuration.
+ */
 function renderWebRemoteInterfaces(state: WebRemoteState): void {
   if (!webRemoteInterfaceList) return;
   webRemoteInterfaceList.innerHTML = '';
+  webRemoteSelectionIndex = new Map();
 
-  const selected = new Set(state.bindAddresses);
-  const interfaces = state.interfaces.filter(iface => iface.family === 'IPv4');
-  if (interfaces.length === 0) {
+  const bindingByKey = new Map(state.bindings.map(binding => [selectionKey(binding.selection), binding]));
+  const selectedKeys = new Set(state.selections.map(selectionKey));
+
+  type Option = { key: string; selection: WebRemoteBindSelection; label: string; scope: InterfaceScope };
+  const options: Option[] = [];
+  const seen = new Set<string>();
+
+  const push = (selection: WebRemoteBindSelection, label: string, scope: InterfaceScope) => {
+    const key = selectionKey(selection);
+    if (seen.has(key)) return;
+    seen.add(key);
+    options.push({ key, selection, label, scope });
+  };
+
+  for (const iface of state.interfaces) {
+    if (iface.family !== 'IPv4') continue;
+    const selection: WebRemoteBindSelection = iface.scope === 'loopback'
+      ? { kind: 'address', address: iface.address }
+      : { kind: 'interface', interfaceName: iface.name, family: iface.family };
+    push(selection, iface.label, iface.scope);
+  }
+
+  for (const selection of state.selections) {
+    const binding = bindingByKey.get(selectionKey(selection));
+    push(selection, binding?.label ?? describeSelection(selection), binding?.scope ?? 'private');
+  }
+
+  push({ kind: 'all', family: 'IPv4' }, 'All IPv4 interfaces (0.0.0.0)', 'public');
+
+  if (options.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'settings-hint';
     empty.textContent = 'No network interfaces detected.';
@@ -4981,23 +5098,149 @@ function renderWebRemoteInterfaces(state: WebRemoteState): void {
     return;
   }
 
-  for (const iface of interfaces) {
+  for (const option of options) {
+    webRemoteSelectionIndex.set(option.key, option.selection);
+
     const label = document.createElement('label');
     label.className = 'settings-checkbox-label web-remote-interface-option';
 
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
-    checkbox.value = iface.address;
-    checkbox.checked = selected.has(iface.address);
+    checkbox.value = option.key;
+    checkbox.checked = selectedKeys.has(option.key);
     label.appendChild(checkbox);
 
     const text = document.createElement('span');
-    text.textContent = iface.label;
-    if (!iface.internal && !iface.tailscale) {
-      text.title = 'Plain HTTP on raw LAN. Prefer Tailscale unless you trust this network.';
-    }
+    text.textContent = option.label;
+    text.title = SCOPE_WARNINGS[option.scope];
     label.appendChild(text);
+
+    const binding = bindingByKey.get(option.key);
+    if (binding && state.enabled) {
+      const status = document.createElement('span');
+      status.className = `web-remote-binding-state web-remote-binding-${binding.state}`;
+      status.textContent = binding.state === 'listening' && binding.addresses.length > 0
+        ? `${BINDING_STATE_LABELS[binding.state]} on ${binding.addresses.join(', ')}:${state.port}`
+        : `${BINDING_STATE_LABELS[binding.state]} — ${binding.detail}`;
+      label.appendChild(status);
+    }
+
     webRemoteInterfaceList.appendChild(label);
+  }
+}
+
+function describeSelection(selection: WebRemoteBindSelection): string {
+  switch (selection.kind) {
+    case 'interface': return `${selection.interfaceName} (${selection.family}, not currently available)`;
+    case 'address': return selection.address;
+    case 'all': return `All ${selection.family} interfaces`;
+  }
+}
+
+function renderWebRemoteTls(state: WebRemoteState): void {
+  if (webRemoteTlsMode) webRemoteTlsMode.value = state.tls.mode;
+  webRemoteTlsCustom?.classList.toggle('hidden', state.tls.mode !== 'custom');
+
+  if (!webRemoteTlsStatus) return;
+  const loopbackOnly = state.selections.every(selection =>
+    selection.kind === 'address' && (selection.address === '127.0.0.1' || selection.address === '::1'));
+
+  if (state.tls.error) {
+    webRemoteTlsStatus.textContent = `Certificate error: ${state.tls.error}`;
+  } else if (state.tls.active) {
+    webRemoteTlsStatus.textContent = state.tls.fingerprint
+      ? `HTTPS is on. Certificate fingerprint (SHA-256): ${state.tls.fingerprint}`
+      : 'HTTPS is on.';
+  } else if (state.tls.mode === 'auto' && loopbackOnly) {
+    webRemoteTlsStatus.textContent = 'Loopback only, so plain HTTP is used — localhost is already a secure origin.';
+  } else if (state.tls.mode === 'off') {
+    webRemoteTlsStatus.textContent = 'HTTPS is off. The microphone, clipboard and home-screen install will not work in the browser.';
+  } else {
+    webRemoteTlsStatus.textContent = 'HTTPS is not active yet.';
+  }
+}
+
+function renderWebRemoteDevices(state: WebRemoteState): void {
+  if (!webRemoteDeviceList) return;
+  webRemoteDeviceList.innerHTML = '';
+
+  if (state.devices.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'settings-hint';
+    empty.textContent = 'No paired browsers yet.';
+    webRemoteDeviceList.appendChild(empty);
+    return;
+  }
+
+  for (const device of state.devices) {
+    const row = document.createElement('div');
+    row.className = 'web-remote-device';
+
+    const name = document.createElement('span');
+    name.textContent = device.label;
+    row.appendChild(name);
+
+    const meta = document.createElement('span');
+    meta.className = 'web-remote-device-meta';
+    meta.textContent = `last seen ${new Date(device.lastSeenAt).toLocaleString()}`
+      + (device.lastAddress ? ` from ${device.lastAddress}` : '');
+    row.appendChild(meta);
+
+    const revoke = document.createElement('button');
+    revoke.className = 'workspace-btn';
+    revoke.type = 'button';
+    revoke.textContent = 'Revoke';
+    revoke.addEventListener('click', async () => {
+      renderWebRemoteState(await whimAPI.revokeWebRemoteDevice(device.id));
+    });
+    row.appendChild(revoke);
+
+    webRemoteDeviceList.appendChild(row);
+  }
+}
+
+/**
+ * A single `lastError` string told you nothing about what had actually
+ * happened over the connection. This is the smallest thing that lets you
+ * answer "what has been talking to my machine?".
+ */
+function renderWebRemoteActivity(state: WebRemoteState): void {
+  if (!webRemoteActivityList) return;
+  webRemoteActivityList.innerHTML = '';
+
+  if (state.activity.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'settings-hint';
+    empty.textContent = 'No requests yet.';
+    webRemoteActivityList.appendChild(empty);
+    return;
+  }
+
+  for (const entry of state.activity) {
+    const row = document.createElement('div');
+    row.className = `web-remote-activity ${entry.outcome}`;
+
+    const when = document.createElement('span');
+    when.className = 'web-remote-activity-time';
+    when.textContent = new Date(entry.at).toLocaleTimeString();
+    row.appendChild(when);
+
+    const what = document.createElement('span');
+    what.className = 'web-remote-activity-what';
+    what.textContent = entry.channel ? entry.channel : `${entry.method} ${entry.path}`;
+    row.appendChild(what);
+
+    const who = document.createElement('span');
+    who.className = 'web-remote-activity-who';
+    who.textContent = `${entry.identity} · ${entry.remoteAddress}`;
+    row.appendChild(who);
+
+    const status = document.createElement('span');
+    status.className = 'web-remote-activity-status';
+    status.textContent = `${entry.status} · ${entry.durationMs}ms`;
+    row.appendChild(status);
+
+    webRemoteActivityList.appendChild(row);
   }
 }
 
@@ -5005,7 +5248,12 @@ function renderWebRemoteState(state: WebRemoteState): void {
   if (webRemoteEnabledCb) webRemoteEnabledCb.checked = state.enabled;
   if (webRemotePortInput) webRemotePortInput.value = String(state.port);
   if (webRemoteTokenInput) webRemoteTokenInput.value = state.token;
+  if (webRemoteTlsCert) webRemoteTlsCert.value = webRemoteTlsCert.value || '';
+  if (webRemoteAllowedHosts) webRemoteAllowedHosts.value = state.allowedHosts.join(', ');
   renderWebRemoteInterfaces(state);
+  renderWebRemoteTls(state);
+  renderWebRemoteDevices(state);
+  renderWebRemoteActivity(state);
 
   if (webRemoteUrlList) {
     webRemoteUrlList.innerHTML = '';
@@ -5030,7 +5278,15 @@ function renderWebRemoteState(state: WebRemoteState): void {
   if (!state.enabled) {
     setWebRemoteStatus('Remote web access is off.');
   } else if (state.running) {
-    setWebRemoteStatus('Remote web access is running. Scan the QR code from your phone.');
+    setWebRemoteStatus("Remote web access is running. Scan the QR code to open whim on your phone.");
+  } else if (state.bindings.some(binding => binding.state === 'listening')) {
+    // Partially bound: serving on what's up, still waiting on the rest.
+    const waiting = state.bindings.filter(binding => binding.state !== 'listening');
+    setWebRemoteStatus(
+      `Running, but ${waiting.length} selected interface${waiting.length === 1 ? '' : 's'} not yet bound: `
+        + waiting.map(binding => `${binding.label} — ${binding.detail}`).join('; '),
+      true,
+    );
   } else {
     setWebRemoteStatus(state.error || 'Remote web access is enabled but not running.', true);
   }
@@ -5060,9 +5316,23 @@ if (webRemoteEnabledCb) {
 if (webRemoteSaveBtn) {
   webRemoteSaveBtn.addEventListener('click', async () => {
     const port = Number(webRemotePortInput?.value || 0);
-    const bindAddresses = selectedWebRemoteAddresses();
+    const selections = selectedWebRemoteSelections();
+    if (selections.length === 0) {
+      setWebRemoteStatus('Select at least one network interface.', true);
+      return;
+    }
     setWebRemoteStatus('Saving remote web settings…');
-    const result = await whimAPI.setWebRemoteConfig({ port, bindAddresses });
+    const result = await whimAPI.setWebRemoteConfig({
+      port,
+      selections,
+      tlsMode: (webRemoteTlsMode?.value as WebRemoteTlsMode | undefined) ?? undefined,
+      tlsCertPath: webRemoteTlsCert?.value.trim(),
+      tlsKeyPath: webRemoteTlsKey?.value.trim(),
+      allowedHosts: (webRemoteAllowedHosts?.value ?? '')
+        .split(',')
+        .map(host => host.trim())
+        .filter(Boolean),
+    });
     if ('error' in result) {
       setWebRemoteStatus(result.error, true);
       return;
@@ -5073,8 +5343,14 @@ if (webRemoteSaveBtn) {
 
 if (webRemoteRegenerateBtn) {
   webRemoteRegenerateBtn.addEventListener('click', async () => {
-    setWebRemoteStatus('Regenerating token and closing existing mobile sessions…');
+    setWebRemoteStatus('Regenerating token and signing out every paired browser…');
     renderWebRemoteState(await whimAPI.regenerateWebRemoteToken());
+  });
+}
+
+if (webRemoteTlsMode) {
+  webRemoteTlsMode.addEventListener('change', () => {
+    webRemoteTlsCustom?.classList.toggle('hidden', webRemoteTlsMode.value !== 'custom');
   });
 }
 

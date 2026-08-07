@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron';
+import { registerIpcHandler } from './registry';
 import { isInitialized, createSpace, listSpaces, getSpace, listSpaceEvents, searchSpaces } from '../database';
 import { parseSpaceWithAI, resolveDateWithAI, classifyInput } from '../ai';
 import { CreateSpaceInput, Space } from '../../shared/types';
@@ -9,7 +9,7 @@ import { processSpaceInBackground } from '../services/space-processing';
 import { applySpaceUpdate, deleteSpaceFull, unarchiveSpaceFull } from '../services/space-mutations';
 
 export function registerSpaceHandlers(): void {
-  ipcMain.handle('space:create', (_event, input: CreateSpaceInput) => {
+  registerIpcHandler('space:create', (_event, input: CreateSpaceInput) => {
     if (!isInitialized()) return { error: 'no_workspace' };
     // createSpace records the (deterministic) folder name in the single create
     // event, so the IPC can return immediately after the DB write.
@@ -29,36 +29,36 @@ export function registerSpaceHandlers(): void {
     return space;
   });
 
-  ipcMain.handle('space:list', () => {
+  registerIpcHandler('space:list', () => {
     if (!isInitialized()) return [];
     return listSpaces();
   });
 
-  ipcMain.handle('space:update', async (_event, id: string, updates: Partial<Pick<Space, 'description' | 'body' | 'client' | 'due_at' | 'due_at_utc' | 'status' | 'attachments'>>) => {
+  registerIpcHandler('space:update', async (_event, id: string, updates: Partial<Pick<Space, 'description' | 'body' | 'client' | 'due_at' | 'due_at_utc' | 'status' | 'attachments'>>) => {
     return applySpaceUpdate(id, updates);
   });
 
-  ipcMain.handle('space:delete', (_event, id: string) => {
+  registerIpcHandler('space:delete', (_event, id: string) => {
     return deleteSpaceFull(id);
   });
 
-  ipcMain.handle('space:dismiss-recurrence', (_event, id: string) => {
+  registerIpcHandler('space:dismiss-recurrence', (_event, id: string) => {
     dismissRecurrence(id);
     return true;
   });
 
   // Space events / timeline
-  ipcMain.handle('space:events', (_event, limit?: number) => {
+  registerIpcHandler('space:events', (_event, limit?: number) => {
     return listSpaceEvents(limit || 100);
   });
 
   // Resolve natural language date
-  ipcMain.handle('space:resolve-date', async (_event, dateText: string) => {
+  registerIpcHandler('space:resolve-date', async (_event, dateText: string) => {
     return resolveDateWithAI(dateText);
   });
 
   // Classify user input as space vs query
-  ipcMain.handle('space:classify', async (_event, text: string) => {
+  registerIpcHandler('space:classify', async (_event, text: string) => {
     if (!isInitialized()) return { type: 'space' };
     const allSpaces = listSpaces();
     const recent = allSpaces.map(i => ({
@@ -71,7 +71,7 @@ export function registerSpaceHandlers(): void {
   });
 
   // Summarize canvas content into a title
-  ipcMain.handle('space:summarize-title', async (_event, canvasContent: string) => {
+  registerIpcHandler('space:summarize-title', async (_event, canvasContent: string) => {
     try {
       const parsed = await parseSpaceWithAI(canvasContent);
       return { title: parsed.description };
@@ -81,12 +81,12 @@ export function registerSpaceHandlers(): void {
     }
   });
 
-  ipcMain.handle('space:search', (_event, query: string) => {
+  registerIpcHandler('space:search', (_event, query: string) => {
     if (!isInitialized()) return [];
     return searchSpaces(query);
   });
 
-  ipcMain.handle('space:unarchive', async (_event, id: string) => {
+  registerIpcHandler('space:unarchive', async (_event, id: string) => {
     return unarchiveSpaceFull(id);
   });
 }

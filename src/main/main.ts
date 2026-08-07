@@ -1,7 +1,7 @@
 // Pin userData to a stable, productName-independent location. MUST be first so
 // the path is set before any module resolves app.getPath('userData') at load.
 import './app-paths';
-import { app, BrowserWindow, dialog, globalShortcut, session, protocol, net, systemPreferences } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, session, protocol, net, powerMonitor, systemPreferences } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { loadConfig, getConfigValue, setConfigValue, getResolvedHotkeys } from './config';
@@ -18,7 +18,7 @@ import { startCliExitMonitor, stopCliExitMonitor, reconcileStaleAgents } from '.
 import { createMainWindow, toggleWindow, setupSnapOnDrop, registerWindowIpcHandlers, preWarmSettingsWindow, releaseSettingsWindow, preWarmCanvasWindow, releaseCanvasWindow } from './window-manager';
 import { createTray, destroyTray } from './tray';
 import { initAutoUpdater, cleanupAutoUpdater } from './update-service';
-import { syncWebRemoteServer, stopWebRemoteServer } from './web/server';
+import { syncWebRemoteServer, stopWebRemoteServer, refreshWebRemoteBindings } from './web/server';
 import { restoreActiveCloudPollers, stopAllCloudPollers } from './cloud-agent-poller';
 import { registerArtifactSchemePrivileges, registerArtifactProtocol } from './canvas/artifact-protocol';
 import { resolveSpaceLocation } from './canvas/space-location';
@@ -237,6 +237,14 @@ app.whenReady().then(async () => {
   }
   // If no workspace, DB is not initialized — IPC handlers return empty/error states
   await syncWebRemoteServer();
+
+  // Interfaces routinely change while the machine is asleep and the binder's
+  // poll timer is suspended, so re-resolve immediately on resume.
+  powerMonitor.on('resume', () => {
+    void refreshWebRemoteBindings().catch((err) => {
+      console.warn('[main] Failed to refresh web remote bindings after resume:', err);
+    });
+  });
 
   // ── Module initialization ──────────────────────────────
   const preloadPath = path.join(__dirname, 'preload.js');

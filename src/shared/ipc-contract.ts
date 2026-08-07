@@ -193,25 +193,97 @@ export interface DiscoveredMcpServer {
   url?: string;
 }
 
+/**
+ * Security scope of a network interface. This — not the vendor or product that
+ * created the interface — is what determines the exposure of binding to it.
+ */
+export type InterfaceScope = 'loopback' | 'private' | 'vpn' | 'public';
+
 export interface WebRemoteInterface {
   name: string;
   address: string;
   family: 'IPv4' | 'IPv6';
   internal: boolean;
-  tailscale: boolean;
+  scope: InterfaceScope;
   label: string;
+}
+
+/**
+ * A persisted "where should this be exposed" choice. Stored as interface
+ * identity rather than a literal address, because addresses change (DHCP,
+ * VPN reconnect, roaming) while the user's intent does not.
+ */
+export type WebRemoteBindSelection =
+  | { kind: 'interface'; interfaceName: string; family: 'IPv4' | 'IPv6' }
+  | { kind: 'address'; address: string }
+  | { kind: 'all'; family: 'IPv4' | 'IPv6' };
+
+export type WebRemoteBindingState = 'listening' | 'pending' | 'failed';
+
+/** Per-selection status, so the UI can explain exactly what is and isn't up. */
+export interface WebRemoteBindingStatus {
+  selection: WebRemoteBindSelection;
+  label: string;
+  scope: InterfaceScope;
+  state: WebRemoteBindingState;
+  addresses: string[];
+  /** Populated when state is 'pending' or 'failed'. */
+  detail: string | null;
+}
+
+export type WebRemoteTlsMode = 'auto' | 'off' | 'custom';
+
+export interface WebRemoteTlsState {
+  mode: WebRemoteTlsMode;
+  /** True when the server is actually serving HTTPS. */
+  active: boolean;
+  /** SHA-256 fingerprint of the served certificate, for out-of-band verification. */
+  fingerprint: string | null;
+  expiresAt: string | null;
+  error: string | null;
+}
+
+/** A browser that has completed the token exchange and holds a session cookie. */
+export interface WebRemoteDevice {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastSeenAt: string;
+  lastAddress: string | null;
+  userAgent: string | null;
 }
 
 export interface WebRemoteState {
   enabled: boolean;
+  /** True only when every selected interface is actually listening. */
   running: boolean;
   port: number;
   token: string;
-  bindAddresses: string[];
+  selections: WebRemoteBindSelection[];
+  bindings: WebRemoteBindingStatus[];
   interfaces: WebRemoteInterface[];
   urls: string[];
   qrDataUrl: string | null;
   error: string | null;
+  tls: WebRemoteTlsState;
+  /** Extra hostnames accepted in the Host header (e.g. a reverse proxy). */
+  allowedHosts: string[];
+  devices: WebRemoteDevice[];
+  /** Most recent requests, newest first. Redacted — no query strings or bodies. */
+  activity: WebRemoteActivityEntry[];
+}
+
+export interface WebRemoteActivityEntry {
+  at: number;
+  method: string;
+  path: string;
+  /** IPC channel for `/api/invoke` calls, null otherwise. */
+  channel: string | null;
+  status: number;
+  outcome: 'ok' | 'denied' | 'error' | 'rate-limited';
+  identity: string;
+  remoteAddress: string;
+  durationMs: number;
 }
 
 export interface HotkeyConfig {
@@ -292,9 +364,17 @@ export interface IpcCommands {
   'web-remote:get-state': { args: []; result: WebRemoteState };
   'web-remote:set-enabled': { args: [enabled: boolean]; result: WebRemoteState };
   'web-remote:set-config': {
-    args: [config: { port?: number; bindAddresses?: string[] }];
+    args: [config: {
+      port?: number;
+      selections?: WebRemoteBindSelection[];
+      tlsMode?: WebRemoteTlsMode;
+      tlsCertPath?: string;
+      tlsKeyPath?: string;
+      allowedHosts?: string[];
+    }];
     result: WebRemoteState | { error: string };
   };
+  'web-remote:revoke-device': { args: [deviceId: string]; result: WebRemoteState };
   'web-remote:regenerate-token': { args: []; result: WebRemoteState };
   'web-remote:list-interfaces': { args: []; result: WebRemoteInterface[] };
 

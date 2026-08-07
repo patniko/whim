@@ -11,7 +11,7 @@
  */
 
 // ── Core API interfaces from preload ────────────────────────────────────────
-import type { WhimAPI, SubagentAPI } from '../main/preload';
+import type { WhimAPI, SubagentAPI } from '../shared/whim-api';
 
 export type { WhimAPI, SubagentAPI };
 

@@ -1,4 +1,5 @@
-import { ipcMain, shell, BrowserWindow } from 'electron';
+import { registerIpcHandler } from './registry';
+import { shell, BrowserWindow } from 'electron';
 import { isInitialized, getSpace, getSkill, assignSpaceFolder, updateCanvasContent } from '../database';
 import { getConfigValue } from '../config';
 import { initSpaceCanvas, ensureSpaceCanvas, readCanvas, scheduleAutoCommit, saveAttachment, resolveAttachmentPath, getMimeType, readSpaceFile, getSpaceHistory, restoreSpaceVersion, getSpaceVersionContent, resolveSpaceFolder, resolvePagePath, createPage, readPage, writePage, listPages } from '../workspace';
@@ -59,7 +60,7 @@ function closeSucceeded(result: CanvasWriteResult, workspace: string, editorId: 
 export function registerCanvasHandlers(): void {
   // Lightweight probe: does this space have a non-empty canvas.md on disk?
   // No side effects (does not create folders, does not start watchers).
-  ipcMain.handle('canvas:has-content', (_event, spaceId: string) => {
+  registerIpcHandler('canvas:has-content', (_event, spaceId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { hasContent: false };
 
@@ -94,7 +95,7 @@ export function registerCanvasHandlers(): void {
     }
   });
 
-  ipcMain.handle('canvas:read', (_event, spaceId: string) => {
+  registerIpcHandler('canvas:read', (_event, spaceId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { content: '', error: 'no_workspace' };
 
@@ -167,7 +168,7 @@ export function registerCanvasHandlers(): void {
     return { content };
   });
 
-  ipcMain.handle('canvas:write', (_event, spaceId: string, content: string) => {
+  registerIpcHandler('canvas:write', (_event, spaceId: string, content: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
 
@@ -231,7 +232,7 @@ export function registerCanvasHandlers(): void {
   });
 
   // Save canvas + trigger a commit (called when leaving the canvas)
-  ipcMain.handle('canvas:close', (_event, spaceId: string, content: string) => {
+  registerIpcHandler('canvas:close', (_event, spaceId: string, content: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
 
@@ -278,7 +279,7 @@ export function registerCanvasHandlers(): void {
   });
 
   // ── Canvas file paste ─────────────────────────────────
-  ipcMain.handle('canvas:paste-file', (_event, spaceId: string, filename: string, dataArray: number[]) => {
+  registerIpcHandler('canvas:paste-file', (_event, spaceId: string, filename: string, dataArray: number[]) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -297,7 +298,7 @@ export function registerCanvasHandlers(): void {
   });
 
   // ── Attachment file serving ───────────────────────────
-  ipcMain.handle('canvas:resolve-attachment', (_event, spaceId: string, relativePath: string) => {
+  registerIpcHandler('canvas:resolve-attachment', (_event, spaceId: string, relativePath: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -312,7 +313,7 @@ export function registerCanvasHandlers(): void {
   });
 
   // ── Read file from space folder (for canvas storage) ──
-  ipcMain.handle('canvas:read-file', (_event, spaceId: string, relativePath: string) => {
+  registerIpcHandler('canvas:read-file', (_event, spaceId: string, relativePath: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -327,7 +328,7 @@ export function registerCanvasHandlers(): void {
   });
 
   // ── Open space folder in OS file manager ─────────────
-  ipcMain.handle('canvas:open-folder', (_event, spaceId: string) => {
+  registerIpcHandler('canvas:open-folder', (_event, spaceId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return;
 
@@ -338,12 +339,12 @@ export function registerCanvasHandlers(): void {
   });
 
   // ── Link preview ──────────────────────────────────────
-  ipcMain.handle('canvas:fetch-link-meta', async (_event, url: string) => {
+  registerIpcHandler('canvas:fetch-link-meta', async (_event, url: string) => {
     return fetchLinkPreview(url);
   });
 
   // ── Canvas history ──────────────────────────────────────
-  ipcMain.handle('canvas:history', async (_event, spaceId: string) => {
+  registerIpcHandler('canvas:history', async (_event, spaceId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { commits: [], error: 'no_workspace' };
 
@@ -354,7 +355,7 @@ export function registerCanvasHandlers(): void {
     return { commits };
   });
 
-  ipcMain.handle('canvas:restore', async (_event, spaceId: string, sha: string) => {
+  registerIpcHandler('canvas:restore', async (_event, spaceId: string, sha: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
 
@@ -376,7 +377,7 @@ export function registerCanvasHandlers(): void {
     return result;
   });
 
-  ipcMain.handle('canvas:preview-version', async (_event, spaceId: string, sha: string) => {
+  registerIpcHandler('canvas:preview-version', async (_event, spaceId: string, sha: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { content: '', error: 'no_workspace' };
 
@@ -386,7 +387,7 @@ export function registerCanvasHandlers(): void {
     return getSpaceVersionContent(workspace, space.folder, sha);
   });
 
-  ipcMain.handle('canvas:read-activity-log', async (_event, spaceId: string) => {
+  registerIpcHandler('canvas:read-activity-log', async (_event, spaceId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { events: [], error: 'no_workspace' };
 
@@ -398,7 +399,7 @@ export function registerCanvasHandlers(): void {
   });
 
   // ── Child pages ──────────────────────────────────────────
-  ipcMain.handle('canvas:create-page', (_event, spaceId: string, pageName: string) => {
+  registerIpcHandler('canvas:create-page', (_event, spaceId: string, pageName: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { success: false, page: '', error: 'no_workspace' };
 
@@ -418,7 +419,7 @@ export function registerCanvasHandlers(): void {
     return { success: true, page: result.page };
   });
 
-  ipcMain.handle('canvas:read-page', (_event, spaceId: string, pageName: string) => {
+  registerIpcHandler('canvas:read-page', (_event, spaceId: string, pageName: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { content: '', error: 'no_workspace' };
 
@@ -442,7 +443,7 @@ export function registerCanvasHandlers(): void {
     return { content: result.content };
   });
 
-  ipcMain.handle('canvas:write-page', (_event, spaceId: string, pageName: string, content: string) => {
+  registerIpcHandler('canvas:write-page', (_event, spaceId: string, pageName: string, content: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
 
@@ -464,7 +465,7 @@ export function registerCanvasHandlers(): void {
     });
   });
 
-  ipcMain.handle('canvas:close-page', (_event, spaceId: string, pageName: string, content: string) => {
+  registerIpcHandler('canvas:close-page', (_event, spaceId: string, pageName: string, content: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
 
@@ -487,7 +488,7 @@ export function registerCanvasHandlers(): void {
     return closeSucceeded(result, workspace, editorId);
   });
 
-  ipcMain.handle('canvas:list-pages', (_event, spaceId: string) => {
+  registerIpcHandler('canvas:list-pages', (_event, spaceId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { pages: [], error: 'no_workspace' };
 
@@ -506,7 +507,7 @@ export function registerCanvasHandlers(): void {
   // ── Open link from canvas ─────────────────────────────────
   // Resolves file paths relative to the current canvas context and opens
   // .md files under workspace in a new canvas window, or opens externally.
-  ipcMain.handle('canvas:open-link', (_event, spaceId: string, url: string) => {
+  registerIpcHandler('canvas:open-link', (_event, spaceId: string, url: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace) return { action: 'none' as const, error: 'no_workspace' };
 
@@ -559,7 +560,7 @@ export function registerCanvasHandlers(): void {
   // Returns the current state of every agent bound to a comment thread in this
   // space so the renderer can restore presence cursors, thread status, and
   // pending interactions after navigation, a pop-out, or an app restart.
-  ipcMain.handle('canvas:get-agent-state', async (_event, spaceId: string) => {
+  registerIpcHandler('canvas:get-agent-state', async (_event, spaceId: string) => {
     const { getCanvasAgentState } = await import('../agent-service');
     return getCanvasAgentState(spaceId);
   });

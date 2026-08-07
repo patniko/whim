@@ -1,14 +1,29 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { randomBytes } from 'crypto';
 import { app } from 'electron';
 import { DEFAULT_SANDBOX_POLICY, type SandboxPolicy } from '../shared/ipc-contract';
 import type { ExportFormat, ExportDestination } from '../shared/types';
+import {
+  classifyInterfaceScope,
+  defaultBindSelections,
+  listWebRemoteInterfaces,
+  migrateBindAddresses,
+  normalizeBindSelections,
+} from './web/interfaces';
+import type {
+  WebRemoteBindSelection,
+  WebRemoteInterface,
+  WebRemoteTlsMode,
+} from '../shared/ipc-contract';
+import type { WebRemoteDeviceRecord } from './web/sessions';
+import type { WebRemoteLockoutRecord } from './web/auth';
 
 export type { SandboxPolicy };
 export type { ExportFormat, ExportDestination };
+export type { WebRemoteBindSelection, WebRemoteInterface };
 export { DEFAULT_SANDBOX_POLICY };
+export { classifyInterfaceScope, defaultBindSelections, listWebRemoteInterfaces, normalizeBindSelections };
 
 export type SnapPosition = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'left-center' | 'right-center';
 
@@ -60,15 +75,6 @@ export interface CustomMcpServer {
   args?: string[];
   url?: string;
   tools: string[];
-}
-
-export interface WebRemoteInterface {
-  name: string;
-  address: string;
-  family: 'IPv4' | 'IPv6';
-  internal: boolean;
-  tailscale: boolean;
-  label: string;
 }
 
 export interface HotkeyConfig {
@@ -151,10 +157,16 @@ export interface AppConfig {
   autoDownloadUpdates: boolean;     // auto-download updates in the background (vs. notify only)
   remoteEnabled: boolean;           // app-level remote: enable Mission Control on all workspace-level agents
   remoteAutoEnable: boolean;        // auto-enable remote on every new worker session
-  webRemoteEnabled: boolean;        // local/Tailscale web UI served by this running app
+  webRemoteEnabled: boolean;        // web UI served by this running app
   webRemotePort: number;
   webRemoteToken: string;
-  webRemoteBindAddresses: string[];
+  webRemoteBindSelections: WebRemoteBindSelection[];  // durable intent, resolved to addresses at bind time
+  webRemoteTlsMode: WebRemoteTlsMode;   // 'auto' = self-signed on non-loopback binds
+  webRemoteTlsCertPath: string;         // used when webRemoteTlsMode is 'custom'
+  webRemoteTlsKeyPath: string;
+  webRemoteAllowedHosts: string[];      // extra Host header values (e.g. a reverse proxy hostname)
+  webRemoteDevices: WebRemoteDeviceRecord[];  // browsers holding a session cookie, individually revocable
+  webRemoteLockouts: WebRemoteLockoutRecord[]; // auth lockouts, persisted so a restart doesn't clear them
   hotkeys: Partial<HotkeyConfig>;   // user hotkey overrides (missing keys fall back to DEFAULT_HOTKEYS)
   quickStartCompleted: boolean;     // true once the hotkey/tray quick-start tour has been finished or skipped
   onboardingTipsSeen: boolean;      // true once the shortcuts coach overlay has been dismissed
@@ -340,7 +352,13 @@ const DEFAULT_CONFIG: AppConfig = {
   webRemoteEnabled: false,
   webRemotePort: DEFAULT_WEB_REMOTE_PORT,
   webRemoteToken: '',
-  webRemoteBindAddresses: [],
+  webRemoteBindSelections: [],
+  webRemoteTlsMode: 'auto',
+  webRemoteTlsCertPath: '',
+  webRemoteTlsKeyPath: '',
+  webRemoteAllowedHosts: [],
+  webRemoteDevices: [],
+  webRemoteLockouts: [],
   hotkeys: {},
   quickStartCompleted: false,
   onboardingTipsSeen: false,
@@ -356,76 +374,12 @@ export function generateWebRemoteToken(): string {
   return randomBytes(18).toString('base64url');
 }
 
-export function isTailscaleAddress(address: string): boolean {
-  const parts = address.split('.').map((part) => Number(part));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-    return address.toLowerCase().startsWith('fd7a:115c:a1e0:');
-  }
-  return parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
-}
-
-export function listWebRemoteInterfaces(): WebRemoteInterface[] {
-  const interfaces = os.networkInterfaces();
-  const results: WebRemoteInterface[] = [];
-
-  for (const [name, entries] of Object.entries(interfaces)) {
-    for (const entry of entries || []) {
-      const family = entry.family;
-      if (family !== 'IPv4' && family !== 'IPv6') continue;
-
-      const tailscale = isTailscaleAddress(entry.address);
-      const tags = [
-        entry.internal ? 'Loopback' : null,
-        tailscale ? 'Tailscale' : null,
-      ].filter(Boolean).join(', ');
-
-      results.push({
-        name,
-        address: entry.address,
-        family,
-        internal: entry.internal,
-        tailscale,
-        label: `${name} (${entry.address}${tags ? `, ${tags}` : ''})`,
-      });
-    }
-  }
-
-  return results.sort((a, b) => {
-    if (a.tailscale !== b.tailscale) return a.tailscale ? -1 : 1;
-    if (a.internal !== b.internal) return a.internal ? -1 : 1;
-    return a.name.localeCompare(b.name) || a.address.localeCompare(b.address);
-  });
-}
-
-export function defaultWebRemoteBindAddresses(): string[] {
-  const interfaces = listWebRemoteInterfaces();
-  const defaults = new Set<string>();
-  for (const iface of interfaces) {
-    if (iface.family === 'IPv4' && (iface.internal || iface.tailscale)) {
-      defaults.add(iface.address);
-    }
-  }
-  if (defaults.size === 0) defaults.add('127.0.0.1');
-  return [...defaults];
-}
-
 export function normalizeWebRemotePort(value: unknown): number {
   const parsed = typeof value === 'number' ? value : Number(value);
   if (!Number.isInteger(parsed) || parsed < 1024 || parsed > 65535) {
     return DEFAULT_WEB_REMOTE_PORT;
   }
   return parsed;
-}
-
-export function normalizeWebRemoteBindAddresses(value: unknown): string[] {
-  if (!Array.isArray(value)) return defaultWebRemoteBindAddresses();
-  const available = new Set(listWebRemoteInterfaces().map((iface) => iface.address));
-  const normalized = value
-    .filter((address): address is string => typeof address === 'string')
-    .map((address) => address.trim())
-    .filter((address) => address && (available.has(address) || address === '127.0.0.1' || address === '::1'));
-  const unique = [...new Set(normalized)].slice(0, 16);
-  return unique.length > 0 ? unique : defaultWebRemoteBindAddresses();
 }
 
 export function ensureWebRemoteToken(): string {
@@ -472,13 +426,23 @@ export function loadConfig(): AppConfig {
       if (parsed.cliSource === undefined) {
         config.cliSource = parsed.cliPath ? 'path' : 'bundled';
       }
+      // Web remote: migrate the legacy address-list binding config to durable
+      // interface selections. Runs only once — afterwards `webRemoteBindSelections`
+      // is authoritative and the old field is dropped.
+      if (parsed.webRemoteBindSelections === undefined && Array.isArray(parsed.webRemoteBindAddresses)) {
+        config.webRemoteBindSelections = migrateBindAddresses(parsed.webRemoteBindAddresses);
+      }
+      delete (config as unknown as Record<string, unknown>).webRemoteBindAddresses;
     }
   } catch (err) {
     console.error('[config] Failed to load config:', err);
     config = { ...DEFAULT_CONFIG };
   }
   config.webRemotePort = normalizeWebRemotePort(config.webRemotePort);
-  config.webRemoteBindAddresses = normalizeWebRemoteBindAddresses(config.webRemoteBindAddresses);
+  // Validate shape only. An interface that is currently down is *pending*, not
+  // invalid — never rewrite the user's saved intent just because the network
+  // happens to look different right now.
+  config.webRemoteBindSelections = normalizeBindSelections(config.webRemoteBindSelections);
   ensureWebRemoteToken();
   migrateProfiles(preserveInactiveProfileState);
   return config;

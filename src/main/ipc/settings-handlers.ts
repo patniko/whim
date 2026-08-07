@@ -1,40 +1,27 @@
-import { ipcMain, globalShortcut } from 'electron';
+import { registerIpcHandler } from './registry';
+import { globalShortcut } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { setAIModel, listAvailableModels, listModelsDetailed, scheduleCopilotReinit, previewSandboxConfig, getRuntimeStatus, testRuntimeConnection } from '../ai';
 import { resolveCopilotCliPath, invalidateCliPath, checkCliCompatibility, resolveCommandOnPath, resolveCmdToJs, isCliMxcCapable, discoverCopilotClis } from '../session';
-import { getConfigValue, setConfigValue, getConfig, getResolvedHotkeys, DEFAULT_PERSONAS, DEFAULT_HOTKEYS, HOTKEY_LABELS, rotateWebRemoteToken, normalizeWebRemotePort, normalizeWebRemoteBindAddresses, listWebRemoteInterfaces, type AgentPersona, type CliRuntime, type CliSource, type HotkeyConfig } from '../config';
+// `normalizeWebRemoteBindAddresses` and `listWebRemoteInterfaces` no longer
+// live in config: bind selections are durable intent resolved at bind time,
+// so both moved to ../web/interfaces (imported below).
+import { getConfigValue, setConfigValue, getConfig, getResolvedHotkeys, DEFAULT_PERSONAS, DEFAULT_HOTKEYS, HOTKEY_LABELS, rotateWebRemoteToken, normalizeWebRemotePort, type AgentPersona, type CliRuntime, type CliSource, type HotkeyConfig } from '../config';
 import { listDiscoveredMcpServers } from '../mcp';
 import { validateMcpServers, validateCliTools, validateSandboxPolicy } from '../validators';
 import { onAutoHideSidePaneChanged, broadcastHotkeysChanged } from '../window-manager';
 import { setAutoDownload } from '../update-service';
-import { getWebRemoteState, restartWebRemoteServer, syncWebRemoteServer } from '../web/server';
+import { getWebRemoteState, restartWebRemoteServer, sessionStore, syncWebRemoteServer } from '../web/server';
+import { listWebRemoteInterfaces, normalizeBindSelections } from '../web/interfaces';
+import { readSetting } from '../services/settings';
 
 const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 export function registerSettingsHandlers(): void {
-  ipcMain.handle('settings:get', (_event, key: string) => {
-    const configKeyMap: Record<string, keyof ReturnType<typeof getConfig>> = {
-      workspace_root: 'workspace',
-      theme: 'theme',
-      model: 'model',
-      cli_path: 'cliPath',
-      cli_source: 'cliSource',
-      cli_server_url: 'cliServerUrl',
-      cli_server_token: 'cliServerToken',
-      auto_hide_side_pane: 'autoHideSidePane',
-      auto_download_updates: 'autoDownloadUpdates',
-      remoteAutoEnable: 'remoteAutoEnable',
-      comment_trigger: 'commentTrigger',
-      quick_start_completed: 'quickStartCompleted',
-      onboarding_tips_seen: 'onboardingTipsSeen',
-    };
-    const configKey = configKeyMap[key];
-    if (configKey) return getConfigValue(configKey);
-    return null;
-  });
+  registerIpcHandler('settings:get', (_event, key: string) => readSetting(key));
 
-  ipcMain.handle('settings:set', async (_event, key: string, value: string) => {
+  registerIpcHandler('settings:set', async (_event, key: string, value: string) => {
     if (key === 'theme') {
       setConfigValue('theme', value as 'light' | 'dark' | 'system');
     } else if (key === 'model') {
@@ -90,21 +77,28 @@ export function registerSettingsHandlers(): void {
     }
   });
 
-  ipcMain.handle('web-remote:get-state', async () => {
+  registerIpcHandler('web-remote:get-state', async () => {
     return getWebRemoteState();
   });
 
-  ipcMain.handle('web-remote:set-enabled', async (_event, enabled: boolean) => {
+  registerIpcHandler('web-remote:set-enabled', async (_event, enabled: boolean) => {
     setConfigValue('webRemoteEnabled', enabled === true);
     return syncWebRemoteServer();
   });
 
-  ipcMain.handle('web-remote:set-config', async (_event, next: unknown) => {
+  registerIpcHandler('web-remote:set-config', async (_event, next: unknown) => {
     if (!next || typeof next !== 'object' || Array.isArray(next)) {
       return { error: 'invalid payload' };
     }
 
-    const raw = next as { port?: unknown; bindAddresses?: unknown };
+    const raw = next as {
+      port?: unknown;
+      selections?: unknown;
+      tlsMode?: unknown;
+      tlsCertPath?: unknown;
+      tlsKeyPath?: unknown;
+      allowedHosts?: unknown;
+    };
     if (raw.port !== undefined) {
       const port = normalizeWebRemotePort(raw.port);
       if (port !== Number(raw.port)) {
@@ -113,60 +107,99 @@ export function registerSettingsHandlers(): void {
       setConfigValue('webRemotePort', port);
     }
 
-    if (raw.bindAddresses !== undefined) {
-      const bindAddresses = normalizeWebRemoteBindAddresses(raw.bindAddresses);
-      if (bindAddresses.length === 0) {
+    if (raw.selections !== undefined) {
+      if (!Array.isArray(raw.selections) || raw.selections.length === 0) {
         return { error: 'Select at least one network interface.' };
       }
-      setConfigValue('webRemoteBindAddresses', bindAddresses);
+      // Shape validation only — a selected interface that happens to be down
+      // right now is still a valid choice and must be preserved.
+      setConfigValue('webRemoteBindSelections', normalizeBindSelections(raw.selections));
+    }
+
+    if (raw.tlsMode !== undefined) {
+      if (raw.tlsMode !== 'auto' && raw.tlsMode !== 'off' && raw.tlsMode !== 'custom') {
+        return { error: 'Invalid TLS mode.' };
+      }
+      if (raw.tlsMode === 'custom' && !(raw.tlsCertPath && raw.tlsKeyPath)) {
+        return { error: 'A certificate and key path are required for a custom certificate.' };
+      }
+      setConfigValue('webRemoteTlsMode', raw.tlsMode);
+    }
+
+    if (raw.tlsCertPath !== undefined) {
+      setConfigValue('webRemoteTlsCertPath', String(raw.tlsCertPath ?? ''));
+    }
+    if (raw.tlsKeyPath !== undefined) {
+      setConfigValue('webRemoteTlsKeyPath', String(raw.tlsKeyPath ?? ''));
+    }
+
+    if (raw.allowedHosts !== undefined) {
+      if (!Array.isArray(raw.allowedHosts)) {
+        return { error: 'Allowed hosts must be a list.' };
+      }
+      const hosts = raw.allowedHosts
+        .map(host => String(host).trim().toLowerCase())
+        .filter(host => host.length > 0 && !/[/\s]/.test(host));
+      if (hosts.length !== raw.allowedHosts.filter(host => String(host).trim()).length) {
+        return { error: 'Allowed hosts must be bare hostnames, without a scheme or path.' };
+      }
+      setConfigValue('webRemoteAllowedHosts', [...new Set(hosts)]);
     }
 
     return restartWebRemoteServer();
   });
 
-  ipcMain.handle('web-remote:regenerate-token', async () => {
+  registerIpcHandler('web-remote:regenerate-token', async () => {
     rotateWebRemoteToken();
+    // Rotating the bootstrap token must also drop every paired device,
+    // otherwise "regenerate" would leave existing browsers logged in.
+    sessionStore.revokeAll();
     return restartWebRemoteServer();
   });
 
-  ipcMain.handle('web-remote:list-interfaces', () => {
+  registerIpcHandler('web-remote:revoke-device', async (_event, deviceId: unknown) => {
+    if (typeof deviceId === 'string') sessionStore.revoke(deviceId);
+    return getWebRemoteState();
+  });
+
+  registerIpcHandler('web-remote:list-interfaces', () => {
     return listWebRemoteInterfaces();
   });
 
-  ipcMain.handle('cli:resolve-path', () => {
+  registerIpcHandler('cli:resolve-path', () => {
     return resolveCopilotCliPath();
   });
 
-  ipcMain.handle('cli:check-version', () => {
+  registerIpcHandler('cli:check-version', () => {
     return checkCliCompatibility();
   });
 
-  ipcMain.handle('cli:check-mxc-capable', () => {
+  registerIpcHandler('cli:check-mxc-capable', () => {
     return { mxcCapable: isCliMxcCapable() };
   });
 
-  ipcMain.handle('cli:runtime-status', () => {
+  registerIpcHandler('cli:runtime-status', () => {
     return getRuntimeStatus();
   });
 
-  ipcMain.handle('cli:test-connection', async () => {
+  registerIpcHandler('cli:test-connection', async () => {
     return testRuntimeConnection();
   });
 
-  ipcMain.handle('cli:discover', async () => {
+  registerIpcHandler('cli:discover', async () => {
     return discoverCopilotClis();
   });
 
-  ipcMain.handle('models:list', async () => {
+  registerIpcHandler('models:list', async () => {
     return listAvailableModels();
   });
 
-  ipcMain.handle('models:list-detailed', async () => {
+  registerIpcHandler('models:list-detailed', async () => {
     return listModelsDetailed();
   });
 
   // Agent Personas
-  ipcMain.handle('personas:list', () => {
+  registerIpcHandler('personas:list', () => {
     let personas = (getConfigValue('personas') || []) as AgentPersona[];
     const seeded = getConfigValue('personasSeeded');
     const migratedV2 = getConfigValue('personasMigratedV2');
@@ -247,7 +280,7 @@ export function registerSettingsHandlers(): void {
     return personas;
   });
 
-  ipcMain.handle('personas:save', (_event, personas: unknown) => {
+  registerIpcHandler('personas:save', (_event, personas: unknown) => {
     if (!Array.isArray(personas)) return { error: 'invalid payload' };
 
     const seen = new Set<string>();
@@ -309,11 +342,11 @@ export function registerSettingsHandlers(): void {
   });
 
   // ── CLI Runtimes ─────────────────────────────────────────
-  ipcMain.handle('runtimes:list', () => {
+  registerIpcHandler('runtimes:list', () => {
     return getConfigValue('cliRuntimes') || [];
   });
 
-  ipcMain.handle('runtimes:save', (_event, runtimes: unknown) => {
+  registerIpcHandler('runtimes:save', (_event, runtimes: unknown) => {
     if (!Array.isArray(runtimes)) return { error: 'invalid payload' };
 
     const seen = new Set<string>();
@@ -346,15 +379,15 @@ export function registerSettingsHandlers(): void {
   });
 
   // ── MCP Servers ──────────────────────────────────────────
-  ipcMain.handle('mcp:list-discovered', () => {
+  registerIpcHandler('mcp:list-discovered', () => {
     return listDiscoveredMcpServers();
   });
 
-  ipcMain.handle('mcp:list-custom', () => {
+  registerIpcHandler('mcp:list-custom', () => {
     return getConfigValue('mcpServers') || [];
   });
 
-  ipcMain.handle('mcp:save-custom', (_event, servers: unknown) => {
+  registerIpcHandler('mcp:save-custom', (_event, servers: unknown) => {
     const result = validateMcpServers(servers);
     if ('error' in result) return result;
     setConfigValue('mcpServers', result);
@@ -362,11 +395,11 @@ export function registerSettingsHandlers(): void {
   });
 
   // ── CLI Tool Definitions ─────────────────────────────────
-  ipcMain.handle('cli-tools:list', () => {
+  registerIpcHandler('cli-tools:list', () => {
     return getConfigValue('cliTools') || [];
   });
 
-  ipcMain.handle('cli-tools:save', (_event, tools: unknown) => {
+  registerIpcHandler('cli-tools:save', (_event, tools: unknown) => {
     const result = validateCliTools(tools);
     if ('error' in result) return result;
     setConfigValue('cliTools', result);
@@ -374,11 +407,11 @@ export function registerSettingsHandlers(): void {
   });
 
   // ── Sandbox default policy ───────────────────────────────
-  ipcMain.handle('sandbox:get-default', () => {
+  registerIpcHandler('sandbox:get-default', () => {
     return getConfigValue('sandboxDefaultPolicy');
   });
 
-  ipcMain.handle('sandbox:save-default', (_event, policy: unknown) => {
+  registerIpcHandler('sandbox:save-default', (_event, policy: unknown) => {
     const validated = validateSandboxPolicy(policy);
     if (!validated) return { error: 'invalid payload' };
     setConfigValue('sandboxDefaultPolicy', validated);
@@ -389,7 +422,7 @@ export function registerSettingsHandlers(): void {
   // does at agent launch, writes it to a stable preview file under userData,
   // and opens it in the OS default editor via shell.openPath. Lets the user
   // see exactly what their policy translates into without spawning an agent.
-  ipcMain.handle('sandbox:open-config-preview', async (_event, policy: unknown) => {
+  registerIpcHandler('sandbox:open-config-preview', async (_event, policy: unknown) => {
     const validated = validateSandboxPolicy(policy);
     if (!validated) return { error: 'invalid payload' };
     try {
@@ -410,20 +443,20 @@ export function registerSettingsHandlers(): void {
   });
 
   // ── Hotkeys ─────────────────────────────────────────────
-  ipcMain.handle('hotkeys:get', () => {
+  registerIpcHandler('hotkeys:get', () => {
     return getResolvedHotkeys();
   });
 
   // Whether the OS actually accepted the global toggle shortcut. The quick-start
   // tour asks the user to press it, so it needs to warn up front (and offer a
   // rebind) when another app is already holding the combo.
-  ipcMain.handle('hotkeys:toggle-status', () => {
+  registerIpcHandler('hotkeys:toggle-status', () => {
     const accelerator = getResolvedHotkeys().toggleWindow;
     const { isToggleShortcutRegistered } = require('../main');
     return { accelerator, registered: isToggleShortcutRegistered() as boolean };
   });
 
-  ipcMain.handle('hotkeys:set', (_event, key: string, accelerator: string) => {
+  registerIpcHandler('hotkeys:set', (_event, key: string, accelerator: string) => {
     if (!(key in DEFAULT_HOTKEYS)) {
       return { error: `Unknown hotkey: ${key}` };
     }
@@ -479,7 +512,7 @@ export function registerSettingsHandlers(): void {
     return { ok: true as const };
   });
 
-  ipcMain.handle('hotkeys:reset', (_event, key?: string) => {
+  registerIpcHandler('hotkeys:reset', (_event, key?: string) => {
     if (key && !(key in DEFAULT_HOTKEYS)) {
       return { error: `Unknown hotkey: ${key}` };
     }

@@ -378,6 +378,31 @@ describe('resolveAttachmentPath', () => {
     const result = resolveAttachmentPath(tmpDir, folder, 'attachments/nonexistent.txt');
     expect(result).toBeNull();
   });
+
+  /**
+   * Containment was a bare `startsWith`, so a sibling whose name merely
+   * *begins* with the space folder's name looked like it was inside it. These
+   * helpers back channels the web remote can now reach, so the escape is
+   * reachable over the network rather than only by local code.
+   */
+  it('returns null for a sibling folder sharing the space name as a prefix', () => {
+    const sibling = path.join(tmpDir, `${folder}-private`);
+    fs.mkdirSync(sibling, { recursive: true });
+    fs.writeFileSync(path.join(sibling, 'secret.txt'), 'classified');
+
+    const result = resolveAttachmentPath(tmpDir, folder, `../${folder}-private/secret.txt`);
+    expect(result).toBeNull();
+  });
+
+  it('returns null for a symlink pointing out of the space', () => {
+    const outside = path.join(tmpDir, 'outside');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'secret.txt'), 'classified');
+    fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(tmpDir, folder, 'attachments', 'link.txt'));
+
+    const result = resolveAttachmentPath(tmpDir, folder, 'attachments/link.txt');
+    expect(result).toBeNull();
+  });
 });
 
 // ── getMimeType ─────────────────────────────────────────

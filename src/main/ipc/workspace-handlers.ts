@@ -1,4 +1,5 @@
-import { ipcMain, BrowserWindow, shell } from 'electron';
+import { registerIpcHandler } from './registry';
+import { BrowserWindow, shell } from 'electron';
 import * as fs from 'fs';
 import { isInitialized, closeDatabase } from '../database';
 import { launchSession, getActiveSessionIntentIds } from '../session';
@@ -197,7 +198,7 @@ async function pickDirectory(event: Electron.IpcMainInvokeEvent): Promise<string
 
 export function registerWorkspaceHandlers(): void {
   // Workspace directory picker — adds/activates a profile + initializes DB
-  ipcMain.handle('workspace:select', async (event) => {
+  registerIpcHandler('workspace:select', async (event) => {
     const dir = await pickDirectory(event);
     if (!dir) {
       return { selected: false, path: null };
@@ -214,18 +215,18 @@ export function registerWorkspaceHandlers(): void {
   });
 
   // Open a folder in the system file manager
-  ipcMain.handle('shell:openPath', (_event, folderPath: string) => {
+  registerIpcHandler('shell:openPath', (_event, folderPath: string) => {
     return shell.openPath(folderPath);
   });
 
   // Open a URL in the user's default browser
-  ipcMain.handle('shell:openExternal', async (_event, url: string) => {
+  registerIpcHandler('shell:openExternal', async (_event, url: string) => {
     await shell.openExternal(url);
     return { ok: true };
   });
 
   // Session launch
-  ipcMain.handle('session:launch', async (_event, spaceId: string) => {
+  registerIpcHandler('session:launch', async (_event, spaceId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !fs.existsSync(workspace)) {
       return { success: false, error: 'no_workspace' };
@@ -237,18 +238,18 @@ export function registerWorkspaceHandlers(): void {
   });
 
   // Query which intents have active running terminal processes
-  ipcMain.handle('session:active-spaces', () => {
+  registerIpcHandler('session:active-spaces', () => {
     return getActiveSessionIntentIds();
   });
 
-  ipcMain.handle('voice:transcribe', async (_event, audioData: number[]) => {
+  registerIpcHandler('voice:transcribe', async (_event, audioData: number[]) => {
     const float32 = new Float32Array(audioData);
     return transcribeAudio(float32);
   });
 
   // Clear workspace — returns app to a persistent fresh-start state while
   // keeping saved profiles available for later activation.
-  ipcMain.handle('workspace:clear', async () => {
+  registerIpcHandler('workspace:clear', async () => {
     enterFreshStartWorkspaceState();
     await broadcastProfilesChanged();
 
@@ -257,12 +258,12 @@ export function registerWorkspaceHandlers(): void {
 
   // ── Workspace profile handlers ─────────────────────────
 
-  ipcMain.handle('profiles:list', async () => {
+  registerIpcHandler('profiles:list', async () => {
     return buildProfilesState();
   });
 
   // Pick a directory, add it as a profile, and switch to it.
-  ipcMain.handle('profiles:add', async (event) => {
+  registerIpcHandler('profiles:add', async (event) => {
     const dir = await pickDirectory(event);
     if (!dir) return { added: false, profileId: null };
 
@@ -274,7 +275,7 @@ export function registerWorkspaceHandlers(): void {
   });
 
   // Switch to an existing profile by id.
-  ipcMain.handle('profiles:activate', async (_event, id: string) => {
+  registerIpcHandler('profiles:activate', async (_event, id: string) => {
     const profile = getProfileById(id);
     if (!profile) return { ok: false, error: 'not_found' };
     if (!fs.existsSync(profile.path)) return { ok: false, error: 'missing_path' };
@@ -287,7 +288,7 @@ export function registerWorkspaceHandlers(): void {
   });
 
   // Cycle to the next profile in order (used by the logo + hotkey).
-  ipcMain.handle('profiles:cycle', async () => {
+  registerIpcHandler('profiles:cycle', async () => {
     const next = getNextProfile();
     if (!next) return { ok: false };
     if (!fs.existsSync(next.path)) return { ok: false };
@@ -299,7 +300,7 @@ export function registerWorkspaceHandlers(): void {
   });
 
   // Update a profile's name override and/or tint color.
-  ipcMain.handle('profiles:update', async (_event, id: string, patch: { name?: string | null; tint?: string | null }) => {
+  registerIpcHandler('profiles:update', async (_event, id: string, patch: { name?: string | null; tint?: string | null }) => {
     const updated = updateProfile(id, patch || {});
     if (!updated) return { ok: false };
     if ('name' in (patch || {})) invalidateProfileNameCache(updated.path);
@@ -308,7 +309,7 @@ export function registerWorkspaceHandlers(): void {
   });
 
   // Remove a profile. If it was active, switch to another or go fresh-start.
-  ipcMain.handle('profiles:remove', async (_event, id: string) => {
+  registerIpcHandler('profiles:remove', async (_event, id: string) => {
     const wasActive = getActiveProfileId() === id;
     removeProfileById(id);
 
@@ -329,13 +330,13 @@ export function registerWorkspaceHandlers(): void {
 
   // ── Git sync handlers ──────────────────────────────────
 
-  ipcMain.handle('workspace:git-status', async () => {
+  registerIpcHandler('workspace:git-status', async () => {
     const workspace = getConfigValue('workspace');
     if (!workspace) return { available: false, branch: null, ahead: 0, behind: 0, unavailableReason: 'not-a-repo' as const };
     return getGitSyncStatus(workspace);
   });
 
-  ipcMain.handle('workspace:git-push', async () => {
+  registerIpcHandler('workspace:git-push', async () => {
     const workspace = getConfigValue('workspace');
     if (!workspace) return { error: 'No workspace selected' };
     const result = await gitPush(workspace);
@@ -344,7 +345,7 @@ export function registerWorkspaceHandlers(): void {
     return result;
   });
 
-  ipcMain.handle('workspace:git-pull', async () => {
+  registerIpcHandler('workspace:git-pull', async () => {
     const workspace = getConfigValue('workspace');
     if (!workspace) return { error: 'No workspace selected' };
     const result = await gitPull(workspace);

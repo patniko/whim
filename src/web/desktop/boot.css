@@ -1,0 +1,78 @@
+/*
+ * Styling for the pairing and failure screens only.
+ *
+ * Everything after boot is the desktop renderer's own stylesheet. This stays
+ * deliberately small and self-contained so it can render correctly before the
+ * app bundle — and the theme it sets up — has loaded.
+ */
+.web-boot {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #16181d;
+  color: #e6e6e6;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+
+.web-boot-card {
+  width: 100%;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: center;
+}
+
+.web-boot-card h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.web-boot-card p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #9aa0aa;
+}
+
+.web-boot-card input,
+.web-boot-card button {
+  /* 16px keeps iOS Safari from zooming the viewport on focus. */
+  font-size: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid #333842;
+  font-family: inherit;
+}
+
+.web-boot-card input {
+  background: #1e2128;
+  color: inherit;
+}
+
+.web-boot-card input:focus {
+  outline: none;
+  border-color: #4c8dff;
+}
+
+.web-boot-card button {
+  background: #4c8dff;
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.web-boot-card button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.web-boot-error {
+  color: #ff6b6b !important;
+}

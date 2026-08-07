@@ -5,12 +5,13 @@ import remarkGfm from 'remark-gfm';
 import type { AgentListAllItem, AgentPersona, GitSyncStatus, SpaceEvent } from '../shared/ipc-contract';
 import type { Space } from '../shared/types';
 import type { ChatEvent } from '../shared/chat-types';
-import { WebRemoteClient } from './lib/client';
+import { endSession, establishSession, hasSession, WebRemoteClient } from './lib/client';
 import type { WebRemoteEvent } from '../main/web/event-hub';
 import { agentGlyph, describeApproval, formatDueDate, humanizeToolName, statusLabel, timeAgo } from './lib/format';
+import { applyInteractionEvent, pruneInteractions, type InteractionMap, type PendingInteraction } from './lib/interactions';
+import { notificationState, notifyForEvent, registerServiceWorker, requestNotificationPermission, type NotificationPermissionState } from './lib/notifications';
 import { applyChatEvent, applyChatEvents, parseHistory, type Bubble } from './lib/transcript';
 
-const TOKEN_KEY = 'whim.webRemoteToken';
 
 type Tab = 'spaces' | 'workers' | 'history';
 
@@ -24,33 +25,97 @@ interface HistoryCommit {
 
 // ── Root + auth ────────────────────────────────────────────
 
+/**
+ * The token is a one-time bootstrap credential only. It is exchanged for an
+ * HttpOnly session cookie and then dropped from the URL, so it never lands in
+ * browser history, a `Referer` header, or localStorage.
+ */
 function App() {
-  const urlToken = new URLSearchParams(window.location.search).get('token');
-  const [token, setToken] = useState(() => urlToken || localStorage.getItem(TOKEN_KEY) || '');
+  const [authState, setAuthState] = useState<'checking' | 'authed' | 'unauthed'>('checking');
+  const [authError, setAuthError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (urlToken) {
-      localStorage.setItem(TOKEN_KEY, urlToken);
-      window.history.replaceState({}, '', window.location.pathname);
-    }
-  }, [urlToken]);
+    let cancelled = false;
+    const params = new URLSearchParams(window.location.search);
+    const urlToken = params.get('token');
 
-  if (!token) {
-    return <Login onLogin={(next) => { localStorage.setItem(TOKEN_KEY, next); setToken(next); }} />;
+    (async () => {
+      if (urlToken) {
+        window.history.replaceState({}, '', window.location.pathname);
+        try {
+          await establishSession(urlToken);
+          if (!cancelled) setAuthState('authed');
+          return;
+        } catch (err: any) {
+          if (!cancelled) setAuthError(err?.message || 'Sign-in failed.');
+        }
+      }
+      const ok = await hasSession();
+      if (!cancelled) setAuthState(ok ? 'authed' : 'unauthed');
+    })();
+
+    return () => { cancelled = true; };
+  }, []);
+
+  if (authState === 'checking') {
+    return <main className="login"><div className="brand">whim</div><p>Connecting…</p></main>;
   }
-  return <RemoteApp token={token} onLogout={() => { localStorage.removeItem(TOKEN_KEY); setToken(''); }} />;
+
+  if (authState === 'unauthed') {
+    return (
+      <Login
+        error={authError}
+        onLogin={async (token) => {
+          await establishSession(token);
+          setAuthError(null);
+          setAuthState('authed');
+        }}
+      />
+    );
+  }
+
+  return (
+    <RemoteApp
+      onLogout={async () => {
+        await endSession();
+        setAuthState('unauthed');
+      }}
+      onUnauthorized={() => {
+        setAuthError('Your session is no longer valid. Enter the token from Settings to reconnect.');
+        setAuthState('unauthed');
+      }}
+    />
+  );
 }
 
-function Login({ onLogin }: { onLogin: (token: string) => void }) {
+function Login({ onLogin, error }: { onLogin: (token: string) => Promise<void>; error: string | null }) {
   const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(error);
+
   return (
     <main className="login">
       <div className="brand">whim</div>
       <h1>Remote access</h1>
       <p>Enter the token from the desktop app's settings, or scan the QR code from your phone.</p>
-      <form onSubmit={(e) => { e.preventDefault(); if (value.trim()) onLogin(value.trim()); }}>
+      {failure && <p className="login-error">{failure}</p>}
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (!value.trim() || busy) return;
+          setBusy(true);
+          setFailure(null);
+          try {
+            await onLogin(value.trim());
+          } catch (err: any) {
+            setFailure(err?.message || 'Sign-in failed.');
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
         <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Token" autoFocus />
-        <button type="submit">Connect</button>
+        <button type="submit" disabled={busy}>{busy ? 'Connecting…' : 'Connect'}</button>
       </form>
     </main>
   );
@@ -58,14 +123,17 @@ function Login({ onLogin }: { onLogin: (token: string) => void }) {
 
 // ── Main app ───────────────────────────────────────────────
 
-function RemoteApp({ token, onLogout }: { token: string; onLogout: () => void }) {
-  const client = useMemo(() => new WebRemoteClient(token), [token]);
+function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnauthorized: () => void }) {
+  const client = useMemo(() => new WebRemoteClient(), []);
   const [tab, setTab] = useState<Tab>('spaces');
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [agents, setAgents] = useState<AgentListAllItem[]>([]);
   const [personas, setPersonas] = useState<AgentPersona[]>([]);
   const [events, setEvents] = useState<SpaceEvent[]>([]);
   const [git, setGit] = useState<GitSyncStatus | null>(null);
+  // Questions an agent is blocked on that aren't carried by `agent:list-all`.
+  const [interactions, setInteractions] = useState<InteractionMap>({});
+  const [notifications, setNotifications] = useState<NotificationPermissionState>(() => notificationState());
   const [status, setStatus] = useState('connecting');
   const [error, setError] = useState<string | null>(null);
 
@@ -91,6 +159,7 @@ function RemoteApp({ token, onLogout }: { token: string; onLogout: () => void })
         client.invoke('personas:list'),
       ]);
       setSpaces(sp); setAgents(ag); setPersonas(pe);
+      setInteractions((prev) => pruneInteractions(prev, new Set(ag.map((a) => a.agentId))));
       void refreshEvents();
       void refreshGit();
     } catch (err: any) {
@@ -100,9 +169,26 @@ function RemoteApp({ token, onLogout }: { token: string; onLogout: () => void })
 
   useEffect(() => {
     void refreshAll();
-    return client.connect((event) => handleEvent(event), setStatus);
+    // A resync is requested whenever the server could not replay the events we
+    // missed, so the UI never silently keeps rendering stale state.
+    return client.connect(
+      (event) => handleEvent(event),
+      setStatus,
+      onUnauthorized,
+      () => { void refreshAll(); },
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
+
+  // Coming back from a backgrounded tab is the most common way to end up
+  // looking at stale data on a phone.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshAll();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [refreshAll]);
 
   function handleEvent(event: WebRemoteEvent) {
     const ch = event.channel;
@@ -113,6 +199,10 @@ function RemoteApp({ token, onLogout }: { token: string; onLogout: () => void })
       }
       void refreshAgents();
       return;
+    }
+    if (ch.startsWith('agent:')) {
+      setInteractions((prev) => applyInteractionEvent(prev, ch, event.payload));
+      notifyForEvent(ch, event.payload);
     }
     if (ch === 'workspace:git-sync-changed') { setGit(event.payload as GitSyncStatus); return; }
     if (ch === 'workspace:committed') { void refreshGit(); return; }
@@ -129,7 +219,15 @@ function RemoteApp({ token, onLogout }: { token: string; onLogout: () => void })
 
   return (
     <div className="app">
-      <Topbar status={status} git={git} client={client} onSync={refreshGit} onLogout={onLogout} />
+      <Topbar
+        status={status}
+        git={git}
+        client={client}
+        notifications={notifications}
+        onEnableNotifications={() => { void requestNotificationPermission().then(setNotifications); }}
+        onSync={refreshGit}
+        onLogout={onLogout}
+      />
 
       {error && <div className="banner">{error}</div>}
 
@@ -182,6 +280,7 @@ function RemoteApp({ token, onLogout }: { token: string; onLogout: () => void })
         <ChatScreen
           client={client}
           agent={openAgent}
+          interactions={interactions[openAgent.agentId] ?? []}
           registerLive={(agentId, cb) => { liveChat.current = { agentId, cb }; }}
           unregisterLive={() => { liveChat.current = null; }}
           onClose={() => setOpenAgentId(null)}
@@ -194,10 +293,12 @@ function RemoteApp({ token, onLogout }: { token: string; onLogout: () => void })
 
 // ── Topbar + git sync ──────────────────────────────────────
 
-function Topbar({ status, git, client, onSync, onLogout }: {
+function Topbar({ status, git, client, notifications, onEnableNotifications, onSync, onLogout }: {
   status: string;
   git: GitSyncStatus | null;
   client: WebRemoteClient;
+  notifications: NotificationPermissionState;
+  onEnableNotifications: () => void;
   onSync: () => Promise<void>;
   onLogout: () => void;
 }) {
@@ -241,6 +342,9 @@ function Topbar({ status, git, client, onSync, onLogout }: {
             )}
             {git.ahead === 0 && git.behind === 0 && <span className="git-synced" title="Up to date">✓ synced</span>}
           </div>
+        )}
+        {notifications === 'default' && (
+          <button className="ghost icon-btn" onClick={onEnableNotifications} title="Enable alerts for approvals and questions">🔔</button>
         )}
         <button className="ghost icon-btn" onClick={onLogout} title="Log out">⎋</button>
       </div>
@@ -689,7 +793,7 @@ function CanvasScreen({ client, space, agents, personas, onClose, onOpenAgent, o
             spellCheck={false}
           />
         ) : content.trim() ? (
-          <div className="markdown"><Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown></div>
+          <CanvasMarkdown spaceId={space.id} content={content} />
         ) : (
           <div className="canvas-empty" onClick={() => setEditing(true)}>This canvas is empty. Tap Edit to start writing.</div>
         )}
@@ -888,7 +992,7 @@ function CanvasHistory({ client, space, onRestored }: {
             <div className="screen-title"><div className="screen-title-main">Version {preview.sha.slice(0, 7)}</div></div>
             <button className="ghost" onClick={() => void restore(preview.sha)}>Restore</button>
           </header>
-          <div className="canvas-body"><div className="markdown"><Markdown remarkPlugins={[remarkGfm]}>{preview.content || '_empty_'}</Markdown></div></div>
+          <div className="canvas-body"><CanvasMarkdown spaceId={space.id} content={preview.content || '_empty_'} /></div>
         </div>
       )}
     </div>
@@ -897,9 +1001,10 @@ function CanvasHistory({ client, space, onRestored }: {
 
 // ── Chat ───────────────────────────────────────────────────
 
-function ChatScreen({ client, agent, registerLive, unregisterLive, onClose, onRefreshAgents }: {
+function ChatScreen({ client, agent, interactions, registerLive, unregisterLive, onClose, onRefreshAgents }: {
   client: WebRemoteClient;
   agent: AgentListAllItem;
+  interactions: PendingInteraction[];
   registerLive: (agentId: string, cb: (e: ChatEvent) => void) => void;
   unregisterLive: () => void;
   onClose: () => void;
@@ -999,6 +1104,10 @@ function ChatScreen({ client, agent, registerLive, unregisterLive, onClose, onRe
         />
       )}
 
+      {interactions.map((item) => (
+        <InteractionTile key={item.requestId} client={client} item={item} onRefreshAgents={onRefreshAgents} />
+      ))}
+
       <div className="chat-scroll" ref={scrollRef}>
         {loading && <div className="loading">Loading conversation…</div>}
         {!loading && bubbles.length === 0 && <Empty icon="💬" title="No messages yet" detail="Send a message to continue." />}
@@ -1044,6 +1153,138 @@ function BubbleView({ bubble }: { bubble: Bubble }) {
   return <div className={`event-line ${bubble.level}`}>{bubble.text}</div>;
 }
 
+/**
+ * Renders whichever question the agent is blocked on.  Without these the web
+ * UI could only ever answer permission approvals, so any agent that asked a
+ * question, raised an elicitation, or hit the sandbox was stuck until someone
+ * walked back to the desktop.
+ */
+function InteractionTile({ client, item, onRefreshAgents }: {
+  client: WebRemoteClient;
+  item: PendingInteraction;
+  onRefreshAgents: () => Promise<void>;
+}) {
+  const [answer, setAnswer] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function run(fn: () => Promise<unknown>) {
+    setBusy(true);
+    try {
+      await fn();
+      await onRefreshAgents();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (item.kind === 'user-input') {
+    return (
+      <div className="approval interaction">
+        <div className="approval-text"><strong>Agent asked a question</strong><span>{item.question}</span></div>
+        {item.choices.length > 0 && (
+          <div className="approval-actions wrap">
+            {item.choices.map((choice) => (
+              <button
+                key={choice}
+                disabled={busy}
+                onClick={() => void run(() => client.invoke('agent:respond-user-input', item.agentId, item.requestId, choice, false))}
+              >{choice}</button>
+            ))}
+          </div>
+        )}
+        {item.allowFreeform && (
+          <form
+            className="interaction-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!answer.trim()) return;
+              void run(() => client.invoke('agent:respond-user-input', item.agentId, item.requestId, answer.trim(), true));
+            }}
+          >
+            <input value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="Type an answer…" />
+            <button disabled={busy || !answer.trim()}>Reply</button>
+          </form>
+        )}
+      </div>
+    );
+  }
+
+  if (item.kind === 'elicitation') {
+    // Structured form elicitation needs a schema renderer; until the desktop
+    // form is shared, be explicit rather than silently offering a broken form.
+    return (
+      <div className="approval interaction">
+        <div className="approval-text">
+          <strong>{item.source ? `${item.source} needs input` : 'A tool needs input'}</strong>
+          <span>{item.message}</span>
+          {item.mode === 'form' && <em>Structured forms must be filled in on the desktop app.</em>}
+        </div>
+        <div className="approval-actions">
+          <button
+            disabled={busy || item.mode === 'form'}
+            onClick={() => void run(() => client.invoke('agent:respond-elicitation', item.agentId, item.requestId, 'accept', {}))}
+          >Accept</button>
+          <button
+            className="danger"
+            disabled={busy}
+            onClick={() => void run(() => client.invoke('agent:respond-elicitation', item.agentId, item.requestId, 'decline', {}))}
+          >Decline</button>
+        </div>
+      </div>
+    );
+  }
+
+  const decisionLabels: Record<string, string> = {
+    'allow-once': 'Allow once',
+    'allow-for-session': 'Allow for session',
+    disable: 'Disable sandbox',
+  };
+  return (
+    <div className="approval interaction">
+      <div className="approval-text">
+        <strong>Sandbox blocked {item.toolName || 'an action'}</strong>
+        <code>{item.target}</code>
+        {item.intention && <span>{item.intention}</span>}
+      </div>
+      <div className="approval-actions wrap">
+        {item.decisions.map((decision) => (
+          <button
+            key={decision}
+            className={decision === 'disable' ? 'danger' : ''}
+            disabled={busy}
+            onClick={() => void run(() => client.invoke('agent:resolve-sandbox', item.agentId, item.requestId, decision))}
+          >{decisionLabels[decision] ?? decision}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Canvas markdown stores images as workspace-relative paths
+ * (`attachments/shot.png`) that only mean something next to the space folder.
+ * The desktop resolves them over IPC; in the browser they have to be routed
+ * through the server's attachment endpoint or every image renders broken.
+ */
+function CanvasMarkdown({ spaceId, content }: { spaceId: string; content: string }) {
+  const components = useMemo(() => ({
+    img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
+      const src = typeof props.src === 'string' ? props.src : '';
+      const isAbsolute = /^(https?:|data:|blob:|\/)/i.test(src);
+      const resolved = !src || isAbsolute
+        ? src
+        : `/api/attachment?spaceId=${encodeURIComponent(spaceId)}&path=${encodeURIComponent(src)}`;
+      return <img {...props} src={resolved} loading="lazy" />;
+    },
+  }), [spaceId]);
+
+  return (
+    <div className="markdown">
+      <Markdown remarkPlugins={[remarkGfm]} components={components}>{content}</Markdown>
+    </div>
+  );
+}
+
 // ── Shared bits ────────────────────────────────────────────
 
 function Approval({ label, detail, onApprove, onDeny }: { label: string; detail: string; onApprove: () => void; onDeny: () => void }) {
@@ -1076,5 +1317,7 @@ async function approve(client: WebRemoteClient, agent: AgentListAllItem, approve
   await client.invoke('agent:approve', agent.agentId, agent.pendingApprovalId, approved);
   await onRefresh();
 }
+
+registerServiceWorker();
 
 createRoot(document.getElementById('root')!).render(<App />);

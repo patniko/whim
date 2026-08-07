@@ -1,4 +1,5 @@
-import { app, ipcMain, shell } from 'electron';
+import { registerIpcHandler } from './ipc/registry';
+import { app, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import type { UpdateState } from '../shared/types';
@@ -93,9 +94,9 @@ function runCheck(initiatedBy: 'auto' | 'manual', log: any) {
  * when the updater isn't active.
  */
 function registerUpdateIpc(log: any) {
-  ipcMain.handle('update:get-state', () => currentState);
+  registerIpcHandler('update:get-state', () => currentState);
 
-  ipcMain.handle('update:open-log', async () => {
+  registerIpcHandler('update:open-log', async () => {
     try {
       const dir = logFilePath ? path.dirname(logFilePath) : app.getPath('userData');
       fs.mkdirSync(dir, { recursive: true });
@@ -108,17 +109,17 @@ function registerUpdateIpc(log: any) {
     }
   });
 
-  ipcMain.handle('update:install', () => {
+  registerIpcHandler('update:install', () => {
     if (!autoUpdater) return;
     log.info('[update] Install requested — quitAndInstall()');
     autoUpdater.quitAndInstall();
   });
 
-  ipcMain.handle('update:check', () => {
+  registerIpcHandler('update:check', () => {
     runCheck('manual', log);
   });
 
-  ipcMain.handle('update:download', () => {
+  registerIpcHandler('update:download', () => {
     if (!autoUpdater) return;
     log.info('[update] Manual download requested');
     autoUpdater.downloadUpdate().catch((err: any) => {

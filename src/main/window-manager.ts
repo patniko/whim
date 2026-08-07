@@ -1,3 +1,4 @@
+import { registerIpcHandler } from './ipc/registry';
 import { BrowserWindow, screen, ipcMain, shell, app } from 'electron';
 import { EventEmitter } from 'events';
 import { getConfigValue, setConfigValue, type SnapPosition } from './config';
@@ -400,7 +401,7 @@ export function registerWindowIpcHandlers(preloadPath: string): void {
   });
 
   // ── Pin toggle ──────────────────────────────────────────
-  ipcMain.handle('window:get-pinned', () => {
+  registerIpcHandler('window:get-pinned', () => {
     return getConfigValue('pinned');
   });
 
@@ -529,7 +530,7 @@ export function registerWindowIpcHandlers(preloadPath: string): void {
     }
   });
 
-  ipcMain.handle('canvas-window:get-always-on-top', (event) => {
+  registerIpcHandler('canvas-window:get-always-on-top', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win && !win.isDestroyed()) {
       return canvasUserPinned.has(win);

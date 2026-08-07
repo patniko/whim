@@ -707,7 +707,7 @@ export function saveAttachment(
   // Verify resolved path is within the space folder
   const resolved = path.resolve(filePath);
   const folderRoot = path.resolve(path.join(workspaceRoot, folder));
-  if (!resolved.startsWith(folderRoot)) {
+  if (!isPathInside(folderRoot, resolved)) {
     return { success: false, error: 'Invalid file path' };
   }
 
@@ -719,6 +719,47 @@ export function saveAttachment(
   };
 }
 
+/**
+ * True when `candidate` resolves to `root` itself or something beneath it.
+ *
+ * A bare `startsWith(root)` treats `/w/foo-private` as inside `/w/foo`,
+ * because the shared prefix ends mid-segment. `realpath` is applied where the
+ * path exists so a symlink inside the space cannot point out of it — which
+ * matters more now that these helpers back channels the web remote can reach.
+ */
+function isPathInside(root: string, candidate: string): boolean {
+  const realRoot = realpathOrSelf(root);
+  const realCandidate = realpathOrSelf(candidate);
+  if (realCandidate === realRoot) return true;
+  const relative = path.relative(realRoot, realCandidate);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+/**
+ * `realpath` of the deepest part of `target` that exists, with the missing
+ * tail appended.
+ *
+ * A file being written does not exist yet, so it cannot be realpath'd
+ * directly — but its parent can, and that is where a symlink would have to
+ * be. Resolving only one side would also break on macOS, where the root
+ * realpaths to `/private/var/...` while an unresolved candidate stays
+ * `/var/...` and every comparison fails.
+ */
+function realpathOrSelf(target: string): string {
+  let current = path.resolve(target);
+  const trailing: string[] = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(current), ...trailing);
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(target);
+      trailing.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
 /** Resolve an attachment path to an absolute path (with security check). */
 export function resolveAttachmentPath(
   workspaceRoot: string,
@@ -727,7 +768,7 @@ export function resolveAttachmentPath(
 ): string | null {
   const folderRoot = resolveSpaceFolder(workspaceRoot, folder);
   const resolved = path.resolve(path.join(folderRoot, relativePath));
-  if (!resolved.startsWith(path.resolve(folderRoot))) return null;
+  if (!isPathInside(folderRoot, resolved)) return null;
   if (!fs.existsSync(resolved)) return null;
   return resolved;
 }
@@ -806,7 +847,7 @@ export function createPage(workspaceRoot: string, folder: string, pageName: stri
 
   // Safety: ensure resolved path is inside the space folder
   const resolved = path.resolve(pagePath);
-  if (!resolved.startsWith(path.resolve(folderRoot) + path.sep) && resolved !== path.resolve(folderRoot)) {
+  if (!isPathInside(folderRoot, resolved)) {
     return { error: 'Invalid page path' };
   }
 
@@ -834,7 +875,7 @@ export function resolvePagePath(workspaceRoot: string, folder: string, pageName:
   const pagePath = path.join(folderRoot, `${slug}.md`);
 
   const resolved = path.resolve(pagePath);
-  if (!resolved.startsWith(path.resolve(folderRoot) + path.sep) && resolved !== path.resolve(folderRoot)) {
+  if (!isPathInside(folderRoot, resolved)) {
     return { error: 'Invalid page path' };
   }
 

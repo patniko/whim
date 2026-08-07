@@ -1,4 +1,8 @@
 import type { IpcCommandChannel } from '../../shared/ipc-contract';
+import { webAccessFor } from '../../shared/web-access';
+import { canReadSetting } from '../../shared/settings-access';
+import { readSetting } from '../services/settings';
+import { callRegisteredHandler, hasRegisteredHandler } from '../ipc/registry';
 import type { AgentAnchor, CreateSpaceInput, Space } from '../../shared/types';
 import * as path from 'path';
 import {
@@ -18,50 +22,21 @@ import { notifyAllWindows } from '../notify';
 import { rememberCanvasEditorContent, writeMainCanvasWithMerge } from '../services/canvas-editor-state';
 import { resolveCommentLaunchTarget } from '../services/comment-launch-target';
 
-export const WEB_REMOTE_COMMAND_ALLOWLIST = [
-  'space:create',
-  'space:classify',
-  'space:resolve-date',
-  'space:list',
-  'space:search',
-  'space:events',
-  'space:update',
-  'space:delete',
-  'space:unarchive',
-  'agent:list-all',
-  'agent:get-history',
-  'agent:abort',
-  'agent:delete-session',
-  'chat:send-message',
-  'agent:approve',
-  'agent:respond-user-input',
-  'agent:respond-elicitation',
-  'agent:quick-launch',
-  'agent:launch-cloud',
-  'agent:launch',
-  'agent:launch-from-comment',
-  'agent:list',
-  'personas:list',
-  'models:list',
-  'canvas:read',
-  'canvas:write',
-  'canvas:close',
-  'canvas:has-content',
-  'canvas:history',
-  'canvas:preview-version',
-  'canvas:restore',
-  'canvas:list-pages',
-  'canvas:read-page',
-  'canvas:write-page',
-  'canvas:create-page',
-  'workspace:git-status',
-  'workspace:git-push',
-  'workspace:git-pull',
-] as const satisfies readonly IpcCommandChannel[];
-
-export type WebRemoteCommandChannel = typeof WEB_REMOTE_COMMAND_ALLOWLIST[number];
-
-const ALLOWLIST = new Set<string>(WEB_REMOTE_COMMAND_ALLOWLIST);
+/**
+ * Which commands the web remote actually implements.
+ *
+ * This used to be a hand-maintained array of channel names sitting next to a
+ * separate handler map, so the two could — and did — drift apart, and nothing
+ * recorded *why* any given command was absent. The authority now lives in
+ * `src/shared/web-access.ts`, which classifies every `IpcCommandChannel` and
+ * will not compile until a newly added command is classified.
+ *
+ * A channel is reachable only if it is classified `allow` *and* implemented
+ * here. Those are separate conditions on purpose: "we decided this is safe"
+ * and "we have built it" are different statements, and conflating them is how
+ * the surface silently drifted before.
+ */
+export type WebRemoteCommandChannel = IpcCommandChannel;
 
 export class GatewayError extends Error {
   constructor(
@@ -76,7 +51,9 @@ export class GatewayError extends Error {
 
 type Handler = (args: unknown[]) => Promise<unknown> | unknown;
 
-const HANDLERS: Record<WebRemoteCommandChannel, Handler> = {
+const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
+  // Key-filtered by assertArgumentsAllowed before this ever runs.
+  'settings:get': (args) => readSetting(expectString(args, 0, 'key')),
   'space:create': createSpaceFromArgs,
   'space:classify': classifySpaceFromArgs,
   'space:resolve-date': resolveDateFromArgs,
@@ -154,6 +131,15 @@ const HANDLERS: Record<WebRemoteCommandChannel, Handler> = {
       expectOptionalRecord(args[3]),
     );
   },
+  'agent:resolve-sandbox': async (args) => {
+    const decision = expectString(args, 2, 'decision');
+    if (decision !== 'allow-once' && decision !== 'allow-for-session' && decision !== 'disable') {
+      throw invalidArg('decision must be allow-once, allow-for-session, or disable');
+    }
+    const { resolveSandboxBlock } = await import('../agent-service');
+    await resolveSandboxBlock(expectString(args, 0, 'agentId'), expectString(args, 1, 'requestId'), decision);
+    return { ok: true };
+  },
   'agent:quick-launch': quickLaunchFromArgs,
   'agent:launch-cloud': launchCloudFromArgs,
   'agent:launch': launchAgentFromArgs,
@@ -161,6 +147,10 @@ const HANDLERS: Record<WebRemoteCommandChannel, Handler> = {
   'agent:list': async (args) => {
     const { listAgents } = await import('../agent-service');
     return listAgents(expectString(args, 0, 'spaceId'));
+  },
+  'models:list-detailed': async () => {
+    const { listModelsDetailed } = await import('../ai');
+    return listModelsDetailed();
   },
   'personas:list': () => {
     const personas = (getConfigValue('personas') || []) as AgentPersona[];
@@ -293,19 +283,85 @@ const HANDLERS: Record<WebRemoteCommandChannel, Handler> = {
   },
 };
 
+/** Channels the gateway implements itself, rather than delegating. */
+export const WEB_REMOTE_IMPLEMENTED_CHANNELS = Object.keys(HANDLERS) as IpcCommandChannel[];
+
+/**
+ * A channel is reachable if it is classified `allow` and *some* implementation
+ * exists — either a gateway-specific one above, or the desktop handler itself.
+ *
+ * Delegating to the desktop handler is the point: the browser runs the real
+ * renderer, so it calls the same ~150 commands the desktop does, and a gateway
+ * that re-implements them by hand would be permanently behind.
+ */
 export function isAllowedWebRemoteCommand(channel: string): channel is WebRemoteCommandChannel {
-  return ALLOWLIST.has(channel);
+  return webAccessFor(channel) === 'allow' && (channel in HANDLERS || hasRegisteredHandler(channel));
+}
+
+/**
+ * `settings:get` is reachable, but filtered per key.
+ *
+ * The renderer needs a handful of presentation settings and the workspace
+ * path to start at all, while other keys hold credentials and control what
+ * the host executes. See settings-access.ts for the reasoning behind each.
+ */
+/**
+ * Guards that depend on the *arguments*, not just the channel.
+ *
+ * Some channels are safe to reach remotely for most of their inputs and
+ * unsafe for one of them, so classifying the whole channel either way is
+ * wrong.
+ */
+function assertArgumentsAllowed(channel: string, args: unknown[]): void {
+  if (channel === 'settings:get' && !canReadSetting(args[0])) {
+    throw new GatewayError('setting_not_allowed', 403, `Setting is not readable over web remote: ${String(args[0])}`);
+  }
+
+  // `agent:disable-sandbox` is denied because it drops the sandbox around an
+  // agent with shell access on the host. Answering a sandbox prompt with
+  // `disable` reaches the very same `disableSandboxForSession`, so allowing
+  // this channel wholesale handed a remote caller the escalation the deny was
+  // there to prevent. Approving a single blocked operation is still fine.
+  if (channel === 'agent:resolve-sandbox' && args[2] === 'disable') {
+    throw new GatewayError(
+      'sandbox_disable_denied',
+      403,
+      'Disabling the sandbox is only possible on the desktop app.',
+    );
+  }
 }
 
 export async function invokeWebRemoteCommand(channel: string, args: unknown[]): Promise<unknown> {
   if (!isAllowedWebRemoteCommand(channel)) {
+    // Distinguish the three reasons, so a remote client can degrade sensibly
+    // instead of treating "not built yet" as "forbidden".
+    const access = webAccessFor(channel);
+    if (access === 'desktop-only') {
+      throw new GatewayError('desktop_only', 501, `Channel only works on the desktop app: ${channel}`);
+    }
+    if (access === 'allow') {
+      throw new GatewayError('not_implemented', 501, `Channel is not yet available over web remote: ${channel}`);
+    }
     throw new GatewayError('channel_not_allowed', 403, `Channel is not available over web remote: ${channel}`);
   }
   if (!Array.isArray(args)) {
     throw invalidArg('args must be an array');
   }
 
-  const result = await HANDLERS[channel](args);
+  assertArgumentsAllowed(channel, args);
+
+  // Gateway-specific implementations win where they exist.
+  //
+  // Some genuinely have to: merging concurrent canvas writes, filtering
+  // settings by key, routing a launch without a window. But there are 41 of
+  // them, and most are plain reimplementations of the desktop handler
+  // (`space:list`, `models:list`, `canvas:read`). Each one is a place the two
+  // transports can quietly drift apart, which is the very thing
+  // `registerIpcHandler` exists to prevent. Narrowing this table to the
+  // handlers that need to differ is worth doing; until then, treat adding an
+  // entry here as a decision to maintain two implementations.
+  const gatewayHandler = HANDLERS[channel as IpcCommandChannel];
+  const result = gatewayHandler ? await gatewayHandler(args) : await callRegisteredHandler(channel, args);
   return JSON.parse(JSON.stringify(result ?? null));
 }
 
