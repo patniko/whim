@@ -150,10 +150,16 @@ describe('scheduled skill to opened artifact', () => {
     // and the notification are how the user gets to it.
     expect(openedWindows).toHaveLength(0);
 
-    // And the URL the agent got back resolves to that artifact.
-    const parsed = parseArtifactUrl(result.url);
-    expect(parsed).toMatchObject({ spaceId, artifactId: artifact!.artifactId, file: 'index.html' });
-    expect(result.url).toBe(buildArtifactUrl(spaceId, artifact!.artifactId));
+    // The id the agent got back names that artifact, and the URL whim builds
+    // host-side for the artifact window resolves to it. No URL is handed to the
+    // runtime — `whim-artifact://` is a private scheme it would reject.
+    expect(result.artifactId).toBe(artifact!.artifactId);
+    expect(result.url).toBeUndefined();
+    expect(parseArtifactUrl(buildArtifactUrl(spaceId, artifact!.artifactId))).toMatchObject({
+      spaceId,
+      artifactId: artifact!.artifactId,
+      file: 'index.html',
+    });
   });
 
   it('refreshes one report across repeat runs instead of stacking new ones', async () => {

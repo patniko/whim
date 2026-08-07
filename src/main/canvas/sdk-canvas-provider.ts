@@ -17,6 +17,14 @@
  *    whole documents through the RPC would persist them in the runtime's
  *    durable session events and replay them on every reconnect.
  *
+ * 3. No URL crosses the RPC boundary. `whim-artifact://` is a private Electron
+ *    scheme, and the runtime validates the `url` a provider returns from `open`
+ *    against the schemes it knows how to render — a private one fails the whole
+ *    open, so `publish` never runs and the report is written but never
+ *    attached. Nothing needs the URL anyway: whim is its own host and opens
+ *    artifact windows from the events below, addressing them by space and
+ *    artifact id. `url` stays optional and unset.
+ *
  * The canvas is built per run, so the owning space is captured in the closure
  * rather than looked up from a session id — which cannot be resolved reliably
  * during a cold resume, when the provider may reconnect before whim has
@@ -33,7 +41,6 @@ import {
   CanvasArtifactError,
   type CanvasArtifact,
 } from './artifact-store';
-import { buildArtifactUrl } from './artifact-protocol';
 
 export const WHIM_REPORT_CANVAS_ID = 'whim-report';
 export const WHIM_CANVAS_PROVIDER_ID = 'whim';
@@ -197,7 +204,6 @@ export function createArtifactCanvas(run: CanvasRunContext, events: CanvasProvid
             return {
               ok: true,
               artifactId: artifact.artifactId,
-              url: buildArtifactUrl(run.spaceId, artifact.artifactId),
               changed,
             };
           } catch (err) {
@@ -266,7 +272,7 @@ export function createArtifactCanvas(run: CanvasRunContext, events: CanvasProvid
       events.onBound?.(artifact, { instanceId: ctx.instanceId, run });
 
       return {
-        url: buildArtifactUrl(run.spaceId, artifact.artifactId),
+        // Deliberately no `url` — see the note at the top of this file.
         title: artifact.title,
         // Until content is published there is nothing to render; say so rather
         // than showing an empty window with no explanation.

@@ -268,6 +268,14 @@ Reports are agent-authored documents and are treated as untrusted input.
 - **Isolated origin.** Reports are served from a dedicated `whim-artifact://`
   scheme with its own Electron session partition — never from `copilot-whim://`,
   which serves the app and holds its tokens.
+- **The scheme stays inside whim.** A canvas provider may hand the runtime a URL
+  to render, and whim deliberately does not: `whim-artifact://` is a private
+  Electron scheme, and the runtime rejects an open result naming a scheme it
+  cannot render — which fails the open, so nothing is ever published and the
+  agent writes a report that attaches to nothing. Whim needs no URL there
+  anyway, because whim is its own host: it opens report windows from the
+  provider's bind and publish events, addressing artifacts by space and artifact
+  id. The open result carries only a title and a status.
 - **No scripts, no network.** The CSP is `default-src 'none'` with narrowly
   allowed inline styles and local images. Scripts, remote fonts, stylesheets and
   images do not load.

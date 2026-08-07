@@ -29,7 +29,6 @@ import {
   CanvasArtifactError,
   writeArtifactFile,
 } from './artifact-store';
-import { buildArtifactUrl } from './artifact-protocol';
 import { renderSkillCanvas, type SkillCanvasDefinition } from './skill-canvas-template';
 import type { CanvasProviderEvents, CanvasRunContext } from './sdk-canvas-provider';
 
@@ -172,7 +171,6 @@ export function createSkillTemplateCanvas(
             return {
               ok: true,
               artifactId: artifact.artifactId,
-              url: buildArtifactUrl(run.spaceId, artifact.artifactId),
               changed,
             };
           } catch (err) {
@@ -202,7 +200,7 @@ export function createSkillTemplateCanvas(
       events.onBound?.(artifact, { instanceId: ctx.instanceId, run });
 
       return {
-        url: buildArtifactUrl(run.spaceId, artifact.artifactId),
+        // Deliberately no `url` — see the note in sdk-canvas-provider.ts.
         title: artifact.title,
         status: artifact.published ? (artifact.status ?? 'Ready') : 'Waiting for content',
       };

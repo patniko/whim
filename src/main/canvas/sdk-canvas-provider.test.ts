@@ -86,11 +86,10 @@ describe('declaration', () => {
 });
 
 describe('open', () => {
-  it('binds an artifact and returns its url without publishing', async () => {
+  it('binds an artifact without publishing', async () => {
     const canvas = createArtifactCanvas(run());
     const result = await open(canvas, { title: 'Open questions' });
 
-    expect(result.url).toBe('whim-artifact://space/space-1/open-questions/index.html');
     expect(result.status).toBe('Waiting for content');
     expect(getArtifact(workspace, FOLDER, 'open-questions')?.published).toBe(false);
   });
@@ -140,7 +139,7 @@ describe('open', () => {
 });
 
 describe('publish', () => {
-  it('imports the agent-written file and reports the url back', async () => {
+  it('imports the agent-written file and reports the artifact back', async () => {
     const onPublished = vi.fn();
     const canvas = createArtifactCanvas(run({ skillId: 'skill-1' }), { onPublished });
     await open(canvas, { title: 'Open questions' });
@@ -153,7 +152,7 @@ describe('publish', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(result.url).toBe('whim-artifact://space/space-1/open-questions/index.html');
+    expect(result.artifactId).toBe('open-questions');
     expect(result.changed).toBe(true);
 
     const artifact = getArtifact(workspace, FOLDER, 'open-questions')!;

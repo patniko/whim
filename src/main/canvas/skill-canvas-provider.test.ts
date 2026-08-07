@@ -211,7 +211,7 @@ describe('skill template canvas', () => {
     const first: any = await open(canvas, { artifactId: 'digest' });
     const second: any = await open(canvas, { artifactId: 'digest' });
 
-    expect(first.url).toBe(second.url);
+    expect(second.title).toBe(first.title);
     expect(first.status).toBe('Waiting for content');
     expect(listArtifacts(workspace, FOLDER)).toHaveLength(1);
   });

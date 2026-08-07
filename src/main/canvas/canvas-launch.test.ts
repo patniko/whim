@@ -19,6 +19,7 @@ vi.mock('./artifact-window', () => ({
 import { resolveCanvasPolicy, personaCanvasPolicy, DISABLED_CANVAS_POLICY } from './canvas-policy';
 import { resolveRunCanvasConfig } from './canvas-launch';
 import { WHIM_REPORT_CANVAS_ID, WHIM_CANVAS_PROVIDER_ID } from './sdk-canvas-provider';
+import { listArtifacts } from './artifact-store';
 
 function doc(frontmatter: string, body = 'Do the thing.'): string {
   return `---\n${frontmatter}\n---\n\n${body}\n`;
@@ -305,7 +306,9 @@ describe('resolveRunCanvasConfig', () => {
       sessionId: 's', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID, instanceId: 'i1',
       input: { title: 'Some other name' },
     });
-    expect(opened.url).toContain('comment-thread-7');
+    expect(opened.status).toBe('Waiting for content');
+    expect(listArtifacts(workspaceRoot, path.relative(workspaceRoot, workingDir))
+      .map(a => a.artifactId)).toEqual(['comment-thread-7']);
 
     fs.writeFileSync(path.join(workingDir, 'out.html'), '<p>hello</p>');
     // The model naming a different artifact must not create a second report:
