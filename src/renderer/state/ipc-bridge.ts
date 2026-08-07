@@ -31,6 +31,7 @@ import { agentStore } from './agent-store';
 import { skillStore } from './skill-store';
 import { historyStore } from './history-store';
 import { personaStore } from './persona-store';
+import { canvasArtifactStore } from './canvas-artifact-store';
 
 let installed = false;
 
@@ -142,17 +143,25 @@ export function installIpcBridge(api: WhimAPI): void {
     void loadSkillsSnapshot(api);
   });
 
+  api.onCanvasArtifactPublished((data) => {
+    // Refresh just the affected space: a republish elsewhere should not make
+    // every chip in the list flicker.
+    void loadSpaceArtifacts(api, data.spaceId);
+  });
+
   api.onWorkspaceChanged((path) => {
     if (path) {
       void loadSpacesSnapshot(api);
       void loadSkillsSnapshot(api);
       void loadPersonasSnapshot(api);
+      void loadCanvasArtifactsSnapshot(api);
     } else {
       spaceStore.setSpaces([]);
       agentStore.reset();
       skillStore.setSkills([]);
       historyStore.reset();
       personaStore.setPersonas([]);
+      canvasArtifactStore.clear();
     }
   });
 }
@@ -201,6 +210,44 @@ export async function loadAgentsSnapshot(api: WhimAPI): Promise<void> {
     }
   } catch {
     // ignore — leave existing agents in place
+  }
+}
+
+/** Load every published artifact across the spaces the user has not completed. */
+export async function loadCanvasArtifactsSnapshot(api: WhimAPI): Promise<void> {
+  try {
+    const { artifacts } = await api.listAllCanvasArtifacts();
+    canvasArtifactStore.setArtifacts(artifacts);
+  } catch {
+    // ignore — leave the existing index in place
+  }
+}
+
+/** Refresh one space's artifacts, e.g. after a run publishes. */
+export async function loadSpaceArtifacts(api: WhimAPI, spaceId: string): Promise<void> {
+  try {
+    const { artifacts } = await api.listCanvasArtifacts(spaceId);
+    canvasArtifactStore.setSpaceArtifacts(spaceId, artifacts);
+  } catch {
+    // ignore — leave the existing entry in place
+  }
+}
+
+/**
+ * Open a report, and drop its chip if the file is no longer on disk.
+ *
+ * The chip is drawn from a snapshot, and reports live in the workspace, so git
+ * sync or a manual delete can remove one out from under it. Without this the
+ * chip is simply inert when clicked, which reads as whim being broken.
+ */
+export async function openCanvasArtifact(api: WhimAPI, spaceId: string, artifactId: string): Promise<void> {
+  try {
+    const result = await api.openCanvasArtifact(spaceId, artifactId);
+    if (result && 'error' in result && result.error) {
+      await loadSpaceArtifacts(api, spaceId);
+    }
+  } catch {
+    await loadSpaceArtifacts(api, spaceId);
   }
 }
 

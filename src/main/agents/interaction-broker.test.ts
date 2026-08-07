@@ -469,6 +469,54 @@ describe('InteractionBroker', () => {
     });
   });
 
+  describe('scheduled canvas auto-approval', () => {
+    const canvasCall = { kind: 'custom-tool', toolName: 'open_canvas', toolCallId: 'req-1' } as any;
+
+    it('approves canvas tools for a scheduled run, which has nobody to answer a prompt', async () => {
+      const record = makeRecord({ autoApproveCanvasTools: true });
+      const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
+
+      const result = await handler(canvasCall, { sessionId: 'session-1' });
+
+      expect(result).toEqual({ kind: 'approve-once' });
+      expect(record.status).toBe('running');
+      expect(notifier.showApprovalNotification).not.toHaveBeenCalled();
+    });
+
+    it('still prompts for everything else, so the run gains no other access', async () => {
+      const record = makeRecord({ autoApproveCanvasTools: true });
+      const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
+
+      handler({ kind: 'shell', toolCallId: 'req-2' } as any, { sessionId: 'session-1' });
+
+      expect(record.status).toBe('waiting-approval');
+      broker.approveAgent('agent-1', 'req-2', false);
+    });
+
+    it('does not approve a custom tool that merely mentions canvases', async () => {
+      const record = makeRecord({ autoApproveCanvasTools: true });
+      const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
+
+      handler(
+        { kind: 'custom-tool', toolName: 'delete_canvas_files', toolCallId: 'req-3' } as any,
+        { sessionId: 'session-1' },
+      );
+
+      expect(record.status).toBe('waiting-approval');
+      broker.approveAgent('agent-1', 'req-3', false);
+    });
+
+    it('prompts for canvas tools on runs that were not launched to produce artifacts', async () => {
+      const record = makeRecord();
+      const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
+
+      handler(canvasCall, { sessionId: 'session-1' });
+
+      expect(record.status).toBe('waiting-approval');
+      broker.approveAgent('agent-1', 'req-1', false);
+    });
+  });
+
   describe('createUserInputHandler', () => {
     it('returns empty response when record is not found', async () => {
       const handler = broker.createUserInputHandler(() => undefined);

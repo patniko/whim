@@ -20,6 +20,8 @@ import { createTray, destroyTray } from './tray';
 import { initAutoUpdater, cleanupAutoUpdater } from './update-service';
 import { syncWebRemoteServer, stopWebRemoteServer, refreshWebRemoteBindings } from './web/server';
 import { restoreActiveCloudPollers, stopAllCloudPollers } from './cloud-agent-poller';
+import { registerArtifactSchemePrivileges, registerArtifactProtocol } from './canvas/artifact-protocol';
+import { resolveSpaceLocation } from './canvas/space-location';
 
 let currentToggleAccelerator: string | null = null;
 let toggleShortcutRegistered = false;
@@ -68,18 +70,31 @@ process.on('unhandledRejection', (reason) => {
  * Returns true on success, false if the OS refused the binding.
  */
 export function registerToggleShortcut(accelerator: string): boolean {
-  if (currentToggleAccelerator) {
-    globalShortcut.unregister(currentToggleAccelerator);
+  const previousAccelerator = currentToggleAccelerator;
+  if (previousAccelerator) {
+    globalShortcut.unregister(previousAccelerator);
   }
-  const registered = globalShortcut.register(accelerator, () => toggleWindow('hotkey'));
+
+  let registered = false;
+  try {
+    registered = globalShortcut.register(accelerator, () => toggleWindow('hotkey'));
+  } catch (err) {
+    console.warn(`[main] Invalid global shortcut "${accelerator}":`, err);
+  }
+
   if (registered) {
     currentToggleAccelerator = accelerator;
     toggleShortcutRegistered = true;
   } else {
     console.warn(`[main] Failed to register global shortcut "${accelerator}" — another process may be holding it`);
     // Attempt to restore the previous shortcut
-    if (currentToggleAccelerator) {
-      toggleShortcutRegistered = globalShortcut.register(currentToggleAccelerator, () => toggleWindow('hotkey'));
+    if (previousAccelerator) {
+      try {
+        toggleShortcutRegistered = globalShortcut.register(previousAccelerator, () => toggleWindow('hotkey'));
+      } catch (err) {
+        console.warn(`[main] Failed to restore global shortcut "${previousAccelerator}":`, err);
+        toggleShortcutRegistered = false;
+      }
     } else {
       toggleShortcutRegistered = false;
     }
@@ -99,6 +114,10 @@ protocol.registerSchemesAsPrivileged([
     },
   },
 ]);
+
+// Canvas artifacts render on their own scheme, and therefore their own origin,
+// so agent-authored HTML can never reach the app renderer's origin or storage.
+registerArtifactSchemePrivileges();
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -170,6 +189,9 @@ app.whenReady().then(async () => {
       headers: { 'Content-Type': mimeType },
     });
   });
+
+  // Serve canvas artifacts from an isolated session on their own origin.
+  registerArtifactProtocol(resolveSpaceLocation);
 
   // Grant microphone permission for Web Speech API
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {

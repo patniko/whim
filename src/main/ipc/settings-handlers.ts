@@ -463,11 +463,21 @@ export function registerSettingsHandlers(): void {
     if (typeof accelerator !== 'string' || !accelerator.trim()) {
       return { error: 'Accelerator cannot be empty' };
     }
+    if (!/^[\x20-\x7e]+$/.test(accelerator)) {
+      return { error: 'Shortcut contains a key Electron cannot register. Try pressing the shortcut again.' };
+    }
 
     // Global shortcuts must include a real modifier (not just Shift alone)
     if (key === 'toggleWindow') {
       const parts = accelerator.split('+').map(p => p.trim());
-      const hasRealModifier = parts.some(p =>
+      if (parts.length < 2 || parts.some(part => !part)) {
+        return { error: 'Shortcut must include a key in addition to its modifiers.' };
+      }
+      const modifierNames = ['CommandOrControl', 'Control', 'Command', 'Alt', 'Meta', 'Super', 'Shift'];
+      if (modifierNames.includes(parts[parts.length - 1])) {
+        return { error: 'Shortcut must include a non-modifier key.' };
+      }
+      const hasRealModifier = parts.slice(0, -1).some(p =>
         ['CommandOrControl', 'Control', 'Command', 'Alt', 'Meta', 'Super'].includes(p)
       );
       if (!hasRealModifier) {

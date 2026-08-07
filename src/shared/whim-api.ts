@@ -170,6 +170,12 @@ export interface WhimAPI {
   exportCanvas(spaceId: string, format: ExportFormat): Promise<IpcCommandResult<'canvas:export'>>;
   shareCanvas(spaceId: string, format: ExportFormat): Promise<IpcCommandResult<'canvas:share'>>;
   exportCanvasToDestination(spaceId: string, destinationId: string, format?: ExportFormat): Promise<IpcCommandResult<'canvas:export-to-destination'>>;
+  /** Published canvas artifacts for a space. */
+  listCanvasArtifacts(spaceId: string): Promise<IpcCommandResult<'canvas-artifact:list'>>;
+  /** Published canvas artifacts across every space the user has not completed. */
+  listAllCanvasArtifacts(): Promise<IpcCommandResult<'canvas-artifact:list-all'>>;
+  /** Open a published canvas artifact in its own window. */
+  openCanvasArtifact(spaceId: string, artifactId: string): Promise<IpcCommandResult<'canvas-artifact:open'>>;
   listExportDestinations(): Promise<IpcCommandResult<'export-destinations:list'>>;
   saveExportDestinations(destinations: ExportDestination[]): Promise<IpcCommandResult<'export-destinations:save'>>;
   selectFolder(options?: { title?: string }): Promise<IpcCommandResult<'dialog:select-folder'>>;
@@ -288,6 +294,8 @@ export interface WhimAPI {
   onAgentPresenceEnded(callback: (data: IpcEventPayload<'agent:presence-ended'>) => void): void;
   onAgentReplyReady(callback: (data: IpcEventPayload<'agent:reply-ready'>) => void): void;
   onCanvasContentUpdated(callback: (data: IpcEventPayload<'canvas:content-updated'>) => void): () => void;
+  /** Fires when a run publishes or updates an artifact. */
+  onCanvasArtifactPublished(callback: (data: IpcEventPayload<'canvas-artifact:published'>) => void): () => void;
 
   // ── Space events ────────────────────────────────────────
   onSpaceProcessed(callback: (id: string) => void): void;
@@ -461,6 +469,10 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     shareCanvas: (spaceId, format) => ipcRenderer.invoke('canvas:share', spaceId, format),
     exportCanvasToDestination: (spaceId, destinationId, format) =>
       ipcRenderer.invoke('canvas:export-to-destination', spaceId, destinationId, format),
+    listCanvasArtifacts: (spaceId) => ipcRenderer.invoke('canvas-artifact:list', spaceId),
+    listAllCanvasArtifacts: () => ipcRenderer.invoke('canvas-artifact:list-all'),
+    openCanvasArtifact: (spaceId, artifactId) =>
+      ipcRenderer.invoke('canvas-artifact:open', spaceId, artifactId),
     listExportDestinations: () => ipcRenderer.invoke('export-destinations:list'),
     saveExportDestinations: (destinations) =>
       ipcRenderer.invoke('export-destinations:save', destinations),
@@ -692,6 +704,12 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     onCanvasContentUpdated: (callback) => {
       const channel = 'canvas:content-updated';
       const handler = (_event: unknown, data: IpcEventPayload<'canvas:content-updated'>) => callback(data);
+      ipcRenderer.on(channel, handler);
+      return () => { ipcRenderer.removeListener(channel, handler); };
+    },
+    onCanvasArtifactPublished: (callback) => {
+      const channel = 'canvas-artifact:published';
+      const handler = (_event: unknown, data: IpcEventPayload<'canvas-artifact:published'>) => callback(data);
       ipcRenderer.on(channel, handler);
       return () => { ipcRenderer.removeListener(channel, handler); };
     },

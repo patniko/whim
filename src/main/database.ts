@@ -497,6 +497,33 @@ export function updateCanvasContent(spaceId: string, content: string): { title: 
   return { title: result.title, titleChanged: result.changed };
 }
 
+/**
+ * Most recent space produced by a skill, whatever its status.
+ *
+ * Completed spaces are included on purpose: a recurring skill should refresh
+ * the space the user already knows rather than leaving a trail of one space per
+ * occurrence, so a completed one is reopened instead of replaced.
+ */
+export function getLatestSpaceForSkill(skillId: string): Space | null {
+  const row = db.prepare(
+    `SELECT id, description, body, raw_text, client, due_at, due_at_utc, recurrence, completed_at, folder, session_id, source_skill_id, attachments, status, created_at, updated_at
+     FROM spaces WHERE source_skill_id = ?
+     ORDER BY created_at DESC LIMIT 1`
+  ).get(skillId) as any | undefined;
+  if (!row) return null;
+  return { ...row, attachments: parseAttachments(row.attachments) };
+}
+
+/** Whether a space has an agent session that is still working. */
+export function hasActiveAgentForSpace(spaceId: string): boolean {
+  const row = db.prepare(
+    `SELECT 1 FROM agent_sessions
+     WHERE space_id = ? AND status IN ('running', 'waiting-approval')
+     LIMIT 1`
+  ).get(spaceId);
+  return !!row;
+}
+
 /** Search spaces by description, body, or canvas content. */
 export function searchSpaces(query: string): Space[] {
   const like = `%${query}%`;

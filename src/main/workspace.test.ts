@@ -2,12 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { execFileSync } from 'child_process';
 
 // Mock electron before importing workspace
 vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] },
 }));
 
+import { CANVASES_DIR } from './canvas/artifact-store';
 import {
   slugify,
   createSpaceFolder,
@@ -171,6 +173,26 @@ describe('initWorkspace', () => {
     expect(content).toContain('.whim/*.db-journal');
     expect(content).toContain('*/attachments/');
     expect(content).toContain('*/uploads/');
+  });
+
+  it('leaves canvas reports tracked, since whim auto-commits and syncs the workspace', () => {
+    // A report's whole value is being openable days later, including on
+    // another machine. If the ignore rules swallowed it, the space would sync
+    // with its chip pointing at a file that is not there.
+    initWorkspace(tmpDir);
+    execFileSync('git', ['init', '-q'], { cwd: tmpDir });
+
+    const reportPath = path.join('my-space-ab12', CANVASES_DIR, 'questions', 'index.html');
+    fs.mkdirSync(path.dirname(path.join(tmpDir, reportPath)), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, reportPath), '<h1>report</h1>');
+
+    let ignored = false;
+    try {
+      execFileSync('git', ['check-ignore', '-q', reportPath], { cwd: tmpDir });
+      ignored = true;
+    } catch { /* non-zero exit means the path is tracked */ }
+
+    expect(ignored).toBe(false);
   });
 
   it('is idempotent: does not duplicate entries on second call', () => {

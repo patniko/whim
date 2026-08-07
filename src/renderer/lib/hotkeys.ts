@@ -1,4 +1,5 @@
-type HotkeyEvent = Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey'>;
+type HotkeyEvent = Pick<KeyboardEvent, 'key' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey'> &
+  Partial<Pick<KeyboardEvent, 'code'>>;
 
 type Modifier = 'control' | 'meta' | 'shift' | 'alt';
 
@@ -22,8 +23,20 @@ function normalizeAcceleratorKey(key: string): string {
   return key;
 }
 
-function normalizeEventKey(key: string): string {
-  return normalizeAcceleratorKey(key);
+function normalizeEventKey(event: HotkeyEvent): string {
+  if (event.code === 'Space') return 'Space';
+
+  // Option/Alt transforms printable keys on macOS (for example Option+K
+  // produces "˚"). Use the physical key code when the transformed value is
+  // not valid in Electron's ASCII-only accelerator syntax.
+  if (!/^[\x20-\x7e]+$/.test(event.key)) {
+    const letter = event.code?.match(/^Key([A-Z])$/)?.[1];
+    if (letter) return letter;
+    const digit = event.code?.match(/^Digit([0-9])$/)?.[1];
+    if (digit) return digit;
+  }
+
+  return normalizeAcceleratorKey(event.key);
 }
 
 function modifierPartsForEvent(event: HotkeyEvent, platform: string): string[] {
@@ -111,7 +124,7 @@ export function keyboardEventToAccelerator(event: HotkeyEvent, platform: string)
   if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) return null;
 
   const parts = modifierPartsForEvent(event, platform);
-  parts.push(normalizeEventKey(event.key));
+  parts.push(normalizeEventKey(event));
   return parts.join('+');
 }
 
@@ -130,7 +143,7 @@ export function eventMatchesAccelerator(event: HotkeyEvent, accelerator: string,
     }
   }
 
-  return normalizeEventKey(event.key) === parsed.key;
+  return normalizeEventKey(event) === parsed.key;
 }
 
 export function acceleratorsConflict(first: string, second: string, platform: string): boolean {

@@ -5,7 +5,7 @@
  * This file is **types only** — no runtime code.
  */
 
-import type { Space, CreateSpaceInput, Attachment, AgentAnchor, AgentSession, LinkPreviewMeta, RecurrenceResult, RecallMatch, Skill, SkillContent, SkillInvocationInput, SkillInvocationResult, SkillScheduleFrequency, CanvasTarget, UpdateState, ExportFormat, ExportDestination } from './types';
+import type { Space, CreateSpaceInput, Attachment, AgentAnchor, AgentSession, LinkPreviewMeta, RecurrenceResult, RecallMatch, Skill, SkillContent, SkillInvocationInput, SkillInvocationResult, SkillScheduleFrequency, CanvasTarget, SpaceCanvasArtifact, UpdateState, ExportFormat, ExportDestination } from './types';
 import type { ChatEvent, ElicitationSchema, ElicitationFieldValue } from './chat-types';
 import type { SubagentSummary, SubagentInfo } from './subagent-types';
 
@@ -467,6 +467,14 @@ export interface IpcCommands {
   'workspace:git-push': { args: []; result: { ok: true } | { error: string } };
   'workspace:git-pull': { args: []; result: { ok: true } | { error: string; conflict?: boolean } };
 
+  // ── Canvas artifacts ─────────────────────────────────────
+  'canvas-artifact:list': { args: [spaceId: string]; result: { artifacts: SpaceCanvasArtifact[] } };
+  'canvas-artifact:list-all': { args: []; result: { artifacts: SpaceCanvasArtifact[] } };
+  'canvas-artifact:open': {
+    args: [spaceId: string, artifactId: string];
+    result: { ok: true } | { error: string };
+  };
+
   // ── Canvas ───────────────────────────────────────────────
   'canvas:read': { args: [spaceId: string]; result: { content: string; error?: string } };
   'canvas:has-content': { args: [spaceId: string]; result: { hasContent: boolean } };
@@ -670,6 +678,7 @@ export interface IpcEvents {
   'agent:presence-started': { agentId: string; spaceId: string; persona: { name: string; handle: string }; anchor: AgentAnchor; threadId?: string };
   'agent:presence-ended': { agentId: string; spaceId: string };
   'agent:reply-ready': { agentId: string; spaceId: string; threadId: string | null; body: string };
+  'canvas-artifact:published': { spaceId: string; artifactId: string; title: string };
   'canvas:content-updated': { spaceId: string; content: string };
   'space:processed': { spaceId: string };
   'space:title-updated': { spaceId: string; title: string };

@@ -21,6 +21,49 @@ import { SANDBOX_WORKSPACE_SYSTEM_PROMPT } from './sandbox-policies';
 import { listSpaces, updateCanvasContent, listSkills } from '../database';
 import { getWorkspaceRepo } from '../cloud-agent';
 import { parseFrontmatter } from '../frontmatter';
+import { resolveRunCanvasConfig } from '../canvas/canvas-launch';
+import {
+  handleCanvasSessionEvent,
+  initCanvasLifecycle,
+  reconcileOpenCanvases,
+  releaseCanvasInstances,
+} from '../canvas/canvas-lifecycle';
+import { endCanvasRun, reportCanvasRun } from '../canvas/canvas-outcome';
+import { notifyCanvasRun } from '../canvas/canvas-notifier';
+
+/**
+ * Tell the user about a canvas run that has finished, once.
+ *
+ * Completion is observed here rather than at launch because the scheduler
+ * reports success as soon as a run starts, which says nothing about whether a
+ * report was ever produced.
+ */
+function reportFinishedCanvasRun(
+  agentId: string,
+  spaceId: string | null | undefined,
+): 'published' | 'no-output' | null {
+  const result = reportCanvasRun(agentId);
+  if (!result) return null;
+
+  if (result.outcome === 'no-output') {
+    console.warn(`[canvas] run ${agentId} finished without publishing an artifact (space ${result.spaceId})`);
+    endCanvasRun(agentId);
+    return 'no-output';
+  }
+
+  let label: string | undefined;
+  try {
+    const { getSpace } = require('../database');
+    label = spaceId ? getSpace(spaceId)?.description ?? undefined : undefined;
+  } catch { /* DB may be unavailable during shutdown */ }
+
+  notifyCanvasRun(result, label);
+  endCanvasRun(agentId);
+  return 'published';
+}
+
+/** Shown instead of "Completed" when a run owed a report and did not file one. */
+export const NO_REPORT_SUMMARY = 'Completed without a report';
 
 /**
  * Resolve cloud session options from the workspace. Attempts to detect the
@@ -123,6 +166,12 @@ export function initSdkRunner(deps: {
   persistence = deps.persistence;
   broker = deps.broker;
   subagentTracker = deps.subagentTracker;
+
+  // Closing an artifact window has to reach the runtime, so the lifecycle needs
+  // a way back to the live session for a run.
+  initCanvasLifecycle({
+    getSession: (agentId: string) => registry.get(agentId)?.session as any,
+  });
 }
 
 interface InitialPromptOptions {
@@ -726,6 +775,12 @@ export async function launchDocumentAgent(
     const useMxcOnlyAutoApprove = isSandboxed && enforcementMode === 'mxc-only';
     const cloudOpts = isCloudSandbox ? await resolveCloudSessionOptions(workingDir) : undefined;
     const personaPreamble = persona ? `${persona.instructions}\n\n` : '';
+    const canvasConfig = resolveRunCanvasConfig({
+      workspaceRoot,
+      workingDir,
+      spaceId,
+      agentId,
+    });
     const baseSystemPrompt = `${personaPreamble}The user has pressed "Run" on their space document. Execute all instructions in the document below. The full document is also available as canvas.md in your working directory.
 
 Invocation instructions:
@@ -761,6 +816,7 @@ ${cliToolsPrompt}`;
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
       ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
+      ...(canvasConfig?.session ?? {}),
       systemMessage: {
         mode: 'append',
         content: `\n${systemPrompt}`,
@@ -803,6 +859,7 @@ ${cliToolsPrompt}`;
       ...(sandboxState ? { sandbox: sandboxState } : {}),
       ...(persona?.yolo ? { yoloMode: true } : {}),
       ...(persona?.handle ? { personaHandle: persona.handle } : {}),
+      ...(canvasConfig?.run.scheduled ? { autoApproveCanvasTools: true } : {}),
       canvasSnapshot: { path: canvasPath, hashBefore: canvasHashBefore },
     };
     registry.set(agentId, record);
@@ -1073,6 +1130,17 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
 
     // Use resumeSession to restore full conversation history (not createSession
     // which would start a fresh session with no history).
+    // Canvases are re-registered from the space document, not from persisted
+    // instances: the runtime restores open canvases from its own durable
+    // projection and re-issues `canvas.open` against whatever provider
+    // reconnects, so a resumed run keeps refreshing its artifact only if the
+    // provider comes back with it.
+    const canvasConfig = resolveRunCanvasConfig({
+      workspaceRoot,
+      workingDir,
+      spaceId: persisted.space_id,
+      agentId,
+    });
     const session = await client.resumeSession(persisted.session_id, {
       workingDirectory: workingDir,
       mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
@@ -1080,6 +1148,7 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
       onPermissionRequest: broker.createPermissionHandler(findRecord),
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
+      ...(canvasConfig?.session ?? {}),
     });
 
     const validStatuses = new Set(['running', 'waiting-approval', 'completed', 'failed']);
@@ -1100,6 +1169,12 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
       pendingApprovals: new Map(),
       summary: persisted.summary || 'Resumed',
       runLocation: isCloud ? 'cloud' : 'local',
+      // Only a run that is still unattended keeps the carve-out. Resuming a
+      // finished scheduled session means a person is driving it now, and they
+      // should be asked like anyone else.
+      ...(canvasConfig?.run.scheduled && restoredStatus === 'running'
+        ? { autoApproveCanvasTools: true }
+        : {}),
       ...(persisted.yolo_mode ? { yoloMode: true } : {}),
       ...(persisted.persona_handle ? { personaHandle: persisted.persona_handle } : {}),
       ...(commentContextFromPersisted(persisted, workingDir)
@@ -1109,6 +1184,15 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
     registry.set(agentId, record);
 
     setupAgentEventListeners(session, record);
+
+    // The runtime restores the canvases that were open before the app closed.
+    // Adopting them means a window the user closes after a restart is still
+    // reported back, instead of lingering in the runtime's projection.
+    if (canvasConfig) {
+      try {
+        reconcileOpenCanvases(agentId, (session as any).openCanvases);
+      } catch { /* reconciliation is best-effort */ }
+    }
 
     // For cloud sessions, rediscover the Mission Control URL by re-enabling
     // remote control on the resumed session.  The cloud worker is still
@@ -1304,6 +1388,19 @@ async function restartExpiredSession(
       } catch { /* proceed without skills */ }
     }
 
+    // A restarted session is a new runtime session for the same space, so it
+    // must re-register canvases or the run would come back unable to refresh
+    // the artifact it was created to maintain.
+    const restartWorkspaceRoot = getConfig().workspace;
+    const canvasConfig = restartWorkspaceRoot
+      ? resolveRunCanvasConfig({
+        workspaceRoot: restartWorkspaceRoot,
+        workingDir,
+        spaceId: persisted.space_id,
+        agentId,
+      })
+      : null;
+
     // Build system message with previous context.  Prefer the rich
     // persisted transcript when available; fall back to prompt+summary
     // when the transcript is empty (e.g. agent crashed before producing
@@ -1343,6 +1440,7 @@ async function restartExpiredSession(
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
       ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
+      ...(canvasConfig?.session ?? {}),
       systemMessage: { mode: 'append', content: systemContent },
     });
 
@@ -1361,6 +1459,7 @@ async function restartExpiredSession(
       pendingApprovals: new Map(),
       summary: persisted.summary || 'Session restarted',
       restarted: true,
+      ...(canvasConfig?.run.scheduled ? { autoApproveCanvasTools: true } : {}),
       // The replacement session is always local — even when the original
       // was cloud — because we no longer have access to the original
       // remote worker.  Record `run_location='local'` so subsequent
@@ -1539,6 +1638,15 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
         });
       }
     } catch { /* persistence is best-effort */ }
+
+    // Canvas instances are shared state: the agent opens and closes them while
+    // the user closes windows, so both directions have to be reconciled or the
+    // runtime keeps rehydrating canvases the user already dismissed.
+    try {
+      if (typeof event?.type === 'string' && event.type.startsWith('session.canvas.')) {
+        handleCanvasSessionEvent(agentId, event);
+      }
+    } catch { /* canvas reconciliation is best-effort */ }
   });
 
   // SDK events wrap payloads in event.data; fall back to top-level for compat
@@ -1685,10 +1793,24 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
         } catch { /* non-fatal: file may not exist */ }
       }
 
+      const canvasOutcome = reportFinishedCanvasRun(agentId, record.spaceId);
+      // The unattended run is over. Anything that happens next is somebody
+      // typing, so the scheduled carve-out should no longer apply.
+      record.autoApproveCanvasTools = false;
+      // A run that owed a report and filed none looks identical to a successful
+      // one on the Workers tab — no report, no notification, and a card that
+      // says "Completed". Say what actually happened instead.
+      if (canvasOutcome === 'no-output') {
+        record.summary = NO_REPORT_SUMMARY;
+        persistence.updateStatus(record);
+        notifier.notifyRenderer('agent:completed', { agentId, summary: record.summary });
+        logIntentActivity(record, 'agent.completed', { summary: record.summary });
+      }
+
       // Ephemeral agents: remove from registry after a short delay so the
       // renderer has time to process final events, then they vanish from history.
       if (record.ephemeral) {
-        setTimeout(() => registry.delete(agentId), 30_000);
+        setTimeout(() => { releaseCanvasInstances(agentId); endCanvasRun(agentId); registry.delete(agentId); }, 30_000);
       }
     }
   });
@@ -1719,8 +1841,12 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
       cleanupSandboxConfigs(agentId);
     }
 
+    // A failed run may still have published before it broke; the user should
+    // hear about work that survived rather than lose it to the failure.
+    reportFinishedCanvasRun(agentId, record.spaceId);
+
     if (record.ephemeral) {
-      setTimeout(() => registry.delete(agentId), 30_000);
+      setTimeout(() => { releaseCanvasInstances(agentId); endCanvasRun(agentId); registry.delete(agentId); }, 30_000);
     }
   });
 

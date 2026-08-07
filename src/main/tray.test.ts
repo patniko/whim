@@ -30,12 +30,21 @@ const h = vi.hoisted(() => {
     onCanvasWindowsChanged: vi.fn((_cb: () => void) => () => {}),
     openAgentChatInMainWindow: vi.fn(),
   };
+  const artifacts = {
+    listActiveArtifacts: vi.fn((): any[] => []),
+  };
+  const artifactWindow = {
+    openArtifactWindow: vi.fn(),
+  };
+  const canvasEvents = {
+    onArtifactPublished: vi.fn((_cb: () => void) => () => {}),
+  };
   const svc = {
     listTrayWorkers: vi.fn((): Worker[] => []),
     onAgentListChanged: vi.fn((_cb: () => void) => () => {}),
     setAppRemote: vi.fn().mockResolvedValue({ enabled: true, agents: [] }),
   };
-  return { lastTemplateRef, trayClickRef, trayInstance, wm, svc };
+  return { lastTemplateRef, trayClickRef, trayInstance, wm, svc, artifacts, artifactWindow, canvasEvents };
 });
 
 vi.mock('electron', () => {
@@ -60,6 +69,9 @@ vi.mock('electron', () => {
 
 vi.mock('./window-manager', () => h.wm);
 vi.mock('./agent-service', () => h.svc);
+vi.mock('./ipc/canvas-artifact-handlers', () => h.artifacts);
+vi.mock('./canvas/artifact-window', () => h.artifactWindow);
+vi.mock('./canvas/canvas-events', () => h.canvasEvents);
 vi.mock('./config', () => {
   const store: Record<string, any> = { remoteEnabled: false };
   return { getConfigValue: vi.fn((key: string) => store[key]) };
@@ -87,6 +99,7 @@ describe('tray menu', () => {
     h.trayClickRef.current = null;
     h.wm.getOpenCanvases.mockReturnValue([]);
     h.svc.listTrayWorkers.mockReturnValue([]);
+    h.artifacts.listActiveArtifacts.mockReturnValue([]);
   });
 
   afterEach(() => {
@@ -99,6 +112,51 @@ describe('tray menu', () => {
     expect(itemByLabelIncludes('Show/Hide')).toBeUndefined();
     expect(itemByLabelIncludes('Workers')).toBeUndefined();
     expect(itemByLabelIncludes('Canvases')).toBeUndefined();
+    expect(itemByLabelIncludes('Reports')).toBeUndefined();
+  });
+
+  it('lists reports from the artifact index and opens one on click', () => {
+    h.artifacts.listActiveArtifacts.mockReturnValue([
+      { spaceId: 's1', artifactId: 'questions', title: 'Open questions', status: '3 open questions', published: true, updatedAt: '', url: '' },
+    ]);
+    createTray();
+
+    expect(itemByLabelIncludes('Reports')?.enabled).toBe(false);
+
+    const report = itemByLabelIncludes('3 open questions');
+    expect(report?.label).toContain('📊');
+
+    (report!.click as any)();
+    expect(h.artifactWindow.openArtifactWindow).toHaveBeenCalledWith({
+      spaceId: 's1',
+      artifactId: 'questions',
+      title: 'Open questions',
+      focus: true,
+    });
+  });
+
+  it('caps the report list so the menu stays usable', () => {
+    h.artifacts.listActiveArtifacts.mockReturnValue(
+      Array.from({ length: 20 }, (_, i) => ({
+        spaceId: `s${i}`, artifactId: `a${i}`, title: `Report ${i}`, published: true, updatedAt: '', url: '',
+      })),
+    );
+    createTray();
+
+    const reportItems = template().filter(i => typeof i.label === 'string' && i.label.includes('Report '));
+    expect(reportItems).toHaveLength(8);
+  });
+
+  it('survives a workspace that cannot be read', () => {
+    h.artifacts.listActiveArtifacts.mockImplementation(() => { throw new Error('no workspace'); });
+
+    expect(() => createTray()).not.toThrow();
+    expect(itemByLabelIncludes('Reports')).toBeUndefined();
+  });
+
+  it('refreshes when a run publishes a report', () => {
+    createTray();
+    expect(h.canvasEvents.onArtifactPublished).toHaveBeenCalledTimes(1);
   });
 
   it('shows a Workers section with status icon + summary and wires the click', () => {

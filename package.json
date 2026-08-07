@@ -1,6 +1,6 @@
 {
   "name": "whim",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "description": "Quick capture from system tray",
   "productName": "whim",
   "main": "dist/main/main.js",
@@ -109,8 +109,8 @@
   "homepage": "https://github.com/patniko/whim#readme",
   "type": "commonjs",
   "dependencies": {
-    "@github/copilot": "1.0.71",
-    "@github/copilot-sdk": "1.0.7",
+    "@github/copilot": "1.0.78",
+    "@github/copilot-sdk": "1.0.9",
     "@huggingface/transformers": "^4.2.0",
     "@milkdown/kit": "^7.21.3",
     "@milkdown/react": "^7.21.3",
@@ -122,7 +122,7 @@
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.3",
     "html-to-docx": "^1.8.0",
-    "js-yaml": "^4.3.0",
+    "js-yaml": "^4.3.1",
     "linkedom": "^0.18.12",
     "lucide-react": "^1.8.0",
     "marked": "^18.0.5",

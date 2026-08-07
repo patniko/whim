@@ -397,11 +397,16 @@ export function rotateWebRemoteToken(): string {
 }
 
 export function loadConfig(): AppConfig {
+  let preserveInactiveProfileState = false;
   try {
     if (fs.existsSync(CONFIG_PATH)) {
       const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
       config = { ...DEFAULT_CONFIG, ...parsed };
+      preserveInactiveProfileState =
+        Object.prototype.hasOwnProperty.call(parsed, 'activeProfileId') &&
+        parsed.activeProfileId === null &&
+        parsed.workspace === null;
       // Deep-merge sandbox default so missing fields fall back to safe defaults
       // when the persisted config predates a newly-added SandboxPolicy field.
       config.sandboxDefaultPolicy = {
@@ -439,7 +444,7 @@ export function loadConfig(): AppConfig {
   // happens to look different right now.
   config.webRemoteBindSelections = normalizeBindSelections(config.webRemoteBindSelections);
   ensureWebRemoteToken();
-  migrateProfiles();
+  migrateProfiles(preserveInactiveProfileState);
   return config;
 }
 
@@ -448,11 +453,12 @@ export function loadConfig(): AppConfig {
  *
  * - Seeds a first profile from `config.workspace` for installs that predate
  *   profiles (so existing users keep their workspace as "profile 1").
- * - Guarantees `activeProfileId` points at a real profile when any exist.
+ * - Repairs missing or invalid active profile ids without undoing an explicit
+ *   fresh-start state.
  * - Keeps `config.workspace` mirrored to the active profile's path so the
  *   large body of code that reads `getConfigValue('workspace')` is unaffected.
  */
-function migrateProfiles(): void {
+function migrateProfiles(preserveInactiveProfileState: boolean): void {
   // Clone so we never mutate the shared DEFAULT_CONFIG.profiles array reference
   // (a shallow `{ ...DEFAULT_CONFIG }` in loadConfig would otherwise alias it).
   config.profiles = Array.isArray(config.profiles) ? config.profiles.slice() : [];
@@ -469,7 +475,13 @@ function migrateProfiles(): void {
   }
 
   if (config.profiles.length > 0) {
-    if (!config.activeProfileId || !config.profiles.some((p) => p.id === config.activeProfileId)) {
+    const activeExists = config.profiles.some((p) => p.id === config.activeProfileId);
+    if (!activeExists && preserveInactiveProfileState) {
+      config.activeProfileId = null;
+      config.workspace = null;
+      return;
+    }
+    if (!activeExists) {
       config.activeProfileId = config.profiles[0].id;
     }
     const active = config.profiles.find((p) => p.id === config.activeProfileId);
@@ -606,6 +618,7 @@ export function removeProfileById(id: string): void {
 export function setActiveProfile(id: string | null): WorkspaceProfile | null {
   if (id === null) {
     config.activeProfileId = null;
+    config.workspace = null;
     saveConfig();
     return null;
   }
@@ -674,4 +687,3 @@ export function setExportDestinations(value: unknown): ExportDestination[] {
 export function getExportDestinationById(id: string): ExportDestination | null {
   return (config.exportDestinations || []).find((d) => d.id === id) ?? null;
 }
-

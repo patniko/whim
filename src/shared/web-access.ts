@@ -172,6 +172,15 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   'canvas:export': 'deny',
   'canvas:share': 'deny',
   'canvas:export-to-destination': 'deny',
+  // Reports are metadata reads, so a remote user can see one exists.
+  'canvas-artifact:list': 'allow',
+  'canvas-artifact:list-all': 'allow',
+  // Opening one drives a native BrowserWindow on the desktop, and the report
+  // itself is served over the whim-artifact:// scheme, which a browser cannot
+  // reach. Popping a window on the host that the remote user cannot see is
+  // worse than degrading, so this stays desktop-only until the gateway can
+  // serve artifact content over HTTP.
+  'canvas-artifact:open': 'desktop-only',
   'export-destinations:list': 'allow',
   'export-destinations:save': 'deny',
 
