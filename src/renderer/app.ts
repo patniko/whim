@@ -441,6 +441,8 @@ import {
 } from './state/ipc-bridge';
 import { mountLists } from './views/mount.tsx';
 import { bootValue, UNKNOWN_CLI_RUNTIME } from './boot-guard';
+import { isWebRemote } from './transport-mode';
+import { shouldStartHidden, shouldHideWindow } from './window-chrome';
 import type { WhimAPI as PreloadWhimAPI } from '../shared/whim-api';
 import type { Skill as SharedSkill, CanvasAgentStateSnapshot, ExportFormat, ExportDestination, SkillInvocationInput, SkillInvocationResult, UpdateState } from '../shared/types';
 
@@ -564,9 +566,16 @@ let windowSide: 'left' | 'right' = 'right';
 let windowVisualState: 'hidden' | 'sliding-in' | 'visible' | 'sliding-out' = 'hidden';
 let slideTransitionId = 0;
 
-// Start with content off-screen (no transition) so first show() has no flash
-if (!isCanvasMode && !isSettingsMode) {
+// Start with content off-screen (no transition) so first show() has no flash.
+// Desktop only — see window-chrome.ts for why a browser must never do this.
+if (shouldStartHidden({ isCanvasMode, isSettingsMode, isWebRemote: isWebRemote() })) {
   appEl.classList.add('app-hidden-right', 'app-no-transition');
+}
+
+// The browser has no window lifecycle, so the app is visible from the start
+// and `slideOut()` must not mistake it for already-hidden.
+if (isWebRemote()) {
+  windowVisualState = 'visible';
 }
 
 function slideIn(side: 'left' | 'right'): void {
@@ -603,6 +612,15 @@ function slideIn(side: 'left' | 'right'): void {
 }
 
 function slideOut(callback?: () => void): void {
+  // Nothing to slide out of in a browser: the page is the window, and hiding
+  // the interface would strand the user at a blank tab with no hotkey to
+  // bring it back. Callers still get their callback — dismissing a sub-view
+  // and then "hiding" is a no-op here, not a failure.
+  if (!shouldHideWindow({ isWebRemote: isWebRemote() })) {
+    callback?.();
+    return;
+  }
+
   // If already hidden or the window is in canvas/expanded mode, hide immediately
   if (windowVisualState === 'hidden') {
     whimAPI.hideWindow();
