@@ -14,6 +14,20 @@
 const SHELL = self.__WHIM_SHELL__ || [];
 const CACHE = `whim-shell-${self.__WHIM_BUILD__ || 'dev'}`;
 
+/*
+ * Only these exact paths may be answered from cache. The shell is entirely
+ * content-hashed, so membership here is what makes cache-first safe.
+ *
+ * This set used to be implicit — anything same-origin outside /api was cached
+ * on the way past — which quietly pinned the *desktop* remote to whichever
+ * build a browser happened to see first. /desktop/app.js and /desktop/boot.js
+ * are not content-hashed, so the cached copy shadowed every later build at the
+ * same URL, and the cache name could not save us either: it is derived from
+ * the shell list, which never mentioned /desktop. A browser could therefore
+ * hold a stale renderer indefinitely while the desktop app ran the new code.
+ */
+const CACHEABLE = new Set(SHELL);
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
@@ -53,6 +67,10 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Everything else in the shell is content-hashed, so cache-first is safe.
+  // Anything *not* in the shell goes to the network every time: an unhashed
+  // URL cached here would outlive the build that produced it.
+  if (!CACHEABLE.has(url.pathname)) return;
+
   event.respondWith(
     caches.match(request).then((hit) => {
       if (hit) return hit;

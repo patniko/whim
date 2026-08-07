@@ -182,6 +182,12 @@ function fingerprintWebAssets() {
  * The service worker precaches the shell, but the bundle filenames are only
  * known after fingerprinting — so inject the resolved list (and a build id
  * derived from it, which is what invalidates the old cache) at build time.
+ *
+ * The build id also folds in the *content* of the desktop remote's assets.
+ * They are served under stable, unhashed URLs, so their names alone can never
+ * signal that they changed; without this, a desktop-only change left the cache
+ * name identical, `activate` kept the old cache, and browsers that had already
+ * stored those files went on serving the previous build.
  */
 function writeServiceWorkerShell(distDir, html) {
   const swPath = path.join(distDir, 'sw.js');
@@ -193,10 +199,29 @@ function writeServiceWorkerShell(distDir, html) {
     .map((href) => (href.startsWith('/') ? href : `/${href}`));
 
   const shell = ['/index.html', ...hashed, '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
-  const buildId = crypto.createHash('sha256').update(shell.join('|')).digest('hex').slice(0, 12);
+  const buildId = crypto
+    .createHash('sha256')
+    .update([...shell, ...desktopAssetFingerprints(distDir)].join('|'))
+    .digest('hex')
+    .slice(0, 12);
   const preamble = `self.__WHIM_SHELL__ = ${JSON.stringify(shell)};\nself.__WHIM_BUILD__ = ${JSON.stringify(buildId)};\n`;
 
   fs.writeFileSync(swPath, preamble + fs.readFileSync(swPath, 'utf-8'));
+}
+
+/**
+ * Content hashes for the desktop remote's unhashed assets, so a change to the
+ * renderer rotates the service worker cache name.
+ */
+function desktopAssetFingerprints(distDir) {
+  const desktopDir = path.join(distDir, 'desktop');
+  if (!fs.existsSync(desktopDir)) return [];
+
+  return fs
+    .readdirSync(desktopDir)
+    .filter((name) => /\.(js|css|html)$/.test(name))
+    .sort()
+    .map((name) => `desktop/${name}:${contentHash(path.join(desktopDir, name))}`);
 }
 
 /**
@@ -299,9 +324,10 @@ async function main() {
     ]);
     copyRendererAssets();
     copyWebAssets();
-    fingerprintWebAssets();
-    // After fingerprinting, which only rewrites the lightweight client's HTML.
+    // Before fingerprinting: the service worker's build id folds in the hashes
+    // of the desktop assets, so they have to exist first.
     assembleDesktopBundle();
+    fingerprintWebAssets();
   }
 }
 
