@@ -4,6 +4,7 @@ import { Bold, Italic, Strikethrough, Code, MessageSquarePlus, GitFork, FileOutp
 import type { CanvasAgentInteraction, CanvasThreadAgentStatus, CommentThread } from '../types';
 import type { Rect, FormatMark } from './geometry';
 import { useAnchoredPosition } from './floating';
+import { eventMatchesAccelerator, formatAccelerator } from '../../lib/hotkeys';
 import { MentionPopup } from './MentionUI';
 import { detectMentionBeforeCaret, filterMentionCandidates, type MentionCandidate, type TextMentionQuery } from './mentions';
 import { ApprovalTile } from '../../chat/tiles/ApprovalTile';
@@ -258,6 +259,24 @@ function CommentMentionTextarea({
   );
 }
 
+interface SelectionAction {
+  id: string;
+  label: string;
+  accelerator: string;
+  icon: React.ReactNode;
+  /** Present when the button shows a text label next to its icon. */
+  text?: string;
+  run: () => void;
+}
+
+/**
+ * Bold and italic belong to the editor's own keymap. They are listed here so
+ * the tooltip can show the shortcut, but the toolbar must not claim them —
+ * intercepting them would take the action away from ProseMirror and out of its
+ * undo history.
+ */
+const EDITOR_OWNED_ACTIONS = new Set(['strong', 'emphasis']);
+
 /** Floating toolbar shown over a text selection. */
 export function SelectionToolbar({
   rect,
@@ -273,36 +292,73 @@ export function SelectionToolbar({
   onExtract?: () => void;
 }) {
   const { ref, style } = useAnchoredPosition(rect, { placement: 'above', align: 'center' });
+  const platform = typeof navigator === 'undefined' ? '' : navigator.platform;
+
+  const items = useMemo<SelectionAction[]>(() => ([
+    { id: 'strong', label: 'Bold', accelerator: 'CommandOrControl+B', icon: <Bold size={14} />, run: () => onFormat('strong') },
+    { id: 'emphasis', label: 'Italic', accelerator: 'CommandOrControl+I', icon: <Italic size={14} />, run: () => onFormat('emphasis') },
+    { id: 'strikethrough', label: 'Strikethrough', accelerator: 'CommandOrControl+Shift+X', icon: <Strikethrough size={14} />, run: () => onFormat('strikethrough') },
+    { id: 'inlineCode', label: 'Inline code', accelerator: 'CommandOrControl+E', icon: <Code size={14} />, run: () => onFormat('inlineCode') },
+    { id: 'comment', label: 'Comment', accelerator: 'CommandOrControl+Shift+M', icon: <MessageSquarePlus size={14} />, text: 'Comment', run: onComment },
+    ...(onFork ? [{ id: 'fork', label: 'Fork to new space', accelerator: 'CommandOrControl+Shift+F', icon: <GitFork size={14} />, run: onFork }] : []),
+    ...(onExtract ? [{ id: 'extract', label: 'Extract to page', accelerator: 'CommandOrControl+Shift+O', icon: <FileOutput size={14} />, run: onExtract }] : []),
+  ]), [onFormat, onComment, onFork, onExtract]);
+
+  // The toolbar only exists while there is a selection, so binding the
+  // accelerators to its lifetime is what scopes them: no selection, no
+  // shortcut, and nothing to unregister by hand.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      for (const item of items) {
+        if (EDITOR_OWNED_ACTIONS.has(item.id)) continue;
+        if (!eventMatchesAccelerator(e, item.accelerator, platform)) continue;
+        e.preventDefault();
+        e.stopPropagation();
+        item.run();
+        return;
+      }
+    };
+    window.addEventListener('keydown', handler, true);
+    return () => window.removeEventListener('keydown', handler, true);
+  }, [items, platform]);
+
+  // Roving focus: once a button has focus the arrows walk the toolbar, so it
+  // can also be driven without memorising the accelerators.
+  const handleArrowKeys = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    const buttons = Array.from(e.currentTarget.querySelectorAll('button'));
+    const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (current < 0) return;
+    e.preventDefault();
+    const step = e.key === 'ArrowRight' ? 1 : -1;
+    buttons[(current + step + buttons.length) % buttons.length].focus();
+  };
+
   return (
     <Floating>
-      <div ref={ref} className="md-selection-toolbar" style={style} onMouseDown={(e) => e.preventDefault()}>
-        <button className="md-selection-btn md-selection-icon" title="Bold (⌘B)" onClick={() => onFormat('strong')}>
-          <Bold size={14} />
-        </button>
-        <button className="md-selection-btn md-selection-icon" title="Italic (⌘I)" onClick={() => onFormat('emphasis')}>
-          <Italic size={14} />
-        </button>
-        <button className="md-selection-btn md-selection-icon" title="Strikethrough" onClick={() => onFormat('strikethrough')}>
-          <Strikethrough size={14} />
-        </button>
-        <button className="md-selection-btn md-selection-icon" title="Inline code" onClick={() => onFormat('inlineCode')}>
-          <Code size={14} />
-        </button>
-        <span className="md-selection-sep" />
-        <button className="md-selection-btn" title="Comment" onClick={onComment}>
-          <MessageSquarePlus size={14} />
-          <span>Comment</span>
-        </button>
-        {onFork && (
-          <button className="md-selection-btn md-selection-icon" title="Fork to new space" onClick={onFork}>
-            <GitFork size={14} />
-          </button>
-        )}
-        {onExtract && (
-          <button className="md-selection-btn md-selection-icon" title="Extract to page" onClick={onExtract}>
-            <FileOutput size={14} />
-          </button>
-        )}
+      <div
+        ref={ref}
+        className="md-selection-toolbar"
+        style={style}
+        role="toolbar"
+        aria-label="Selection actions"
+        onKeyDown={handleArrowKeys}
+        onMouseDown={(e) => e.preventDefault()}
+      >
+        {items.map(item => (
+          <React.Fragment key={item.id}>
+            {item.id === 'comment' && <span className="md-selection-sep" />}
+            <button
+              className={`md-selection-btn${item.text ? '' : ' md-selection-icon'}`}
+              title={`${item.label} (${formatAccelerator(item.accelerator, platform)})`}
+              aria-label={item.label}
+              onClick={item.run}
+            >
+              {item.icon}
+              {item.text && <span>{item.text}</span>}
+            </button>
+          </React.Fragment>
+        ))}
       </div>
     </Floating>
   );
