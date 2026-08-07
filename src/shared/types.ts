@@ -303,6 +303,16 @@ export interface Skill {
   next_run_at: string | null;
   /** Last time this skill was auto-triggered in UTC ISO 8601 */
   last_run_at: string | null;
+  /**
+   * Canvas this skill's runs publish a report to, or null when reports are
+   * off. Resolved from the `canvas` field in SKILL.md rather than stored in
+   * the projection, because the file is the source of truth for it.
+   */
+  canvas?: string | null;
+  /** Whether repeat runs refresh one space or start a new one. */
+  space_mode?: 'new' | 'reuse' | null;
+  /** The report template this skill ships in `canvas/`, when it has one. */
+  canvas_template?: { id: string; displayName: string } | null;
   created_at: string;
   updated_at: string;
 }

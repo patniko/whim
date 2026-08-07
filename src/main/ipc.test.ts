@@ -236,6 +236,7 @@ import { isInitialized, createSpace, listSpaces, updateSpace, deleteSpace, getSp
 import { classifyInput, setAIModel, evaluateRecurrence } from './ai';
 import { initSpaceCanvas, materializeSpaceCanvas, readCanvas, writeCanvas, scheduleAutoCommit, commitNow, archiveSpaceFolder, deleteSpaceFolder } from './workspace';
 import { getConfigValue, setConfigValue } from './config';
+import { parseFrontmatter, serializeFrontmatter } from './frontmatter';
 import { listDiscoveredMcpServers } from './mcp';
 import { validateMcpServers, validateCliTools } from './validators';
 import { launchSession, resolveCommandOnPath, resolveCmdToJs, invalidateCliPath } from './session';
@@ -1130,6 +1131,94 @@ describe('IPC handlers', () => {
       expect(prompt).toContain('pr-review');
       expect(prompt).toContain('issue-triage');
       expect(prompt).toContain('DO NOT overwrite');
+    });
+  });
+
+  describe('skill report settings', () => {
+    /** Serve SKILL.md from memory and leave the skill without its own template. */
+    function stubSkillFile(frontmatter: Record<string, unknown>, body = 'body') {
+      vi.mocked(parseFrontmatter).mockReturnValueOnce({ frontmatter, body } as any);
+      const read = vi.spyOn(fs, 'readFileSync').mockReturnValue('stub' as any);
+      const exists = vi.spyOn(fs, 'existsSync').mockImplementation(((p: any) =>
+        !String(p).endsWith('canvas.json')) as any);
+      return () => { read.mockRestore(); exists.mockRestore(); };
+    }
+
+    it('reports whether a skill publishes, reading SKILL.md rather than the DB', async () => {
+      const { listSkills } = await import('./database');
+      vi.mocked(listSkills).mockReturnValueOnce([
+        { id: 'digest', name: 'Digest', description: '', folder: '', filePath: '/mock/workspace/.agents/skills/digest/SKILL.md', created_at: '', updated_at: '' },
+      ] as any);
+      const restore = stubSkillFile({ name: 'Digest', canvas: true, space_mode: 'reuse' });
+
+      const skills = invoke('skill:list');
+      restore();
+
+      expect(skills[0].canvas).toBe('whim-report');
+      expect(skills[0].space_mode).toBe('reuse');
+    });
+
+    it('leaves canvas null for a skill that does not opt in', async () => {
+      const { listSkills } = await import('./database');
+      vi.mocked(listSkills).mockReturnValueOnce([
+        { id: 'digest', name: 'Digest', description: '', folder: '', filePath: '/mock/workspace/.agents/skills/digest/SKILL.md', created_at: '', updated_at: '' },
+      ] as any);
+      const restore = stubSkillFile({ name: 'Digest' });
+
+      const skills = invoke('skill:list');
+      restore();
+
+      expect(skills[0].canvas).toBeNull();
+    });
+
+    it('writes canvas: true for the built-in report so the file keeps no whim-specific id', () => {
+      const restore = stubSkillFile({ name: 'Digest' });
+      vi.mocked(serializeFrontmatter).mockClear();
+
+      invoke('skill:set-canvas', 'digest', 'whim-report', 'reuse');
+      const written = vi.mocked(serializeFrontmatter).mock.calls[0][0] as any;
+      restore();
+
+      expect(written.canvas).toBe(true);
+      expect(written.space_mode).toBe('reuse');
+    });
+
+    it('records a skill template by id rather than as the built-in report', () => {
+      const restore = stubSkillFile({ name: 'Digest' });
+      vi.mocked(serializeFrontmatter).mockClear();
+
+      invoke('skill:set-canvas', 'digest', 'open-questions', 'new');
+      const written = vi.mocked(serializeFrontmatter).mock.calls[0][0] as any;
+      restore();
+
+      expect(written.canvas).toBe('open-questions');
+      expect(written.space_mode).toBe('new');
+    });
+
+    it('removes both fields when reports are turned off', () => {
+      const restore = stubSkillFile({ name: 'Digest', canvas: true, space_mode: 'reuse' });
+      vi.mocked(serializeFrontmatter).mockClear();
+
+      invoke('skill:set-canvas', 'digest', null, null);
+      const written = vi.mocked(serializeFrontmatter).mock.calls[0][0] as any;
+      restore();
+
+      expect(written).not.toHaveProperty('canvas');
+      expect(written).not.toHaveProperty('space_mode');
+    });
+
+    it('rejects a canvas id that is not a plain slug', () => {
+      vi.mocked(fs.writeFileSync).mockClear();
+      const result = invoke('skill:set-canvas', 'digest', '../../etc/passwd', null);
+      expect(result).toEqual({ error: 'invalid_canvas' });
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('rejects an unknown space mode', () => {
+      vi.mocked(fs.writeFileSync).mockClear();
+      const result = invoke('skill:set-canvas', 'digest', 'whim-report', 'sometimes');
+      expect(result).toEqual({ error: 'invalid_space_mode' });
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
   });
 

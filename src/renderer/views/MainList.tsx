@@ -24,6 +24,7 @@ export interface MainListProps {
   agentsActions: AgentsListActions;
   skillsActions: {
     onSkillClick: (skillId: string) => void;
+    onRunNow: (skillId: string) => void;
     onSchedule: (skillId: string) => void;
     onCreateSpace: (skillId: string) => void;
     onOpenFolder: (skillId: string) => void;

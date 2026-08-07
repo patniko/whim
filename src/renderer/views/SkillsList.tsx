@@ -9,6 +9,7 @@ export interface SkillsListProps {
   /** Optional search filter applied client-side (matches legacy renderSkillsList). */
   filterQuery?: string;
   onSkillClick: (skillId: string) => void;
+  onRunNow: (skillId: string) => void;
   onSchedule: (skillId: string) => void;
   onCreateSpace: (skillId: string) => void;
   onOpenFolder: (skillId: string) => void;
@@ -35,6 +36,7 @@ function nextRunLabel(nextRunAt: string | null): string {
 const SkillRow = React.memo(function SkillRow({
   skill,
   onSkillClick,
+  onRunNow,
   onSchedule,
   onCreateSpace,
   onOpenFolder,
@@ -42,6 +44,7 @@ const SkillRow = React.memo(function SkillRow({
 }: {
   skill: Skill;
   onSkillClick: (id: string) => void;
+  onRunNow: (id: string) => void;
   onSchedule: (id: string) => void;
   onCreateSpace: (id: string) => void;
   onOpenFolder: (id: string) => void;
@@ -109,6 +112,11 @@ const SkillRow = React.memo(function SkillRow({
         <div className="space-meta">
           {scheduleText ? <span className="skill-schedule">⏰ {scheduleText}</span> : null}
           {nextRun ? <span className="skill-next-run">next: {nextRun}</span> : null}
+          {skill.canvas ? (
+            <span className="skill-report" title="Publishes a report when it runs">
+              📊 report
+            </span>
+          ) : null}
           {lastRun ? <span>last: {lastRun}</span> : null}
         </div>
       </div>
@@ -116,7 +124,15 @@ const SkillRow = React.memo(function SkillRow({
         <button
           type="button"
           className="skill-action"
-          title="Schedule"
+          title="Run now"
+          onClick={(e) => { e.stopPropagation(); onRunNow(skill.id); }}
+        >
+          ▶
+        </button>
+        <button
+          type="button"
+          className="skill-action"
+          title="Schedule & report"
           onClick={(e) => { e.stopPropagation(); onSchedule(skill.id); }}
         >
           ⏰
@@ -181,6 +197,7 @@ export function SkillsList(props: SkillsListProps): React.ReactElement {
           key={skill.id}
           skill={skill}
           onSkillClick={props.onSkillClick}
+          onRunNow={props.onRunNow}
           onSchedule={props.onSchedule}
           onCreateSpace={props.onCreateSpace}
           onOpenFolder={props.onOpenFolder}

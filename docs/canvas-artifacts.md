@@ -44,6 +44,18 @@ what differs is what grants the capability and where the report is linked from.
 
 ## Enabling reports on a skill
 
+Open the skill's schedule picker — the ⏰ button on its card, or **Set Schedule…**
+in the skill editor — and tick **Publish a report**. A skill that ships its own
+template offers a **Layout** choice between it and the built-in report, and
+**Space** decides whether repeat runs refresh one space or each get their own.
+Saving writes the same two frontmatter fields described below, so a skill
+configured by hand and one configured from the picker are the same thing.
+
+The picker also has **▶ Run now**, as does each skill card. It saves whatever the
+picker is showing and runs the skill immediately, without moving the next
+scheduled run — checking that a report comes out the way you wanted should not
+cost you tomorrow's run.
+
 Two frontmatter fields in `SKILL.md`:
 
 ```yaml
@@ -309,6 +321,7 @@ then on somebody is driving.
 | File | Responsibility |
 |---|---|
 | `src/main/canvas/artifact-store.ts` | Durable store; manifests, atomic publish, confinement |
+| `src/main/ipc/skill-handlers.ts` | Reading and writing a skill's report settings for the UI |
 | `src/main/canvas/artifact-protocol.ts` | The `whim-artifact://` scheme and its CSP |
 | `src/main/canvas/artifact-window.ts` | Hardened report windows |
 | `src/main/canvas/sdk-canvas-provider.ts` | The built-in `whim-report` canvas |

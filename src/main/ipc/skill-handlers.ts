@@ -9,14 +9,58 @@ import { getSkillsDir, syncAllSkills } from '../skill-watcher';
 import { pickEmoji } from '../emoji-picker';
 import { computeNextRunAt } from '../services/scheduler';
 import { invokeSkill } from '../skill-invocation';
+import { WHIM_REPORT_CANVAS_ID } from '../canvas/sdk-canvas-provider';
+import { loadSkillCanvasDefinition } from '../canvas/skill-canvas-template';
 import type { SkillFrontmatter, Skill, SkillInvocationInput, SkillScheduleFrequency } from '../../shared/types';
 
 const SKILL_FILE = 'SKILL.md';
 
+/**
+ * Resolve the report settings a skill declares on disk.
+ *
+ * These deliberately are not columns on the `skills` table: SKILL.md is the
+ * source of truth for them, and a projection rebuilt from the event log has
+ * never seen the file. Reading them at list time keeps the UI showing what the
+ * run will actually do, including edits made in an editor outside whim.
+ */
+function readCanvasSettings(skill: Skill): Pick<Skill, 'canvas' | 'space_mode' | 'canvas_template'> {
+  let frontmatter: SkillFrontmatter | null = null;
+  try {
+    frontmatter = parseFrontmatter<SkillFrontmatter>(fs.readFileSync(skill.filePath, 'utf-8')).frontmatter;
+  } catch {
+    frontmatter = null;
+  }
+
+  const raw = frontmatter?.canvas;
+  let canvas: string | null = null;
+  if (raw === true || raw === 'true') canvas = WHIM_REPORT_CANVAS_ID;
+  else if (typeof raw === 'string' && raw.trim() && raw.trim() !== 'false') canvas = raw.trim();
+
+  const modeRaw = frontmatter?.space_mode;
+  const space_mode = modeRaw === 'new' || modeRaw === 'reuse' ? modeRaw : null;
+
+  const workspace = getConfigValue('workspace');
+  let canvas_template: Skill['canvas_template'] = null;
+  if (workspace) {
+    try {
+      const definition = loadSkillCanvasDefinition(workspace, skill.id);
+      if (definition) canvas_template = { id: definition.templateId, displayName: definition.displayName };
+    } catch {
+      canvas_template = null;
+    }
+  }
+
+  return { canvas, space_mode, canvas_template };
+}
+
+function withCanvasSettings(skill: Skill): Skill {
+  return { ...skill, ...readCanvasSettings(skill) };
+}
+
 export function registerSkillHandlers(): void {
   registerIpcHandler('skill:list', () => {
     if (!isInitialized()) return [];
-    return listSkills();
+    return listSkills().map(withCanvasSettings);
   });
 
   registerIpcHandler('skill:read', (_event, skillId: string) => {
@@ -237,7 +281,47 @@ export function registerSkillHandlers(): void {
       // DB is updated even if frontmatter write fails
     }
 
-    return getSkill(skillId)!;
+    return withCanvasSettings(getSkill(skillId)!);
+  });
+
+  registerIpcHandler('skill:set-canvas', (_event, skillId: string, canvas: string | null, spaceMode: 'new' | 'reuse' | null) => {
+    const workspace = getConfigValue('workspace');
+    if (!workspace || !isInitialized()) return { error: 'no_workspace' };
+
+    const skill = getSkill(skillId);
+    if (!skill) return { error: 'not_found' };
+
+    // The canvas id lands in SKILL.md, which is read back at launch to decide
+    // what the run may publish — so it is validated here rather than trusted.
+    if (canvas !== null && (typeof canvas !== 'string' || !/^[a-z0-9][a-z0-9.-]*$/.test(canvas))) {
+      return { error: 'invalid_canvas' };
+    }
+    if (spaceMode !== null && spaceMode !== 'new' && spaceMode !== 'reuse') {
+      return { error: 'invalid_space_mode' };
+    }
+
+    try {
+      const content = fs.readFileSync(skill.filePath, 'utf-8');
+      const { frontmatter, body } = parseFrontmatter<SkillFrontmatter>(content);
+
+      if (canvas === null) {
+        delete frontmatter.canvas;
+        delete frontmatter.space_mode;
+      } else {
+        // `canvas: true` is the spelling for the built-in report, and keeping it
+        // means a skill the user never customised does not grow an id it would
+        // have to keep in step with whim.
+        frontmatter.canvas = canvas === WHIM_REPORT_CANVAS_ID ? true : canvas;
+        if (spaceMode) frontmatter.space_mode = spaceMode;
+        else delete frontmatter.space_mode;
+      }
+
+      fs.writeFileSync(skill.filePath, serializeFrontmatter(frontmatter, body), 'utf-8');
+    } catch {
+      return { error: 'write_failed' };
+    }
+
+    return withCanvasSettings(getSkill(skillId)!);
   });
 
   registerIpcHandler('skill:clear-schedule', (_event, skillId: string) => {
