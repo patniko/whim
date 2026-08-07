@@ -11269,22 +11269,6 @@ body.dark.has-profile-tint #app {
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
 }
 
-/* The "(profile name)" appended to the logo — upright + muted so the italic
-   "whim" wordmark stays the focal point. */
-.profile-suffix {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
-  font-style: normal;
-  font-weight: 400;
-  font-size: var(--fs-caption);
-  letter-spacing: 0;
-  color: rgba(0, 0, 0, 0.45);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 180px;
-}
-.profile-suffix:empty { display: none; }
-
 @keyframes profile-switched-pop {
   0%   { transform: scale(1); }
   35%  { transform: scale(1.06); }
@@ -11295,7 +11279,6 @@ body.dark.has-profile-tint #app {
   transform-origin: left center;
 }
 
-body.dark .profile-suffix { color: rgba(255, 255, 255, 0.5); }
 body.dark .profile-mark { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2); }
 
 /* ── Profile settings rows ──────────────────────────────── */

@@ -4633,7 +4633,6 @@ workspacePathEl.addEventListener('click', () => {
 
 // ── Workspace profiles ──────────────────────────────────
 const brandLogo = document.getElementById('brand-logo') as HTMLElement | null;
-const profileNameEl = document.getElementById('profile-name') as HTMLSpanElement | null;
 const profilesListEl = document.getElementById('profiles-list') as HTMLDivElement | null;
 const profileAddBtn = document.getElementById('profile-add-btn') as HTMLButtonElement | null;
 
@@ -4662,22 +4661,21 @@ function applyActiveProfileTint(): void {
 }
 
 /**
- * Show the active profile next to the main "whim" logo as "whim (name)", with a
- * small tinted dot when the profile has a tint. The logo cycles profiles on
- * click when more than one exists.
+ * Mark the "whim" logo with the active profile's tint dot. The name itself is
+ * not repeated here — the leading Spaces tab already carries it, and two copies
+ * of the same word crowded the bottom bar. The logo cycles profiles on click
+ * when more than one exists.
  */
 function renderProfileBrand(): void {
-  if (!brandLogo || !profileNameEl) return;
+  if (!brandLogo) return;
   const mark = brandLogo.querySelector('.profile-mark') as HTMLElement | null;
   const active = getActiveProfile();
   if (!active) {
-    profileNameEl.textContent = '';
     if (mark) mark.classList.add('hidden');
     brandLogo.classList.remove('clickable');
     brandLogo.removeAttribute('title');
     return;
   }
-  profileNameEl.textContent = `(${active.displayName})`;
   if (mark) {
     if (active.tint && isValidTint(active.tint)) {
       mark.style.background = active.tint;
@@ -4688,7 +4686,7 @@ function renderProfileBrand(): void {
   }
   const canCycle = (profilesState?.profiles.length ?? 0) > 1;
   brandLogo.classList.toggle('clickable', canCycle);
-  brandLogo.title = canCycle ? 'Switch profile' : 'whim';
+  brandLogo.title = canCycle ? `Switch profile — currently ${active.displayName}` : active.displayName;
 }
 
 /**
