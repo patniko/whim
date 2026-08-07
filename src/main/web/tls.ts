@@ -155,6 +155,23 @@ export interface ResolveTlsOptions {
 
 export function resolveTls(options: ResolveTlsOptions): TlsResolution {
   if (options.mode === 'off') {
+    // Browsers gate getUserMedia, the clipboard API and service workers on a
+    // secure context, and a pairing token plus a long-lived session cookie
+    // would otherwise cross the network in the clear. `off` was returning
+    // before this check, so the "TLS is required off loopback" invariant held
+    // only for the modes that were already generating a certificate.
+    if (!options.loopbackOnly) {
+      return {
+        material: null,
+        state: {
+          mode: 'off',
+          active: false,
+          fingerprint: null,
+          expiresAt: null,
+          error: 'TLS cannot be disabled while binding a non-loopback address. Use automatic or custom certificates.',
+        },
+      };
+    }
     return {
       material: null,
       state: { mode: 'off', active: false, fingerprint: null, expiresAt: null, error: null },

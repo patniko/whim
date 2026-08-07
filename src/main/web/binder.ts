@@ -111,6 +111,11 @@ export class WebRemoteBinder {
     // Forget the last-seen topology, otherwise a later start() on an unchanged
     // network would see a matching fingerprint and skip binding entirely.
     this.fingerprint = '';
+    // A reconcile already awaiting listen() would otherwise resolve after
+    // closeAll() and register a live listener on a binder that is no longer
+    // active — so turning remote access off could leave a socket accepting
+    // connections with nothing tracking it.
+    await this.reconciling?.catch(() => { /* its own failure is recorded */ });
     await this.closeAll();
   }
 
@@ -238,6 +243,11 @@ export class WebRemoteBinder {
 
       try {
         const listener = await this.options.listen(address, this.port);
+        if (!this.active) {
+          // Stopped while this bind was in flight.
+          await listener.close().catch(() => { /* nothing to undo */ });
+          return;
+        }
         this.listeners.set(address, listener);
         this.failures.delete(key);
         changed = true;

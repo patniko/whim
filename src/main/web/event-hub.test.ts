@@ -146,14 +146,65 @@ describe('event channel classification', () => {
    */
   const surface = readFileSync(join(__dirname, '..', '..', 'shared', 'whim-api.ts'), 'utf-8');
 
-  const subscribedChannels = [
-    ...new Set([...surface.matchAll(/ipcRenderer\.on\(\s*'([^']+)'/g)].map((m) => m[1])),
-  ].sort();
+  /**
+   * Resolve the channel every `ipcRenderer.on(` call site subscribes to.
+   *
+   * Matching only `ipcRenderer.on('literal'` was not enough: listeners that
+   * return an unsubscribe function — now the preferred shape — hoist the
+   * channel into a `const` first, so the scan walked straight past them. Four
+   * of the forty-four call sites were invisible, and a channel could be added
+   * that way and never be classified at all, which is the exact silence this
+   * test exists to break.
+   *
+   * Anything that cannot be resolved is returned as `null` and fails the
+   * assertion below, so a fifth spelling has to be taught to this scanner
+   * rather than quietly skipped.
+   */
+  function resolveSubscribedChannels(source: string): (string | null)[] {
+    const resolved: (string | null)[] = [];
+    const callSite = /ipcRenderer\.on\(\s*([^,]+),/g;
+    for (const match of source.matchAll(callSite)) {
+      const expression = match[1].trim();
+
+      const literal = /^'([^']+)'$/.exec(expression);
+      if (literal) { resolved.push(literal[1]); continue; }
+
+      if (expression === 'channel') {
+        // The nearest `const channel = ...` above the call — the one in the
+        // same method. Taking the first match in the file would resolve every
+        // listener to whichever channel happened to be declared earliest.
+        const preceding = source.slice(0, match.index);
+        const declarations = [...preceding.matchAll(/const channel = [`']([^`']*)[`'];/g)];
+        const nearest = declarations.at(-1);
+        if (nearest) {
+          // A template channel (`chat:event:${id}`) is flattened by the hub to
+          // its static prefix, which is what has to be classified.
+          resolved.push(nearest[1].replace(/:?\$\{.*$/, ''));
+          continue;
+        }
+      }
+
+      resolved.push(null);
+    }
+    return resolved;
+  }
+
+  const resolvedChannels = resolveSubscribedChannels(surface);
+  const subscribedChannels = [...new Set(resolvedChannels.filter((c): c is string => c !== null))].sort();
 
   it('finds the channels the renderer actually subscribes to', () => {
     // A regex that silently matches nothing would make every case below pass.
     expect(subscribedChannels.length).toBeGreaterThan(30);
     expect(subscribedChannels).toContain('agent:status-changed');
+    // Channels hoisted into a `const` are subscriptions too.
+    expect(subscribedChannels).toContain('canvas:content-updated');
+    expect(subscribedChannels).toContain('chat:event');
+  });
+
+  it('resolves every subscription, so no call site escapes classification', () => {
+    const callSites = surface.match(/ipcRenderer\.on\(/g) ?? [];
+    expect(resolvedChannels).toHaveLength(callSites.length);
+    expect(resolvedChannels.filter((channel) => channel === null)).toEqual([]);
   });
 
   it('classifies every subscribed channel as mirrored or desktop-only', () => {

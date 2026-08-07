@@ -136,6 +136,25 @@ describe('classification and implementation stay in sync', () => {
       .rejects.toThrow(/not readable/i);
   });
 
+  /**
+   * `agent:disable-sandbox` is denied, but answering a sandbox prompt with
+   * `disable` reaches the same `disableSandboxForSession`. Allowing this
+   * channel wholesale handed a remote caller the escalation the deny existed
+   * to prevent.
+   */
+  it('refuses to disable the sandbox through the approval channel', async () => {
+    await expect(invokeWebRemoteCommand('agent:resolve-sandbox', ['agent-1', 'req-1', 'disable']))
+      .rejects.toThrow(/only possible on the desktop/i);
+  });
+
+  it('still lets a remote client approve a single blocked operation', async () => {
+    // It gets past the guard and on to the real handler, which needs an
+    // Electron app this suite does not provide — so the guard is what is
+    // being asserted here, not the outcome of the approval.
+    await expect(invokeWebRemoteCommand('agent:resolve-sandbox', ['agent-1', 'req-1', 'allow-once']))
+      .rejects.not.toThrow(/only possible on the desktop/i);
+  });
+
   it('refuses writing settings entirely', async () => {
     await expect(invokeWebRemoteCommand('settings:set', ['theme', 'dark']))
       .rejects.toThrow(/not available/i);

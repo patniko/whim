@@ -52,7 +52,7 @@ export class GatewayError extends Error {
 type Handler = (args: unknown[]) => Promise<unknown> | unknown;
 
 const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
-  // Key-filtered by assertSettingKeyAllowed before this ever runs.
+  // Key-filtered by assertArgumentsAllowed before this ever runs.
   'settings:get': (args) => readSetting(expectString(args, 0, 'key')),
   'space:create': createSpaceFromArgs,
   'space:classify': classifySpaceFromArgs,
@@ -305,9 +305,29 @@ export function isAllowedWebRemoteCommand(channel: string): channel is WebRemote
  * path to start at all, while other keys hold credentials and control what
  * the host executes. See settings-access.ts for the reasoning behind each.
  */
-function assertSettingKeyAllowed(channel: string, args: unknown[]): void {
+/**
+ * Guards that depend on the *arguments*, not just the channel.
+ *
+ * Some channels are safe to reach remotely for most of their inputs and
+ * unsafe for one of them, so classifying the whole channel either way is
+ * wrong.
+ */
+function assertArgumentsAllowed(channel: string, args: unknown[]): void {
   if (channel === 'settings:get' && !canReadSetting(args[0])) {
     throw new GatewayError('setting_not_allowed', 403, `Setting is not readable over web remote: ${String(args[0])}`);
+  }
+
+  // `agent:disable-sandbox` is denied because it drops the sandbox around an
+  // agent with shell access on the host. Answering a sandbox prompt with
+  // `disable` reaches the very same `disableSandboxForSession`, so allowing
+  // this channel wholesale handed a remote caller the escalation the deny was
+  // there to prevent. Approving a single blocked operation is still fine.
+  if (channel === 'agent:resolve-sandbox' && args[2] === 'disable') {
+    throw new GatewayError(
+      'sandbox_disable_denied',
+      403,
+      'Disabling the sandbox is only possible on the desktop app.',
+    );
   }
 }
 
@@ -328,12 +348,18 @@ export async function invokeWebRemoteCommand(channel: string, args: unknown[]): 
     throw invalidArg('args must be an array');
   }
 
-  assertSettingKeyAllowed(channel, args);
+  assertArgumentsAllowed(channel, args);
 
-  // Gateway-specific implementations win, because the few that exist are there
-  // for a reason the desktop version cannot serve — merging concurrent canvas
-  // writes, filtering settings by key, routing a launch without a window.
-  // Everything else runs the exact code the desktop runs.
+  // Gateway-specific implementations win where they exist.
+  //
+  // Some genuinely have to: merging concurrent canvas writes, filtering
+  // settings by key, routing a launch without a window. But there are 41 of
+  // them, and most are plain reimplementations of the desktop handler
+  // (`space:list`, `models:list`, `canvas:read`). Each one is a place the two
+  // transports can quietly drift apart, which is the very thing
+  // `registerIpcHandler` exists to prevent. Narrowing this table to the
+  // handlers that need to differ is worth doing; until then, treat adding an
+  // entry here as a decision to maintain two implementations.
   const gatewayHandler = HANDLERS[channel as IpcCommandChannel];
   const result = gatewayHandler ? await gatewayHandler(args) : await callRegisteredHandler(channel, args);
   return JSON.parse(JSON.stringify(result ?? null));

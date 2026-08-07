@@ -222,16 +222,87 @@ describe('web remote server', () => {
       const res = await request(`/api/nope?token=${TOKEN}`);
       expect(res.status).toBe(404);
     });
+
+    /**
+     * The cookie rides along automatically, so authentication says nothing
+     * about who initiated the request. SameSite=Strict stops another *site*,
+     * but a different port on this machine is the same site — and whim is
+     * exactly the sort of thing that runs next to other local services.
+     */
+    it('rejects a cross-origin invoke', async () => {
+      const res = await request('/api/invoke', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'Content-Type': 'application/json',
+          Origin: 'http://evil.example',
+        },
+        body: JSON.stringify({ channel: 'spaces:list', args: [] }),
+      });
+      expect(res.status).toBe(403);
+      expect(res.json()).toMatchObject({ error: { code: 'origin_not_allowed' } });
+    });
+
+    it('allows an invoke from an origin the host policy accepts', async () => {
+      const res = await request('/api/invoke', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'Content-Type': 'application/json',
+          Origin: `http://127.0.0.1:${port}`,
+        },
+        body: JSON.stringify({ channel: 'spaces:list', args: [] }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    /**
+     * text/plain is a "simple request": the browser sends it cross-origin
+     * with no preflight. Requiring JSON takes that exemption away.
+     */
+    it('rejects a body that is not declared as JSON', async () => {
+      const res = await request('/api/invoke', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ channel: 'spaces:list', args: [] }),
+      });
+      expect(res.status).toBe(415);
+    });
   });
 
   describe('static files', () => {
-    // Serve the real build output rather than the sources; see
-    // webRootDirectory() for why they differ under vitest.
+    /**
+     * Serve a fixture web root rather than `dist/web`.
+     *
+     * These tests used to point at the real build output, which made them
+     * depend on `npm run build` having already run. CI runs `npm test` first,
+     * so all three /desktop cases failed there with a 404 that said nothing
+     * about the routing they exist to check.
+     *
+     * What belongs here is what `server.ts` owns: that /desktop resolves with
+     * and without a trailing slash, and that assets under it are reachable at
+     * the absolute URLs boot.js injects. The *content* guarantees — no
+     * relative asset URLs left, and app.js injected by boot.js rather than
+     * referenced from the HTML — are asserted at build time by
+     * `assertDesktopBundleSane` in scripts/build-renderer.js, which is where
+     * they can actually fail the thing that produces them.
+     */
+    let webRoot: string;
     beforeEach(() => {
-      process.env.WHIM_WEB_ROOT = path.join(__dirname, '..', '..', '..', 'dist', 'web');
+      webRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whim-web-root-'));
+      const desktop = path.join(webRoot, 'desktop');
+      fs.mkdirSync(desktop, { recursive: true });
+      fs.writeFileSync(
+        path.join(desktop, 'index.html'),
+        '<html><head><script src="/desktop/boot.js" defer></script></head><body></body></html>',
+      );
+      fs.writeFileSync(path.join(desktop, 'app.js'), '// renderer bundle');
+      fs.writeFileSync(path.join(webRoot, 'index.html'), '<html></html>');
+      process.env.WHIM_WEB_ROOT = webRoot;
     });
     afterEach(() => {
       delete process.env.WHIM_WEB_ROOT;
+      fs.rmSync(webRoot, { recursive: true, force: true });
     });
 
     it('rejects a path traversal attempt', async () => {
@@ -249,19 +320,10 @@ describe('web remote server', () => {
       expect(res.status).toBe(404);
     });
 
-    /**
-     * /desktop serves the real renderer. These assert the wiring the browser
-     * depends on, which unit tests of the transport cannot reach: that the
-     * route resolves at all, that the bundle is reachable at the absolute URL
-     * boot.js injects, and that app.js is *not* referenced from the HTML —
-     * if it were, it would evaluate before window.whimAPI existed and the
-     * page would break in a way no test here would otherwise notice.
-     */
     it('serves the desktop interface at /desktop', async () => {
       const res = await request('/desktop/');
       expect(res.status).toBe(200);
       expect(res.body).toContain('<script src="/desktop/boot.js"');
-      expect(res.body).not.toContain('src="/desktop/app.js"');
     });
 
     it('serves the renderer bundle boot.js asks for', async () => {
@@ -399,6 +461,30 @@ describe('web remote server', () => {
       const state = await getWebRemoteState();
       expect(state.running).toBe(false);
       expect(state.bindings.map((binding) => binding.state)).toEqual(['listening', 'pending']);
+    });
+
+    /**
+     * The whole point of storing intent rather than addresses is that picking
+     * an interface which is not up yet still binds once it appears. Binding
+     * *nothing* used to throw, and `syncWebRemoteServer` answered a throw by
+     * stopping the binder — which killed the reconciliation poll that would
+     * have done the binding. Selecting a disconnected VPN therefore never
+     * recovered when it connected, which is the exact failure the durable
+     * intent model exists to prevent.
+     */
+    it('keeps reconciling when nothing can bind yet', async () => {
+      await stopWebRemoteServer();
+      config.webRemoteBindSelections = [
+        { kind: 'interface', interfaceName: 'utun-does-not-exist', family: 'IPv4' } as never,
+      ];
+
+      await expect(startWebRemoteServer()).resolves.toBeUndefined();
+
+      const state = await getWebRemoteState();
+      expect(state.running).toBe(false);
+      expect(state.bindings.map((binding) => binding.state)).toEqual(['pending']);
+      // Still active, so the poll that binds it later is still running.
+      expect(state.enabled).toBe(true);
     });
   });
   describe('audit log', () => {

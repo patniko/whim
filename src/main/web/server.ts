@@ -138,6 +138,14 @@ export async function startWebRemoteServer(): Promise<void> {
   // TLS material has to exist before the first listener is created, since the
   // listener type (http vs https) depends on it.
   applyTls(selections);
+
+  // Refuse to listen in the clear on anything routable. `applyTls` records the
+  // reason; binding anyway would put the pairing token and the session cookie
+  // on the wire in plaintext.
+  if (!tlsState.active && tlsState.error) {
+    throw new Error(tlsState.error);
+  }
+
   updateHostPolicy();
 
   lastError = null;
@@ -147,17 +155,28 @@ export async function startWebRemoteServer(): Promise<void> {
     await binder.start(selections, port);
   }
 
-  // Nothing bound at all is a hard failure. A *partially* bound state is not:
-  // the remaining interfaces may simply not be up yet, and the binder will
-  // attach to them as soon as they appear. That case is reported through
-  // per-selection status rather than by refusing to run.
+  // A *partially* bound state is not a failure: the remaining interfaces may
+  // simply not be up yet, and the binder will attach to them as soon as they
+  // appear. That case is reported through per-selection status rather than by
+  // refusing to run.
   if (binder.boundAddresses().length === 0) {
     const unbound = binder.status().filter((entry) => entry.state !== 'listening');
-    throw new Error(
-      unbound.length > 0
-        ? unbound.map((entry) => `${entry.label}: ${entry.detail}`).join('; ')
-        : 'No bind addresses are available.',
-    );
+    const detail = unbound.length > 0
+      ? unbound.map((entry) => `${entry.label}: ${entry.detail}`).join('; ')
+      : 'No bind addresses are available.';
+
+    // Binding nothing *yet* is the whole case durable intent exists to serve.
+    // Throwing here made `syncWebRemoteServer` stop the binder, which tore
+    // down the polling that would have bound the interface once it appeared —
+    // so selecting a disconnected VPN never recovered when it connected, which
+    // is precisely the bug this design was meant to fix. Stay up and let
+    // reconciliation do its job; the state is reported as an error either way.
+    if (unbound.some((entry) => entry.state === 'pending')) {
+      lastError = detail;
+      return;
+    }
+
+    throw new Error(detail);
   }
 }
 
@@ -375,6 +394,19 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
     if (req.method === 'POST' && url.pathname === '/api/session') {
       // Exchange the bootstrap token for a per-device session cookie so the
       // token stops travelling in the URL (and therefore in history/Referer).
+      //
+      // Only the bootstrap token may mint a session. Accepting an existing
+      // cookie here let a stolen one clone itself into a second, separately
+      // named device, so revoking the device you knew about left the attacker
+      // holding a credential you never saw — which defeats the point of making
+      // sessions individually revocable.
+      if (auth.via !== 'token') {
+        sendJson(res, 403, {
+          ok: false,
+          error: { code: 'pairing_required', message: 'Pairing token required to create a session.' },
+        });
+        return;
+      }
       const issued = sessionStore.issue(req.headers['user-agent'], getRemoteAddress(req));
       res.setHeader('Set-Cookie', buildSessionCookie(issued.cookieValue, { secure: tlsState.active }));
       sendJson(res, 200, { ok: true, result: { device: { id: issued.record.id, label: issued.record.label } } });
@@ -399,6 +431,28 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
     }
 
     if (req.method === 'POST' && url.pathname === '/api/invoke') {
+      // The session cookie is sent by the browser automatically, so the
+      // request being authenticated says nothing about who *initiated* it.
+      // SameSite=Strict stops another site, but not another origin on the same
+      // site — a different port on this machine is same-site, and whim is
+      // exactly the kind of thing that runs alongside other local services.
+      // Requiring JSON also costs an attacker the simple-request exemption:
+      // a cross-origin POST that avoids preflight cannot set this header.
+      if (!isAllowedOrigin(req.headers.origin)) {
+        sendJson(res, 403, {
+          ok: false,
+          error: { code: 'origin_not_allowed', message: 'Origin is not allowed.' },
+        });
+        return;
+      }
+      const contentType = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+      if (contentType !== 'application/json') {
+        sendJson(res, 415, {
+          ok: false,
+          error: { code: 'unsupported_media_type', message: 'Content-Type must be application/json.' },
+        });
+        return;
+      }
       const body = await readJsonBody(req);
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
         throw new GatewayError('invalid_body', 400, 'Request body must be an object.');

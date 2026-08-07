@@ -71,6 +71,9 @@ const ALLOWED_EVENT_CHANNELS = new Set([
   'space:title-updated',
   'space:recurrence-applied',
   'canvas:content-updated',
+  // Says a report exists, and carries only ids and a title. Opening one is
+  // desktop-only, but a remote client still needs this to refresh its list.
+  'canvas-artifact:published',
   'workspace:committed',
   'workspace:git-sync-changed',
 ]);

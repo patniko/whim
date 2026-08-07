@@ -47,6 +47,42 @@ describe('WebRemoteBinder', () => {
     await binder.stop();
   });
 
+  /**
+   * `stop()` closed the listeners it knew about, but a reconcile already
+   * awaiting listen() resolved afterwards and registered its listener on a
+   * binder that was no longer active — so disabling remote access could leave
+   * a socket accepting connections with nothing tracking it.
+   */
+  it('closes a listener that finishes binding after stop()', async () => {
+    let release: ((listener: BoundListener) => void) | undefined;
+    const closed: string[] = [];
+    const binder = new WebRemoteBinder({
+      listen: (address: string, port: number) => new Promise<BoundListener>((resolve) => {
+        release = resolve;
+        void port;
+      }),
+      pollIntervalMs: 1_000_000,
+      retryDelayMs: 15_000,
+      listInterfaces: () => network,
+    });
+
+    const starting = binder.start([{ kind: 'address', address: '192.168.1.20' }], 8899);
+    const stopping = binder.stop();
+
+    release?.({
+      address: '192.168.1.20',
+      port: 8899,
+      server: {} as Server,
+      close: async () => { closed.push('192.168.1.20'); },
+    });
+
+    await starting;
+    await stopping;
+
+    expect(binder.boundAddresses()).toEqual([]);
+    expect(closed).toEqual(['192.168.1.20']);
+  });
+
   it('binds an interface that appears after startup', async () => {
     const { binder } = makeBinder();
     await binder.start([{ kind: 'interface', interfaceName: 'utun4', family: 'IPv4' }], 8899);

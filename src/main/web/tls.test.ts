@@ -45,10 +45,23 @@ describe('certificateNames', () => {
 });
 
 describe('resolveTls', () => {
-  it('serves plain HTTP when disabled', () => {
-    const result = resolveTls(autoOptions({ mode: 'off' }));
+  it('serves plain HTTP when disabled on loopback', () => {
+    const result = resolveTls(autoOptions({ mode: 'off', loopbackOnly: true, addresses: ['127.0.0.1'] }));
     expect(result.material).toBeNull();
-    expect(result.state).toMatchObject({ mode: 'off', active: false });
+    expect(result.state).toMatchObject({ mode: 'off', active: false, error: null });
+  });
+
+  /**
+   * `off` used to return before any loopback check, so "TLS is required on a
+   * routable address" held only for the modes that were already generating a
+   * certificate. Choosing `off` put the pairing token and the session cookie
+   * on the wire in the clear.
+   */
+  it('refuses to serve a routable address in the clear', () => {
+    const result = resolveTls(autoOptions({ mode: 'off', loopbackOnly: false }));
+    expect(result.material).toBeNull();
+    expect(result.state.active).toBe(false);
+    expect(result.state.error).toMatch(/cannot be disabled/i);
   });
 
   it('skips certificate generation for a loopback-only bind', () => {
