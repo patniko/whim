@@ -5,6 +5,7 @@ import { agentStore } from '../state/agent-store';
 import { useStore } from './useStore';
 import { timeAgo } from './list-utils';
 import { EmptyState } from './EmptyState';
+import { ActivityStatsPanel } from './ActivityStatsPanel';
 import type { Space } from '../../shared/types';
 import type { SpaceEvent } from '../../shared/ipc-contract';
 
@@ -56,9 +57,9 @@ const HistoryCard = React.memo(function HistoryCard({
   const completedAgo = space.completed_at ? timeAgo(space.completed_at) : timeAgo(space.updated_at);
   const duration = activeDuration(space.created_at, space.completed_at);
 
-  const interesting = events.filter(
-    e => e.event_type === 'recycled' || e.event_type === 'recurrence_dismissed',
-  ).slice(-4);
+  // A count reads faster than a step-by-step timeline, and the full history is
+  // one click away inside the space.
+  const rescheduled = events.reduce((n, e) => n + (e.event_type === 'recycled' ? 1 : 0), 0);
 
   return (
     <div
@@ -77,32 +78,12 @@ const HistoryCard = React.memo(function HistoryCard({
       <span className="history-card-icon">{statusIcon}</span>
       <div className="history-card-body">
         <div className="history-card-title">{space.description}</div>
-        {interesting.length > 0 ? (
-          <div className="history-card-steps">
-            {interesting.map((ev, i) => (
-              <React.Fragment key={ev.id}>
-                <div className="history-card-step">
-                  <span className="history-step-icon">
-                    {ev.event_type === 'recycled' ? '↻' : ev.event_type === 'recurrence_dismissed' ? '✕' : '•'}
-                  </span>
-                  <span>
-                    {ev.event_type === 'recycled'
-                      ? 'Rescheduled'
-                      : ev.event_type === 'recurrence_dismissed'
-                        ? 'Dismissed'
-                        : ev.event_type}
-                  </span>
-                </div>
-                {i < interesting.length - 1 ? <div className="history-step-connector" /> : null}
-              </React.Fragment>
-            ))}
-          </div>
-        ) : null}
         <div className="history-card-meta">
           {space.client ? <><span>👤 {space.client}</span><span className="meta-sep">·</span></> : null}
           {agentCount > 0 ? <><span className="history-meta-badge history-meta-badge--agents">⚡ {agentCount}</span><span className="meta-sep">·</span></> : null}
           {space.session_id ? <><span className="history-meta-badge history-meta-badge--session">● session</span><span className="meta-sep">·</span></> : null}
           {duration ? <><span className="history-meta-badge history-meta-badge--duration">⏱ {duration}</span><span className="meta-sep">·</span></> : null}
+          {rescheduled > 0 ? <><span className="history-meta-badge history-meta-badge--recycled">↻ {rescheduled}</span><span className="meta-sep">·</span></> : null}
           <span>{completedAgo}</span>
         </div>
       </div>
@@ -146,11 +127,14 @@ export function HistoryView({ onCardClick, onUnarchive }: HistoryViewProps): Rea
 
   if (closedSpaces.length === 0 && events.length === 0) {
     return (
-      <EmptyState
-        icon="✨"
-        title="Nothing here yet"
-        text="Completed spaces and their activity timeline will appear here."
-      />
+      <>
+        <ActivityStatsPanel />
+        <EmptyState
+          icon="✨"
+          title="Nothing here yet"
+          text="Completed spaces and their activity timeline will appear here."
+        />
+      </>
     );
   }
 
@@ -211,6 +195,8 @@ export function HistoryView({ onCardClick, onUnarchive }: HistoryViewProps): Rea
 
   return (
     <>
+      <ActivityStatsPanel />
+
       <div className="activity-summary">
         <div className="activity-summary-stat"><span className="stat-value">{completedToday}</span> today</div>
         <div className="activity-summary-sep" />

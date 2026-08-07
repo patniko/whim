@@ -64,6 +64,8 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   'space:delete': 'allow',
   'space:dismiss-recurrence': 'allow',
   'space:events': 'allow',
+  // Counts over work the remote user can already see listed.
+  'activity:stats': 'allow',
   'space:resolve-date': 'allow',
   'space:classify': 'allow',
   'space:summarize-title': 'allow',

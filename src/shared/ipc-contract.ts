@@ -5,7 +5,7 @@
  * This file is **types only** — no runtime code.
  */
 
-import type { Space, CreateSpaceInput, Attachment, AgentAnchor, AgentSession, LinkPreviewMeta, RecurrenceResult, RecallMatch, Skill, SkillContent, SkillInvocationInput, SkillInvocationResult, SkillScheduleFrequency, CanvasTarget, SpaceCanvasArtifact, UpdateState, ExportFormat, ExportDestination } from './types';
+import type { Space, CreateSpaceInput, Attachment, AgentAnchor, AgentSession, LinkPreviewMeta, RecurrenceResult, RecallMatch, Skill, SkillContent, SkillInvocationInput, SkillInvocationResult, SkillScheduleFrequency, CanvasTarget, SpaceCanvasArtifact, UpdateState, ExportFormat, ExportDestination, ActivityStats } from './types';
 import type { ChatEvent, ElicitationSchema, ElicitationFieldValue } from './chat-types';
 import type { SubagentSummary, SubagentInfo } from './subagent-types';
 
@@ -360,6 +360,7 @@ export interface IpcCommands {
   'space:delete': { args: [id: string]; result: boolean };
   'space:dismiss-recurrence': { args: [id: string]; result: boolean };
   'space:events': { args: [limit?: number]; result: SpaceEvent[] };
+  'activity:stats': { args: [windowDays?: number]; result: ActivityStats };
   'space:resolve-date': { args: [dateText: string]; result: { due_at: string; due_at_utc: string | null } | null };
   'space:classify': { args: [text: string]; result: { type: 'space' | 'query'; answer?: string } };
   'space:summarize-title': { args: [canvasContent: string]; result: { title: string | null } };

@@ -2412,6 +2412,121 @@ body.dark .persona-form-checkbox-label {
 
 /* ── Activity summary bar ────────────────────────────── */
 
+/* ── Activity metrics panel ───────────────────────────── */
+.activity-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  background: var(--card-bg);
+  border: var(--card-border);
+  border-radius: var(--card-radius);
+  backdrop-filter: var(--card-backdrop);
+  box-shadow: var(--card-shadow);
+}
+
+.activity-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.activity-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: var(--card-inner-radius);
+  background: var(--card-inner-bg);
+}
+
+.activity-tile-value {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: #1d1d1f;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-tile-label {
+  font-size: var(--fs-caption);
+  color: rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-graph {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Columns here mirror .activity-graph-grid so a month name lands above the
+   week column where that month starts. */
+.activity-graph-months {
+  display: grid;
+  grid-auto-columns: 10px;
+  grid-auto-flow: column;
+  gap: 3px;
+  height: 12px;
+  font-size: 9px;
+  color: rgba(0, 0, 0, 0.4);
+}
+
+.activity-graph-month {
+  grid-row: 1;
+  white-space: nowrap;
+}
+
+.activity-graph-grid {
+  display: flex;
+  gap: 3px;
+}
+
+.activity-graph-week {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.activity-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.activity-dot[data-level="1"] { background: rgba(124, 102, 220, 0.28); }
+.activity-dot[data-level="2"] { background: rgba(124, 102, 220, 0.5); }
+.activity-dot[data-level="3"] { background: rgba(124, 102, 220, 0.72); }
+.activity-dot[data-level="4"] { background: rgba(124, 102, 220, 0.95); }
+
+/* Padding cells only exist to keep weekday rows aligned. */
+.activity-dot--pad { background: transparent; }
+
+.activity-graph-legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  font-size: 9px;
+  color: rgba(0, 0, 0, 0.4);
+}
+
+.activity-graph-legend span { margin: 0 2px; }
+
+.activity-panel-note {
+  font-size: var(--fs-caption);
+  color: rgba(0, 0, 0, 0.5);
+  line-height: 1.4;
+}
+
+.activity-panel-note strong {
+  color: rgba(0, 0, 0, 0.7);
+  font-weight: 600;
+}
+
 .activity-summary {
   display: flex;
   align-items: center;
@@ -2596,40 +2711,15 @@ body.dark .persona-form-checkbox-label {
   color: rgba(0, 0, 0, 0.55);
 }
 
+.history-meta-badge--recycled {
+  background: rgba(0, 0, 0, 0.04);
+  color: rgba(0, 0, 0, 0.55);
+}
+
 .history-card-client {
   font-size: var(--fs-label);
   color: rgba(0, 0, 0, 0.6);
   margin-bottom: 8px;
-}
-
-/* Only show steps when there are multiple interesting events */
-.history-card-steps {
-  background: var(--card-inner-bg);
-  border-radius: var(--card-inner-radius);
-  padding: 8px 10px;
-  margin: 6px 0 2px;
-}
-
-.history-card-step {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-caption);
-  color: #2c2c3a;
-  padding: 2px 0;
-}
-
-.history-step-icon {
-  font-size: var(--fs-label);
-  flex-shrink: 0;
-}
-
-.history-step-connector {
-  width: 1px;
-  height: 6px;
-  margin-left: 5px;
-  background: rgba(0, 0, 0, 0.08);
-  border-radius: 1px;
 }
 
 .history-card-mini {
@@ -7711,15 +7801,26 @@ body.dark .history-card-restore:hover { background: rgba(255, 255, 255, 0.15); c
 body.dark .history-card-type { color: rgba(255, 255, 255, 0.6); }
 body.dark .history-card-title { color: #e0e0e0; }
 body.dark .history-card-client { color: rgba(255, 255, 255, 0.55); }
-body.dark .history-card-steps { background: var(--card-inner-bg); }
-body.dark .history-card-step { color: #d0d0d0; }
-body.dark .history-step-connector { background: rgba(255, 255, 255, 0.08); }
 body.dark .history-card-meta { color: rgba(255, 255, 255, 0.45); }
 body.dark .history-card-meta .meta-sep { color: rgba(255, 255, 255, 0.15); }
 body.dark .history-meta-badge--agents { background: rgba(124, 102, 220, 0.15); color: #b5a5f0; }
 body.dark .history-meta-badge--session { background: rgba(90, 156, 246, 0.15); color: #7ab8ff; }
 body.dark .history-meta-badge--duration { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.5); }
+body.dark .history-meta-badge--recycled { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.5); }
 body.dark .history-date-label { color: rgba(255, 255, 255, 0.5); }
+body.dark .activity-tile { background: var(--card-inner-bg); }
+body.dark .activity-tile-value { color: #f0f0f0; }
+body.dark .activity-tile-label { color: rgba(255, 255, 255, 0.45); }
+body.dark .activity-graph-months,
+body.dark .activity-graph-legend { color: rgba(255, 255, 255, 0.35); }
+body.dark .activity-dot { background: rgba(255, 255, 255, 0.07); }
+body.dark .activity-dot[data-level="1"] { background: rgba(154, 134, 240, 0.35); }
+body.dark .activity-dot[data-level="2"] { background: rgba(154, 134, 240, 0.55); }
+body.dark .activity-dot[data-level="3"] { background: rgba(154, 134, 240, 0.78); }
+body.dark .activity-dot[data-level="4"] { background: rgba(174, 156, 255, 1); }
+body.dark .activity-dot--pad { background: transparent; }
+body.dark .activity-panel-note { color: rgba(255, 255, 255, 0.45); }
+body.dark .activity-panel-note strong { color: rgba(255, 255, 255, 0.7); }
 
 /* Dark settings */
 /* Dark theme: redefine the scoped settings tokens. The token-driven rules

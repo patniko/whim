@@ -7,6 +7,15 @@ import { materializeSpaceCanvas, scheduleAutoCommit } from '../workspace';
 import { dismissRecurrence } from '../services/recurrence';
 import { processSpaceInBackground } from '../services/space-processing';
 import { applySpaceUpdate, deleteSpaceFull, unarchiveSpaceFull } from '../services/space-mutations';
+import { getActivityStats } from '../activity-stats';
+import type { ActivityTotals } from '../../shared/types';
+
+/** Shown before a workspace exists, so the view renders its zero state. */
+const EMPTY_ACTIVITY_TOTALS: ActivityTotals = {
+  tokens: 0, agents: 0, subagents: 0, spaces: 0, toolCalls: 0,
+  peakParallelAgents: 0, activeDays: 0, currentStreak: 0, longestStreak: 0,
+  busiestDay: null,
+};
 
 export function registerSpaceHandlers(): void {
   registerIpcHandler('space:create', (_event, input: CreateSpaceInput) => {
@@ -50,6 +59,11 @@ export function registerSpaceHandlers(): void {
   // Space events / timeline
   registerIpcHandler('space:events', (_event, limit?: number) => {
     return listSpaceEvents(limit || 100);
+  });
+
+  registerIpcHandler('activity:stats', (_event, windowDays?: number) => {
+    if (!isInitialized()) return { days: [], totals: EMPTY_ACTIVITY_TOTALS };
+    return getActivityStats(windowDays && windowDays > 0 ? Math.min(windowDays, 730) : undefined);
   });
 
   // Resolve natural language date

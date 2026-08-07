@@ -366,3 +366,34 @@ export interface LaunchDocumentAgentOptions {
   personaHandle?: string | null;
   promptOverride?: string;
 }
+
+/** One day in the Activity view's calendar. Zero-activity days are included. */
+export interface ActivityDay {
+  /** Local calendar day, `YYYY-MM-DD`. */
+  date: string;
+  /** Spaces completed on this day. */
+  spaces: number;
+  /** Agent runs started on this day. */
+  agents: number;
+  /** Tokens spent by runs on this day, parents and sub-agents together. */
+  tokens: number;
+}
+
+export interface ActivityTotals {
+  tokens: number;
+  agents: number;
+  subagents: number;
+  spaces: number;
+  toolCalls: number;
+  /** Most agents that were running at the same moment in the window. */
+  peakParallelAgents: number;
+  activeDays: number;
+  currentStreak: number;
+  longestStreak: number;
+  busiestDay: { date: string; count: number } | null;
+}
+
+export interface ActivityStats {
+  days: ActivityDay[];
+  totals: ActivityTotals;
+}

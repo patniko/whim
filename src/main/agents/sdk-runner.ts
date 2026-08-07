@@ -152,7 +152,17 @@ const PERSISTED_CHAT_EVENT_TYPES = new Set<string>([
   'session.warning',
   'session.idle',
   'session.start',
+  // Not a transcript milestone — the token counts behind the Activity view.
+  // They ride along here rather than in a table of their own because this
+  // path is already written through the durable event log, so the numbers
+  // survive a cache rebuild instead of being reset by one. The catch-all
+  // subscription sees sub-agent usage as well as the parent's, which is what
+  // makes this table the single source for "tokens burned".
+  'assistant.usage',
 ]);
+
+/** Transcript event types that carry bookkeeping rather than conversation. */
+const NON_CONVERSATIONAL_CHAT_EVENT_TYPES = new Set<string>(['assistant.usage']);
 
 export function initSdkRunner(deps: {
   registry: AgentRegistry;
@@ -1303,13 +1313,18 @@ export function buildTranscriptReplayContent(
   const maxBodyChars = options.maxBodyChars ?? 2000;
   const maxEvents = options.maxEvents ?? 40;
 
+  // Usage rows share the transcript table but say nothing about what was
+  // discussed. Dropping them before the window is applied stops token
+  // bookkeeping from crowding real turns out of the replayed context.
+  const conversational = events.filter(e => !NON_CONVERSATIONAL_CHAT_EVENT_TYPES.has(e.type));
+
   // Keep the most recent N events — older context is summarized into a
   // single placeholder line so we don't blow the model context window.
-  let selected = events;
+  let selected = conversational;
   let dropped = 0;
-  if (events.length > maxEvents) {
-    dropped = events.length - maxEvents;
-    selected = events.slice(-maxEvents);
+  if (conversational.length > maxEvents) {
+    dropped = conversational.length - maxEvents;
+    selected = conversational.slice(-maxEvents);
   }
 
   const lines: string[] = [];

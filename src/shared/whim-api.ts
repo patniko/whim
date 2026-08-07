@@ -63,6 +63,7 @@ export interface WhimAPI {
   delete(id: string): Promise<IpcCommandResult<'space:delete'>>;
   dismissRecurrence(id: string): Promise<IpcCommandResult<'space:dismiss-recurrence'>>;
   listEvents(limit?: number): Promise<IpcCommandResult<'space:events'>>;
+  activityStats(windowDays?: number): Promise<IpcCommandResult<'activity:stats'>>;
   resolveDate(dateText: string): Promise<IpcCommandResult<'space:resolve-date'>>;
   classifyInput(text: string): Promise<IpcCommandResult<'space:classify'>>;
   searchSpaces(query: string): Promise<IpcCommandResult<'space:search'>>;
@@ -364,6 +365,7 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     delete: (id) => ipcRenderer.invoke('space:delete', id),
     dismissRecurrence: (id) => ipcRenderer.invoke('space:dismiss-recurrence', id),
     listEvents: (limit?) => ipcRenderer.invoke('space:events', limit),
+    activityStats: (windowDays?) => ipcRenderer.invoke('activity:stats', windowDays),
     resolveDate: (dateText) => ipcRenderer.invoke('space:resolve-date', dateText),
     classifyInput: (text) => ipcRenderer.invoke('space:classify', text),
     searchSpaces: (query) => ipcRenderer.invoke('space:search', query),
