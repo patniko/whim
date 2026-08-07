@@ -46,6 +46,13 @@ export interface CommentAgentContext {
   canvasPath: string;
   documentDisplayName?: string;
   documentLabel?: string;
+  /**
+   * Reports this run published, so completion can reply with a link instead of
+   * a summary of work the user cannot see.
+   */
+  publishedArtifacts?: Array<{ artifactId: string; title: string; status?: string }>;
+  /** Real space id the reports belong to — differs from `spaceId` on a child page. */
+  artifactSpaceId?: string;
 }
 
 export interface AgentRecord {

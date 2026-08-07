@@ -83,4 +83,39 @@ describe('redactWebResult', () => {
   it('survives a handler that answered with null', () => {
     expect(redactWebResult('cli:runtime-status', null)).toBeNull();
   });
+
+  /**
+   * The redactor used to spread the handler's reply and replace one field, so
+   * anything added to the runtime status later would have reached the browser
+   * unredacted, with no test failing. It now names the fields it forwards, and
+   * this pins that: an unclassified field is dropped rather than passed on.
+   */
+  it('drops a field nobody has classified instead of forwarding it', () => {
+    const redacted = redactWebResult('cli:runtime-status', {
+      source: 'auto',
+      target: null,
+      version: '0.9.1',
+      compatible: true,
+      minVersion: '0.8.0',
+      configPath: '/Users/someone/.config/whim/cli.json',
+      lastError: 'ENOENT /Users/someone/.local/bin/copilot',
+    }) as Record<string, unknown>;
+
+    expect(redacted).not.toHaveProperty('configPath');
+    expect(redacted).not.toHaveProperty('lastError');
+    expect(JSON.stringify(redacted)).not.toContain('/Users/someone');
+  });
+
+  it('answers with exactly the fields the contract declares', () => {
+    const redacted = redactWebResult('cli:runtime-status', {
+      source: 'auto',
+      target: '/opt/copilot',
+      version: '1.0.0',
+      compatible: true,
+      minVersion: '0.8.0',
+    }) as Record<string, unknown>;
+
+    expect(Object.keys(redacted).sort())
+      .toEqual(['compatible', 'minVersion', 'source', 'target', 'version']);
+  });
 });

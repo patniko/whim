@@ -174,6 +174,25 @@ describe('web transport', () => {
       await expect(transport.invoke('space:list')).rejects.toThrow(/Too many requests/);
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
+
+    /**
+     * The authenticator answers 429 for a lockout after repeated bad tokens,
+     * which looks identical to a rate limit by status alone. Retrying it would
+     * extend the lockout and tell the user nothing, so the retry keys off the
+     * error code instead.
+     */
+    it('does not retry an auth lockout that shares the 429 status', async () => {
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 429,
+        headers: { get: () => '1' },
+        json: async () => ({ ok: false, error: { code: 'auth_failed', message: 'Too many failed attempts. Try again later.' } }),
+      });
+      const { transport } = createWebTransport();
+
+      await expect(transport.invoke('space:list')).rejects.toThrow(/failed attempts/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('retryDelayMs', () => {

@@ -66,9 +66,13 @@ async function establishSessionFromUrl(): Promise<boolean> {
   try {
     await establishSession(token);
     return true;
-  } catch {
-    // Fall through to the manual prompt, which can report the failure with
-    // somewhere for the user to correct it.
+  } catch (err) {
+    // Reported, not swallowed. This used to fail silently and fall through to
+    // `hasSession()`, so a browser that already held a cookie was left with an
+    // unexplained console error, and one that did not was dropped at the token
+    // prompt with the token already erased from the address bar — nothing to
+    // paste back in. Neither told anyone what had happened.
+    console.warn('[web] pairing from the URL failed; falling back to the existing session', err);
     return false;
   }
 }

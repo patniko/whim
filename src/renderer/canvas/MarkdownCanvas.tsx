@@ -44,6 +44,7 @@ declare const whimAPI: {
   closePage(spaceId: string, pageName: string, content: string): Promise<{ success?: boolean; error?: string }>;
   listPages(spaceId: string): Promise<{ pages: string[]; error?: string }>;
   openPageWindow(target: { kind: 'page'; spaceId: string; page: string; title: string }): void;
+  openCanvasArtifact(spaceId: string, artifactId: string): Promise<{ ok?: true; error?: string }>;
   openExternal(url: string): Promise<{ ok: true }>;
   openLink(spaceId: string, url: string): Promise<{ action: string; error?: string }>;
   approveAgent(agentId: string, requestId: string, approved: boolean): Promise<void>;
@@ -59,10 +60,21 @@ export interface CanvasSaveResult {
 }
 
 /** Route a whim:// resource click to the matching window opener. */
-function openWhimResource(url: string): void {
+export function openWhimResource(url: string): void {
   if (url.startsWith('whim://space/')) {
     const id = url.slice('whim://space/'.length);
     if (id) whimAPI.openCanvasWindow({ kind: 'space', id, title: '' });
+    return;
+  }
+  if (url.startsWith('whim://artifact/')) {
+    const parts = url.slice('whim://artifact/'.length).split('/');
+    if (parts.length >= 2) {
+      try {
+        const spaceId = decodeURIComponent(parts[0]);
+        const artifactId = decodeURIComponent(parts.slice(1).join('/'));
+        if (spaceId && artifactId) void whimAPI.openCanvasArtifact(spaceId, artifactId);
+      } catch { /* a malformed link opens nothing rather than throwing */ }
+    }
     return;
   }
   if (url.startsWith('whim://page/')) {

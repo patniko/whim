@@ -21,6 +21,7 @@ import {
   setConfigValue,
 } from '../config';
 import {
+  extractHttpToken,
   extractWebSocketProtocolToken,
   getRemoteAddress,
   WebRemoteAuthenticator,
@@ -413,7 +414,27 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
       // named device, so revoking the device you knew about left the attacker
       // holding a credential you never saw — which defeats the point of making
       // sessions individually revocable.
-      if (auth.via !== 'token') {
+      //
+      // That rule is about what the caller *presented*, which is why the token
+      // is re-checked here rather than reusing the result above. The shared
+      // authenticator prefers a session cookie when it finds one, so a browser
+      // that was already paired and then opened the QR link again arrived with
+      // both credentials and was reported as `via: 'session'` — and refused,
+      // despite having supplied the very token pairing asks for. Re-pairing a
+      // known device is a thing people do (a new token, a cookie they are not
+      // sure about, a shared machine), and it failed with a 403 they could do
+      // nothing about. Requiring the token directly keeps the property the
+      // comment above describes: a stolen cookie on its own still cannot mint
+      // a session, because with no valid token this call now fails outright.
+      const presentedToken = extractHttpToken(req.headers, url);
+      // No token at all is refused without being counted as a failed attempt:
+      // the lockout exists to blunt token guessing, and a client that never
+      // offered a token has not guessed at one. A *wrong* token below is a
+      // different matter and is counted.
+      const pairing = presentedToken
+        ? authenticator.authenticate(presentedToken, getRemoteAddress(req))
+        : null;
+      if (!pairing?.ok) {
         sendJson(res, 403, {
           ok: false,
           error: { code: 'pairing_required', message: 'Pairing token required to create a session.' },

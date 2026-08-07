@@ -1,8 +1,9 @@
 # Canvas reports
 
-A **canvas report** is the durable, visual output of a skill run: a self-contained
+A **canvas report** is the durable, visual output of an agent run: a self-contained
 HTML page stored in the space that produced it, openable from the space list, the
-tray, or a notification — days later, without the agent still being around.
+tray, a notification, or a link in the document that asked for it — days later,
+without the agent still being around.
 
 It exists to close a specific gap. Whim could already define a skill, run it on a
 schedule, and give it a space to work in, but the result of that work landed in a
@@ -21,6 +22,8 @@ canvases and renders them.
 
 ## The shape of a run
 
+There are two ways in. A skill run is the scheduled one:
+
 ```
 skill  →  scheduler  →  space  →  agent run  →  report  →  one click to open it
 ```
@@ -34,6 +37,10 @@ skill  →  scheduler  →  space  →  agent run  →  report  →  one click t
 5. The agent writes its output and publishes it.
 6. The space row grows a chip, the tray lists the report, and a notification
    fires if the run was unattended.
+
+The other is a comment on a document you are writing, covered in
+[Reports from a comment](#reports-from-a-comment). Steps 4 to 6 are the same;
+what differs is what grants the capability and where the report is linked from.
 
 ## Enabling reports on a skill
 
@@ -168,9 +175,79 @@ is a liability rather than a feature.
 report content is a model's summary of third-party messages, so markup can arrive
 from a Slack quote or an issue title as easily as from the model itself.
 
+## Reports from a comment
+
+A skill run is not the only thing that can leave a report behind. Mentioning a
+persona that produces them, in a comment on a space document, gets you the same
+artifact from the writing you are already doing:
+
+```
+comment @artifact on a passage  →  agent run  →  report  →  a link where you asked
+```
+
+This is the other half of the feature. A skill run is something you set up in
+advance; a comment is something you think of mid-sentence. You select the
+paragraph you are unsure about, ask for the analysis, and keep writing while it
+runs.
+
+`@artifact` ships as a default persona. Any persona can do this — the capability
+is a field on the persona itself:
+
+| Field | Values | Meaning |
+|---|---|---|
+| `canvas` | `true`, `false`, or a canvas id | Whether runs launched with this persona may produce a report. |
+
+Personas carry it rather than reading `canvas_artifacts` from the document
+because the document is the user's own writing. Nothing in it says anything
+about reports, it may not exist on disk yet, and asking someone to edit
+frontmatter before they can ask a question defeats the point. The handle they
+mentioned is what expresses the intent.
+
+### One report per thread
+
+Each comment thread gets its own report, and whim — not the model — decides the
+id. Two comments on the same document are two different questions, but both
+would default to the same `artifactId`, and the second publish would overwrite
+the first with nothing to show that anything was lost. Nothing in the model's
+input distinguishes the threads, so it is not a decision it can make. An
+`artifactId` the model supplies is ignored on these runs.
+
+Re-running the same thread refreshes that thread's report, which is what "ask
+again with better instructions" should do.
+
+### The link back
+
+When the report publishes, whim writes a link to it into the document the
+comment was on, under a `## Reports` heading:
+
+```markdown
+## Reports
+
+- [Q3 churn drivers](whim://artifact/space-1/comment-7) — 3 drivers
+```
+
+Clicking it opens the report. The reply in the comment thread carries the same
+link.
+
+Whim writes the link rather than instructing the agent to, for the same reason
+the instruction contract exists: an agent that publishes and then forgets to
+link has produced output nobody sees, and that failure is invisible from the
+outside. The link is matched by URL, so a refreshed report updates its existing
+line instead of adding another one pointing at the same place, and the write
+goes through the same merge path the editor uses — you are very likely still
+typing in that document, and a blind write would discard what you added while
+the agent was working. A comment on a child page gets its link on that page.
+
+Canvas tools are pre-approved for these runs, as they are for scheduled ones:
+you named a persona whose entire job is producing a report, so approving the
+tools that do it is a prompt with one sensible answer. Every other permission
+still prompts.
+
 ## Opening a report
 
 - **Space list** — a chip on the row of any space with a published report.
+- **The document** — a link under `## Reports`, for a report you asked for from
+  a comment.
 - **Tray** — a Reports section listing reports from spaces you have not completed.
 - **Notification** — fires only when a run published something new. A scheduled
   skill that found nothing stays silent; a manual run you are watching does not
@@ -230,6 +307,7 @@ then on somebody is driving.
 | `src/main/canvas/skill-canvas-template.ts` | Template loading and rendering |
 | `src/main/canvas/skill-canvas-provider.ts` | Canvas backed by a skill's template |
 | `src/main/canvas/canvas-policy.ts` | Which runs may produce reports |
+| `src/main/canvas/artifact-linkback.ts` | Writing a published report back into its document |
 | `src/main/canvas/canvas-session.ts` | The single seam onto the SDK canvas API |
 | `src/main/canvas/canvas-launch.ts` | Per-run wiring, window hooks |
 | `src/main/canvas/canvas-lifecycle.ts` | Instance ↔ window reconciliation |

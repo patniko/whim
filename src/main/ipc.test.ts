@@ -902,6 +902,42 @@ describe('IPC handlers', () => {
       ]);
     });
 
+    it('keeps a persona opted into canvas reports', () => {
+      const personas = [
+        { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: true },
+      ];
+      const result = invoke('personas:save', personas);
+      expect(result).toEqual({ ok: true });
+      expect(setConfigValue).toHaveBeenCalledWith('personas', [
+        DEFAULT_AGENT_PERSONA,
+        { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: true },
+      ]);
+    });
+
+    it('keeps a named canvas type, so a persona can select its own layout', () => {
+      const personas = [
+        { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: 'digest' },
+      ];
+      invoke('personas:save', personas);
+      expect(setConfigValue).toHaveBeenCalledWith('personas', [
+        DEFAULT_AGENT_PERSONA,
+        { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: 'digest' },
+      ]);
+    });
+
+    it('drops the canvas flag when off, so a persona is never opted in by accident', () => {
+      const personas = [
+        { id: 'p1', handle: 'plain', instructions: 'Do things', model: '', runLocation: 'local', canvas: false },
+        { id: 'p2', handle: 'plain-two', instructions: 'Do things', model: '', runLocation: 'local', canvas: 'false' },
+      ];
+      invoke('personas:save', personas);
+      expect(setConfigValue).toHaveBeenCalledWith('personas', [
+        DEFAULT_AGENT_PERSONA,
+        { id: 'p1', handle: 'plain', instructions: 'Do things', model: '', runLocation: 'local' },
+        { id: 'p2', handle: 'plain-two', instructions: 'Do things', model: '', runLocation: 'local' },
+      ]);
+    });
+
     it('does not duplicate default-agent when caller already includes it', () => {
       // When the editor passes the @agent persona through (the normal flow
       // when saving from the UI), the handler must NOT prepend a duplicate.

@@ -50,6 +50,17 @@ export interface CanvasRunContext {
   runId?: string;
   /** A scheduled run must not steal focus when an artifact opens. */
   scheduled?: boolean;
+  /**
+   * Forces every artifact this run touches to one id, ignoring what the model
+   * asks for.
+   *
+   * Set for comment-launched runs, where the id is derived from the thread. Two
+   * threads on the same space are two different questions and must not share a
+   * report — but both would default to `report`, and the second publish would
+   * overwrite the first with no sign that anything was lost. Nothing in the
+   * model's input can distinguish the threads, so the host decides.
+   */
+  pinnedArtifactId?: string;
 }
 
 export interface CanvasProviderEvents {
@@ -81,6 +92,12 @@ function readString(input: Record<string, unknown> | undefined, key: string): st
  * space by passing a different id.
  */
 function resolveArtifactId(input: Record<string, unknown> | undefined, run: CanvasRunContext): string {
+  // A pinned id wins over anything the model supplies. Silently, and without
+  // an error: the model has no way to know the id is host-assigned, so failing
+  // its publish over a name it was never told is a pointless way to lose a
+  // report that has already been written.
+  if (run.pinnedArtifactId) return run.pinnedArtifactId;
+
   const requested = readString(input, 'artifactId');
   // An explicit id is validated rather than slugified. Slugifying it makes
   // "Q&A" and "Q A" the same directory, so one report quietly replaces another;
