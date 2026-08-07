@@ -11,7 +11,7 @@
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20·%20Windows-7c66dc)
 ![Built with Electron](https://img.shields.io/badge/built%20with-Electron-7c66dc)
 
-[Quick start](#getting-started) · [User guide](./docs/user-guide.md) · [Interactive walkthrough](./walkthrough) · [Architecture](./docs/architecture.md)
+[Quick start](#getting-started) · [User guide](./docs/user-guide.md) · [Canvas reports](./docs/canvas-artifacts.md) · [Interactive walkthrough](./walkthrough) · [Architecture](./docs/architecture.md)
 
 </div>
 
@@ -151,7 +151,7 @@ src/
     └── tray-icon.png          # System tray icon
 ```
 
-See [docs/architecture.md](./docs/architecture.md) for detailed component descriptions and [docs/user-guide.md](./docs/user-guide.md) for usage instructions.
+See [docs/architecture.md](./docs/architecture.md) for detailed component descriptions, [docs/user-guide.md](./docs/user-guide.md) for usage instructions, and [docs/canvas-artifacts.md](./docs/canvas-artifacts.md) for scheduled skills that publish visual reports.
 
 ## Getting Started
 

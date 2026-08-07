@@ -13,6 +13,12 @@ import {
   type SandboxLayer,
 } from './sandbox-policies';
 
+/**
+ * The agent-facing canvas tools.  Named explicitly rather than pattern-matched
+ * so a future tool with "canvas" in its name is not silently auto-approved.
+ */
+const CANVAS_TOOL_NAMES = new Set(['list_canvas_capabilities', 'open_canvas', 'invoke_canvas_action']);
+
 // UserInputRequest/UserInputResponse are not re-exported from the SDK index,
 // so we define compatible interfaces here.
 interface UserInputRequest {
@@ -452,6 +458,24 @@ export class InteractionBroker {
   }
 
   /**
+   * Whether a permission request is a canvas tool call that this run may make
+   * unattended.
+   *
+   * Scheduled runs exist precisely because nobody is watching, so a permission
+   * prompt does not get answered — it just hangs until the run times out and
+   * the report never appears.  The exemption is deliberately narrow: only the
+   * canvas tools, only for runs launched by the scheduler to produce an
+   * artifact.  Everything else still prompts, so a scheduled run cannot quietly
+   * gain shell or write access it would not otherwise have.
+   */
+  private isAutoApprovedCanvasTool(record: AgentRecord, request: PermissionRequest): boolean {
+    if (!record.autoApproveCanvasTools) return false;
+    if (request.kind !== 'custom-tool') return false;
+    const toolName = (request as unknown as Record<string, unknown>).toolName;
+    return typeof toolName === 'string' && CANVAS_TOOL_NAMES.has(toolName);
+  }
+
+  /**
    * Shared permission request handler for all agent types.
    * Each concurrent request gets a unique requestId so callbacks never overwrite each other.
    */
@@ -466,6 +490,12 @@ export class InteractionBroker {
       // Yolo mode: auto-approve everything without prompting
       if (record.yoloMode) {
         console.log(`[InteractionBroker] yolo-mode auto-approve: kind=${request.kind} agent=${record.agentId}`);
+        return { kind: 'approve-once' as const };
+      }
+
+      if (this.isAutoApprovedCanvasTool(record, request)) {
+        const toolName = (request as unknown as Record<string, unknown>).toolName;
+        console.log(`[InteractionBroker] scheduled canvas auto-approve: tool=${toolName} agent=${record.agentId}`);
         return { kind: 'approve-once' as const };
       }
 

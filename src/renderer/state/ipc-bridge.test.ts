@@ -5,6 +5,7 @@ import { agentStore } from './agent-store';
 import { skillStore } from './skill-store';
 import { historyStore } from './history-store';
 import { personaStore } from './persona-store';
+import { canvasArtifactStore } from './canvas-artifact-store';
 import {
   installIpcBridge,
   loadSpacesSnapshot,
@@ -33,6 +34,7 @@ interface BridgeMock {
     spaceTitleUpdated: (data: { spaceId: string; title: string }) => void;
     recurrenceApplied: (id: string) => void;
     skillsChanged: () => void;
+    canvasArtifactPublished: (data: { spaceId: string; artifactId: string; title: string }) => void;
     workspaceChanged: (path: string | null) => void;
   };
   calls: {
@@ -42,6 +44,8 @@ interface BridgeMock {
     listSkills: ReturnType<typeof vi.fn>;
     listEvents: ReturnType<typeof vi.fn>;
     listPersonas: ReturnType<typeof vi.fn>;
+    listCanvasArtifacts: ReturnType<typeof vi.fn>;
+    listAllCanvasArtifacts: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -52,6 +56,8 @@ function makeMock(overrides: Partial<{
   listSkills: unknown[];
   listEvents: unknown[];
   listPersonas: unknown[];
+  listCanvasArtifacts: unknown[];
+  listAllCanvasArtifacts: unknown[];
 }> = {}): BridgeMock {
   const fire = {} as BridgeMock['fire'];
 
@@ -62,6 +68,8 @@ function makeMock(overrides: Partial<{
     listSkills: vi.fn().mockResolvedValue(overrides.listSkills ?? []),
     listEvents: vi.fn().mockResolvedValue(overrides.listEvents ?? []),
     listPersonas: vi.fn().mockResolvedValue(overrides.listPersonas ?? []),
+    listCanvasArtifacts: vi.fn().mockResolvedValue({ artifacts: overrides.listCanvasArtifacts ?? [] }),
+    listAllCanvasArtifacts: vi.fn().mockResolvedValue({ artifacts: overrides.listAllCanvasArtifacts ?? [] }),
   };
 
   const api = {
@@ -71,6 +79,8 @@ function makeMock(overrides: Partial<{
     listSkills: calls.listSkills,
     listEvents: calls.listEvents,
     listPersonas: calls.listPersonas,
+    listCanvasArtifacts: calls.listCanvasArtifacts,
+    listAllCanvasArtifacts: calls.listAllCanvasArtifacts,
     onAgentStatusChanged: (cb: (d: unknown) => void) => { fire.agentStatus = cb; },
     onAgentApprovalNeeded: (cb: (d: unknown) => void) => { fire.agentApproval = cb; },
     onAgentCompleted: (cb: (d: unknown) => void) => { fire.agentCompleted = cb; },
@@ -82,6 +92,10 @@ function makeMock(overrides: Partial<{
     onSpaceTitleUpdated: (cb: (data: { spaceId: string; title: string }) => void) => { fire.spaceTitleUpdated = cb; },
     onRecurrenceApplied: (cb: (id: string) => void) => { fire.recurrenceApplied = cb; },
     onSkillsChanged: (cb: () => void) => { fire.skillsChanged = cb; },
+    onCanvasArtifactPublished: (cb: (d: { spaceId: string; artifactId: string; title: string }) => void) => {
+      fire.canvasArtifactPublished = cb;
+      return () => {};
+    },
     onWorkspaceChanged: (cb: (path: string | null) => void) => { fire.workspaceChanged = cb; },
   } as unknown as WhimAPI;
 
@@ -304,6 +318,28 @@ describe('ipc-bridge', () => {
     expect(m.calls.listSkills).toHaveBeenCalledTimes(1);
   });
 
+  it('onCanvasArtifactPublished refreshes only the space that published', async () => {
+    const m = makeMock({
+      listCanvasArtifacts: [{
+        artifactId: 'questions',
+        spaceId: 's1',
+        title: 'Open questions',
+        published: true,
+        updatedAt: '2024-01-01T00:00:00.000Z',
+        url: 'whim-artifact://space/s1/questions/index.html',
+      }],
+    });
+    installIpcBridge(m.api);
+
+    m.fire.canvasArtifactPublished({ spaceId: 's1', artifactId: 'questions', title: 'Open questions' });
+    await vi.runAllTimersAsync();
+    await Promise.resolve();
+
+    expect(m.calls.listCanvasArtifacts).toHaveBeenCalledWith('s1');
+    expect(m.calls.listAllCanvasArtifacts).not.toHaveBeenCalled();
+    expect(canvasArtifactStore.getPrimary('s1')?.artifactId).toBe('questions');
+  });
+
   it('onWorkspaceChanged with a path loads spaces, skills, and personas', async () => {
     const m = makeMock();
     installIpcBridge(m.api);
@@ -315,6 +351,7 @@ describe('ipc-bridge', () => {
     expect(m.calls.list).toHaveBeenCalledTimes(1);
     expect(m.calls.listSkills).toHaveBeenCalledTimes(1);
     expect(m.calls.listPersonas).toHaveBeenCalledTimes(1);
+    expect(m.calls.listAllCanvasArtifacts).toHaveBeenCalledTimes(1);
   });
 
   it('onWorkspaceChanged with null clears stores', () => {

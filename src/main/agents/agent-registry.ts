@@ -77,6 +77,15 @@ export interface AgentRecord {
   personaHandle?: string;
   /** When true, all permission requests are auto-approved without user interaction. Session-only. */
   yoloMode?: boolean;
+  /**
+   * When true, the canvas tools alone are auto-approved for this run.  Set for
+   * scheduled runs that were launched to produce an artifact: nobody is at the
+   * keyboard to answer a prompt, so without this the run would sit waiting for
+   * approval until it timed out, which is the one failure mode that makes
+   * scheduled reports useless.  Deliberately narrower than `yoloMode` — every
+   * other permission still prompts.
+   */
+  autoApproveCanvasTools?: boolean;
   /** Remote control state — tracks Mission Control integration per session. */
   remote?: { enabled: boolean; remoteSteerable: boolean; url?: string };
   /**

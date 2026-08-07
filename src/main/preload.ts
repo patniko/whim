@@ -117,6 +117,14 @@ export interface WhimAPI {
   onGitSyncChanged(callback: (status: IpcEventPayload<'workspace:git-sync-changed'>) => void): void;
 
   // ── Canvas ───────────────────────────────────────────────
+  /** Published canvas artifacts for a space. */
+  listCanvasArtifacts(spaceId: string): Promise<IpcCommandResult<'canvas-artifact:list'>>;
+  /** Published canvas artifacts across every space the user has not completed. */
+  listAllCanvasArtifacts(): Promise<IpcCommandResult<'canvas-artifact:list-all'>>;
+  /** Open a published canvas artifact in its own window. */
+  openCanvasArtifact(spaceId: string, artifactId: string): Promise<IpcCommandResult<'canvas-artifact:open'>>;
+  /** Fires when a run publishes or updates an artifact. */
+  onCanvasArtifactPublished(callback: (data: { spaceId: string; artifactId: string; title: string }) => void): () => void;
   readCanvas(spaceId: string): Promise<IpcCommandResult<'canvas:read'>>;
   canvasHasContent(spaceId: string): Promise<IpcCommandResult<'canvas:has-content'>>;
   writeCanvas(spaceId: string, content: string): Promise<IpcCommandResult<'canvas:write'>>;
@@ -385,6 +393,14 @@ const api: WhimAPI = {
   },
 
   // ── Canvas ───────────────────────────────────────────────
+  listCanvasArtifacts: (spaceId) => ipcRenderer.invoke('canvas-artifact:list', spaceId),
+  listAllCanvasArtifacts: () => ipcRenderer.invoke('canvas-artifact:list-all'),
+  openCanvasArtifact: (spaceId, artifactId) => ipcRenderer.invoke('canvas-artifact:open', spaceId, artifactId),
+  onCanvasArtifactPublished: (callback) => {
+    const handler = (_event: unknown, data: { spaceId: string; artifactId: string; title: string }) => callback(data);
+    ipcRenderer.on('canvas-artifact:published', handler);
+    return () => { ipcRenderer.removeListener('canvas-artifact:published', handler); };
+  },
   readCanvas: (spaceId) => ipcRenderer.invoke('canvas:read', spaceId),
   canvasHasContent: (spaceId) => ipcRenderer.invoke('canvas:has-content', spaceId),
   writeCanvas: (spaceId, content) => ipcRenderer.invoke('canvas:write', spaceId, content),

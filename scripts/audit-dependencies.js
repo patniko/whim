@@ -1,11 +1,22 @@
 const { spawnSync } = require('child_process');
 
+/**
+ * Vulnerabilities we knowingly ship with, because no fix exists.
+ *
+ * Both sit under `@huggingface/transformers`, which is used for local
+ * embeddings. Neither is reachable the way whim uses it: `adm-zip` unpacks the
+ * onnxruntime binary we ship, and `sharp` decodes images, which whim never
+ * asks the embedding pipeline to do. They are listed by exact advisory so an
+ * upgrade that introduces a *different* problem in the same package still
+ * fails the audit.
+ */
 const ADVISORY_ID = 'GHSA-xcpc-8h2w-3j85';
+const SHARP_ADVISORY_ID = 'GHSA-f88m-g3jw-g9cj';
 const EXPECTED_CHAIN = {
   '@huggingface/transformers': {
     severity: 'high',
     isDirect: true,
-    via: ['onnxruntime-node'],
+    via: ['onnxruntime-node', 'sharp'],
     effects: [],
   },
   'onnxruntime-node': {
@@ -17,7 +28,14 @@ const EXPECTED_CHAIN = {
   'adm-zip': {
     severity: 'high',
     isDirect: false,
+    advisory: ADVISORY_ID,
     effects: ['onnxruntime-node'],
+  },
+  sharp: {
+    severity: 'high',
+    isDirect: false,
+    advisory: SHARP_ADVISORY_ID,
+    effects: ['@huggingface/transformers'],
   },
 };
 
@@ -52,18 +70,18 @@ function validateReport(report) {
       throw new Error(`Unexpected dependency effects for ${name}`);
     }
 
-    if (name === 'adm-zip') {
+    if (expected.advisory) {
       if (!Array.isArray(details.via) || details.via.length !== 1 || typeof details.via[0] !== 'object') {
-        throw new Error('adm-zip must contain exactly one advisory');
+        throw new Error(`${name} must contain exactly one advisory`);
       }
       const advisory = details.via[0];
       if (
-        advisory.name !== 'adm-zip'
-        || advisory.dependency !== 'adm-zip'
-        || advisory.severity !== 'high'
-        || advisory.url !== `https://github.com/advisories/${ADVISORY_ID}`
+        advisory.name !== name
+        || advisory.dependency !== name
+        || advisory.severity !== expected.severity
+        || advisory.url !== `https://github.com/advisories/${expected.advisory}`
       ) {
-        throw new Error(`Unaccepted adm-zip advisory; only ${ADVISORY_ID} is allowed`);
+        throw new Error(`Unaccepted ${name} advisory; only ${expected.advisory} is allowed`);
       }
     } else if (!sameStrings(details.via, expected.via)) {
       throw new Error(`Unexpected dependency chain for ${name}`);
@@ -105,7 +123,8 @@ function main() {
       shell: process.platform === 'win32',
     }));
     for (const name of accepted) {
-      console.log(`[audit] accepted high ${ADVISORY_ID} chain record: ${name}`);
+      const { severity, advisory } = EXPECTED_CHAIN[name];
+      console.log(`[audit] accepted ${severity} chain record: ${name}${advisory ? ` (${advisory})` : ''}`);
     }
     console.log(`[audit] ${accepted.length} accepted vulnerability records; no unaccepted advisories`);
   } catch (error) {
