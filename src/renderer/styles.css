@@ -3070,6 +3070,57 @@ body.dark .waveform-canvas {
   outline-offset: -2px;
 }
 
+.filter-btn-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 10px;
+  min-width: 36px;
+  line-height: 0;
+}
+
+.filter-btn-icon svg {
+  opacity: 0.7;
+}
+
+.filter-btn-icon.active svg {
+  opacity: 1;
+}
+
+.filter-btn-icon .workers-badge {
+  top: 2px;
+  right: 3px;
+}
+
+/* ── Workspace tab (Spaces tab, labelled with the active workspace) ── */
+
+.workspace-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 0;
+}
+
+.workspace-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-tab-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.workspace-tab-dot.hidden {
+  display: none;
+}
+
 /* ── Workers badge (pending approvals indicator) ──────── */
 
 .filter-btn {

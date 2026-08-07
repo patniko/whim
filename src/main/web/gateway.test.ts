@@ -86,6 +86,29 @@ describe('web remote gateway', () => {
       { id: 'space-1', description: 'Test space' },
     ]);
   });
+
+  /**
+   * The channel is reachable so the browser's boot can branch on it, but the
+   * reply names an absolute path on the host. Redaction happens on the way
+   * out, after the desktop handler has answered, so it cannot be bypassed by
+   * reaching the handler some other way.
+   */
+  it('strips the host path from the CLI runtime status on the way out', async () => {
+    registerIpcHandler('cli:runtime-status', () => ({
+      source: 'auto',
+      target: '/Users/someone/.local/bin/copilot',
+      version: '0.9.1',
+      compatible: true,
+      minVersion: '0.8.0',
+    }));
+
+    const result = await invokeWebRemoteCommand('cli:runtime-status', []) as Record<string, unknown>;
+
+    expect(result.target).not.toContain('/Users');
+    expect(result.compatible).toBe(true);
+    expect(result.version).toBe('0.9.1');
+    expect(result.minVersion).toBe('0.8.0');
+  });
 });
 
 describe('classification and implementation stay in sync', () => {

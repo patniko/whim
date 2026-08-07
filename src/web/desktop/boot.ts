@@ -25,6 +25,9 @@ async function boot(): Promise<void> {
 
   (window as any).whimAPI = createWhimAPI(transport);
   (window as any).__platform = transport.platform;
+  // Lets the renderer distinguish "a poll costs nothing" from "a poll is an
+  // authenticated round trip against a rate limit". See renderer/transport-mode.ts.
+  (window as any).__whimTransport = 'web';
 
   const client = new WebRemoteClient();
   let interfaceRunning = false;

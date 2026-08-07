@@ -46,6 +46,15 @@ export interface AgentPersona {
   yolo?: boolean;
   /** When true, session state is kept in-memory only — nothing persisted to disk or DB. */
   ephemeral?: boolean;
+  /**
+   * Whether an agent launched with this persona may publish canvas reports,
+   * and which canvas type it uses. `true` selects the built-in `whim-report`.
+   *
+   * Skill runs derive the same capability from their space's frontmatter. A
+   * persona carries it instead for comment-launched runs, which have no
+   * invocation frontmatter to read it from.
+   */
+  canvas?: boolean | string;
 }
 
 /**
@@ -150,6 +159,7 @@ export interface AppConfig {
   personasSeeded: boolean;          // true after default personas have been injected once
   personasMigratedV2: boolean;      // true after legacy runLocation rename (cloud→cca) has run
   personasSandboxSeeded: boolean;   // true after @sandbox demo persona has been topped up once for existing installs
+  personasArtifactSeeded: boolean;  // true after @artifact persona has been topped up once for existing installs
   cliRuntimes: CliRuntime[];
   cliTools: CliToolDefinition[];
   mcpServers: CustomMcpServer[];   // user-added MCP servers
@@ -342,6 +352,7 @@ const DEFAULT_CONFIG: AppConfig = {
   personasSeeded: false,
   personasMigratedV2: false,
   personasSandboxSeeded: false,
+  personasArtifactSeeded: false,
   cliRuntimes: [],
   cliTools: [],
   mcpServers: [],

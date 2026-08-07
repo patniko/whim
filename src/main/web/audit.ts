@@ -76,30 +76,45 @@ export interface RateLimitDecision {
 }
 
 /**
- * Token bucket: `capacity` requests may burst, refilling at
- * `capacity / windowMs`. Chosen over a fixed window so a phone that wakes up
- * and refreshes several panels at once isn't punished, while a runaway loop
- * still settles to the sustained rate.
+ * Token bucket with a burst allowance separate from the sustained rate.
+ *
+ * The original bucket tied the two together: 60 tokens refilling at 60/min,
+ * so a burst *was* a minute's entire budget. That looked generous and was
+ * not. A cold page load spends a dozen calls before it paints, each open
+ * subagent view polls on a timer, and a reload starts over without waiting
+ * for a refill — so a normal session ran the bucket dry and the interface
+ * filled with 429s while doing nothing unusual.
+ *
+ * Splitting the two lets each be set for what it actually guards. `capacity`
+ * absorbs the legitimate spikes — a boot, a phone waking up and refreshing
+ * every panel at once. `ratePerWindow` is the ceiling a runaway loop settles
+ * to, and remains far below what a compromised client would want.
  */
 export class WebRemoteRateLimiter {
   private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();
 
   constructor(
-    private readonly capacity = 60,
+    private readonly capacity = 240,
     private readonly windowMs = 60_000,
     private readonly now: () => number = Date.now,
+    /**
+     * Defaults to `capacity`, which is the classic one-knob token bucket. The
+     * server passes both explicitly; leaving the default coupled keeps the
+     * class honest for callers that only care about a single rate.
+     */
+    private readonly ratePerWindow = capacity,
   ) {}
 
   check(identity: string): RateLimitDecision {
     const now = this.now();
     const bucket = this.buckets.get(identity) ?? { tokens: this.capacity, updatedAt: now };
 
-    const refill = ((now - bucket.updatedAt) / this.windowMs) * this.capacity;
+    const refill = ((now - bucket.updatedAt) / this.windowMs) * this.ratePerWindow;
     const tokens = Math.min(this.capacity, bucket.tokens + Math.max(0, refill));
 
     if (tokens < 1) {
       this.buckets.set(identity, { tokens, updatedAt: now });
-      const perToken = this.windowMs / this.capacity;
+      const perToken = this.windowMs / this.ratePerWindow;
       return { allowed: false, retryAfterSeconds: Math.max(1, Math.ceil(((1 - tokens) * perToken) / 1000)) };
     }
 

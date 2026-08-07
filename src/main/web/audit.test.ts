@@ -100,4 +100,39 @@ describe('WebRemoteRateLimiter', () => {
     expect(limiter.check('a').allowed).toBe(true);
     expect(limiter.check('a').allowed).toBe(false);
   });
+
+  /**
+   * Burst and sustained rate used to be the same number, so a burst spent the
+   * whole minute's budget. A page load costs a dozen calls before it paints
+   * and a reload immediately costs them again, which is exactly the pattern
+   * that filled the browser console with 429s while nothing unusual was
+   * happening.
+   */
+  it('lets a burst exceed the sustained rate without draining the minute', () => {
+    let now = 0;
+    const limiter = new WebRemoteRateLimiter(10, 1000, () => now, 5);
+
+    for (let i = 0; i < 10; i++) {
+      expect(limiter.check('phone').allowed).toBe(true);
+    }
+    expect(limiter.check('phone').allowed).toBe(false);
+
+    // A full window later, the sustained rate — not the burst size — is what
+    // has been handed back.
+    now = 1000;
+    for (let i = 0; i < 5; i++) {
+      expect(limiter.check('phone').allowed).toBe(true);
+    }
+    expect(limiter.check('phone').allowed).toBe(false);
+  });
+
+  it('still behaves as a plain token bucket when only one rate is given', () => {
+    let now = 0;
+    const limiter = new WebRemoteRateLimiter(2, 1000, () => now);
+    limiter.check('a');
+    limiter.check('a');
+    expect(limiter.check('a').allowed).toBe(false);
+    now = 500;
+    expect(limiter.check('a').allowed).toBe(true);
+  });
 });

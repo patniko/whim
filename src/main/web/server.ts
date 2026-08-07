@@ -83,7 +83,20 @@ const authenticator = new WebRemoteAuthenticator(
 );
 
 export const auditLog = new WebRemoteAuditLog();
-const rateLimiter = new WebRemoteRateLimiter();
+/**
+ * Sized from what the interface actually does, not from a round number.
+ *
+ * A cold load spends roughly a dozen calls before it paints, a reload spends
+ * them again immediately, and each open subagent view adds a timer — so the
+ * burst allowance has to cover several page loads back to back or the app
+ * rate-limits itself while behaving normally. The sustained ceiling is what
+ * bounds a runaway loop or a hostile client, and 600/min is still an order of
+ * magnitude below anything that could be used to hammer the host.
+ */
+const RATE_LIMIT_BURST = 240;
+const RATE_LIMIT_PER_MINUTE = 600;
+export const rateLimitPolicy = { burst: RATE_LIMIT_BURST, perMinute: RATE_LIMIT_PER_MINUTE };
+const rateLimiter = new WebRemoteRateLimiter(RATE_LIMIT_BURST, 60_000, Date.now, RATE_LIMIT_PER_MINUTE);
 
 const binder = new WebRemoteBinder({
   listen: (address, port) => startListener(address, port),

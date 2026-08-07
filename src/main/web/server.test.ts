@@ -67,6 +67,7 @@ import {
   cacheControlFor,
   getWebRemoteState,
   listWebRemoteListeners,
+  rateLimitPolicy,
   startWebRemoteServer,
   stopWebRemoteServer,
 } from './server';
@@ -524,15 +525,30 @@ describe('web remote server', () => {
         body: JSON.stringify({ channel: 'space:list', args: [] }),
       });
 
+      // Derived from the policy rather than hardcoded: the burst allowance is
+      // tuned to what a real page load costs, so a literal here would have to
+      // be chased every time that changes. The headroom covers tokens the
+      // sustained rate hands back while the loop is running.
+      const ceiling = rateLimitPolicy.burst * 3;
       let limited: Awaited<ReturnType<typeof send>> | null = null;
-      for (let i = 0; i < 80 && !limited; i += 1) {
+      let allowedBeforeLimit = 0;
+      for (let i = 0; i < ceiling && !limited; i += 1) {
         const res = await send();
         if (res.status === 429) limited = res;
+        else allowedBeforeLimit += 1;
       }
 
       expect(limited).not.toBeNull();
       expect(limited!.headers['retry-after']).toBeDefined();
       expect((limited!.json() as { error: { code: string } }).error.code).toBe('rate_limited');
+
+      // The ceiling is there to stop a runaway client, not to interrupt a
+      // normal one. A cold page load spends roughly a dozen calls before it
+      // paints and a reload spends them again immediately, so anything that
+      // cuts in around a few page loads is a limit the app trips over itself.
+      // Asserted here rather than in its own test because the bucket is
+      // process-wide and a separate test would depend on execution order.
+      expect(allowedBeforeLimit).toBeGreaterThan(15 * 4);
     });
   });
 

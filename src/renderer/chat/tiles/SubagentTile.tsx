@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { backupPollIntervalMs } from '../../transport-mode';
 
 declare const whimAPI: any;
 
@@ -103,7 +104,8 @@ export function SubagentTile({
     };
 
     poll();
-    const interval = setInterval(poll, 2000);
+    // A safety net behind the subscription below, not the primary source.
+    const interval = setInterval(poll, backupPollIntervalMs(2000));
 
     const unsub = whimAPI.subagentAPI?.onChanged?.(parentAgentId, (changed: any) => {
       if (changed?.agentId === agentId) {

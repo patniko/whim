@@ -85,13 +85,31 @@ export function createWebTransport(options: WebTransportOptions = {}): WebTransp
   const router = new EventRouter();
 
   async function remoteInvoke(channel: string, args: unknown[]): Promise<any> {
+    // One retry, and only for a rate limit. A 429 is the server saying "ask
+    // again shortly", which is a different thing from a failure — surfacing it
+    // raw made a transient budget dip look like a broken app. Retrying more
+    // than once would turn the client into the very pile-on the limit exists
+    // to stop, so a single deferred attempt is the whole allowance.
+    const first = await attempt(channel, args);
+    if (first.status !== 429) return finish(channel, first);
+
+    const wait = retryDelayMs(first.res.headers?.get('Retry-After') ?? null);
+    if (wait === null) return finish(channel, first);
+    await sleep(wait);
+    return finish(channel, await attempt(channel, args));
+  }
+
+  async function attempt(channel: string, args: unknown[]) {
     const res = await fetch('/api/invoke', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ channel, args }),
     });
+    return { res, status: res.status };
+  }
 
+  async function finish(channel: string, { res }: { res: Response }): Promise<any> {
     if (res.status === 401) {
       options.onUnauthorized?.();
       throw new Error('Session expired.');
@@ -143,6 +161,31 @@ export function createWebTransport(options: WebTransportOptions = {}): WebTransp
       else router.dispatch(event.channel, [event.payload]);
     },
   };
+}
+
+/**
+ * How long to wait before the single 429 retry, or `null` to give up now.
+ *
+ * The server's `Retry-After` is authoritative, but it is also attacker- and
+ * bug-controllable from the client's point of view, so an absurd value must
+ * not park a promise forever. Anything beyond a few seconds is reported to
+ * the caller instead — a user staring at a spinner deserves to be told.
+ */
+const MAX_RETRY_WAIT_MS = 5000;
+
+export function retryDelayMs(header: string | null): number | null {
+  // `Number(null)` and `Number('')` are both 0, which would read as "retry
+  // straight away" — the opposite of what a server that declined to say
+  // anything is asking for.
+  if (header === null || header.trim() === '') return null;
+  const seconds = Number(header);
+  if (!Number.isFinite(seconds) || seconds < 0) return null;
+  const ms = Math.ceil(seconds * 1000);
+  return ms > MAX_RETRY_WAIT_MS ? null : Math.max(ms, 250);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
