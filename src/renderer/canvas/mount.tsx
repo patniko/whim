@@ -133,3 +133,23 @@ export function replaceCanvasText(search: string, replacement: string): void {
 export function getCanvasSelectedText(): string {
   return canvasRef.current?.getSelectedText() ?? '';
 }
+
+/**
+ * Put the caret in the canvas editor.
+ *
+ * The imperative handle is only attached once React has committed the mount,
+ * and Milkdown builds its view a frame later still, so callers that focus
+ * straight after `mountCanvas` would find nothing to focus. Retrying across a
+ * couple of frames keeps that timing out of every call site.
+ */
+export function focusCanvasEditor(): void {
+  let attempts = 0;
+  const attempt = () => {
+    if (canvasRef.current) {
+      canvasRef.current.focus();
+      return;
+    }
+    if (attempts++ < 10) requestAnimationFrame(attempt);
+  };
+  requestAnimationFrame(attempt);
+}

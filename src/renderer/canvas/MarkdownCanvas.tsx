@@ -179,6 +179,7 @@ export interface MarkdownCanvasHandle {
   appendLink(label: string, url: string): void;
   replaceText(search: string, replacement: string): void;
   getSelectedText(): string;
+  focus(): void;
 }
 
 const AUTOSAVE_DELAY_MS = 2000;
@@ -248,6 +249,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     const rawContentRef = useRef(rawContent);
     const containerRef = useRef<HTMLDivElement>(null);
     const editorRef = useRef<MilkdownEditorHandle>(null);
+    const rawTextareaRef = useRef<HTMLTextAreaElement>(null);
     const onTitleChangeRef = useRef(onTitleChange);
     const titleFallbackRef = useRef(titleFallback);
     const lastEmittedTitleRef = useRef<string | null>(null);
@@ -684,6 +686,10 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
         }
         const sel = window.getSelection();
         return sel ? sel.toString() : '';
+      },
+      focus: () => {
+        if (editorModeRef.current === 'raw') rawTextareaRef.current?.focus();
+        else editorRef.current?.focus();
       },
     }), [saveNow, applyProgrammaticContent, updateThreads, scheduleSave, buildFull, stripFm, onDirtyChange, getFullContent, handleToggleMode, handleFrontmatterChange, emitTitleChange]);
 
@@ -1186,6 +1192,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
           </>
         ) : (
           <textarea
+            ref={rawTextareaRef}
             className="canvas-raw-editor"
             value={rawContent}
             onChange={handleRawContentChange}

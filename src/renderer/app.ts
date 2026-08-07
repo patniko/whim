@@ -6494,7 +6494,7 @@ async function unarchiveIntent(id: string): Promise<void> {
 (window as any).unarchiveIntent = unarchiveIntent;
 
 // ── Canvas view ─────────────────────────────────────────
-import { mountCanvas, unmountCanvas, getCanvasContent, saveCanvas as saveCanvasEditor, updateCanvasPresence, updateCanvasAgentThreadStatuses, updateCanvasAgentInteractions, updateCanvasDecorations, updateCanvasAgentUsers, addCanvasCommentReply, updateCanvasFrontmatter, toggleCanvasMode, getCanvasEditorMode, replaceCanvasContent, appendCanvasLink, replaceCanvasText, getCanvasSelectedText } from './canvas/mount.tsx';
+import { mountCanvas, unmountCanvas, getCanvasContent, saveCanvas as saveCanvasEditor, updateCanvasPresence, updateCanvasAgentThreadStatuses, updateCanvasAgentInteractions, updateCanvasDecorations, updateCanvasAgentUsers, addCanvasCommentReply, updateCanvasFrontmatter, toggleCanvasMode, getCanvasEditorMode, replaceCanvasContent, appendCanvasLink, replaceCanvasText, getCanvasSelectedText, focusCanvasEditor } from './canvas/mount.tsx';
 import { mountCanvasWorkerPanel, unmountCanvasWorkerPanel, isCanvasChatPaneOpen, closeCanvasChatPane } from './canvas/worker-panel-mount.tsx';
 import type { CanvasAgentInteraction, CanvasPresence, CanvasUser, CanvasDecoration, CanvasThreadAgentStatus } from './canvas/types';
 import type { MentionEvent } from './canvas/MarkdownCanvas';
@@ -7324,6 +7324,12 @@ async function openCanvas(spaceId: string, expanded = false): Promise<void> {
       });
     },
   });
+
+  // A space that was just created has nothing to read, so leaving the caret
+  // outside the editor means the first thing the user does is click. Focusing
+  // an empty document is safe wherever it opens — inline or in the popout —
+  // and needs no flag threaded through the window-open IPC.
+  if (!parsedCanvas.body.trim()) focusCanvasEditor();
 
   // Mount worker tiles + chat side pane
   mountCanvasWorkerPanel(canvasWorkerTilesRoot, canvasChatPane, {
