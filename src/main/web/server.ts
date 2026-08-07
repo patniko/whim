@@ -685,22 +685,35 @@ async function serveAttachment(res: http.ServerResponse, url: URL): Promise<void
     return;
   }
 
-  const space = getSpace(spaceId);
-  if (!space?.folder) {
-    sendJson(res, 404, { ok: false, error: { code: 'not_found', message: 'Space not found.' } });
-    return;
-  }
-
-  // resolveAttachmentPath contains the traversal check: it refuses any path
-  // that escapes the space folder.
-  const { getMimeType, resolveAttachmentPath } = await import('../workspace');
-  const absolute = resolveAttachmentPath(workspace, space.folder, relativePath);
+  // Resolution is shared with `canvas:read-file`, so a page or a linked
+  // workspace file addresses its images here exactly as it does on the
+  // desktop. It carries the traversal check: any path that escapes the
+  // canvas's own directory, or a `__file__` id pointing outside the
+  // workspace, resolves to nothing.
+  const { resolveCanvasFile } = await import('../canvas/canvas-file-root');
+  const { getMimeType } = await import('../workspace');
+  const absolute = resolveCanvasFile(
+    workspace,
+    spaceId,
+    relativePath,
+    (id) => getSpace(id)?.folder ?? null,
+  );
   if (!absolute) {
     sendJson(res, 404, { ok: false, error: { code: 'not_found', message: 'Attachment not found.' } });
     return;
   }
 
-  const stats = fs.statSync(absolute);
+  let stats: fs.Stats;
+  try {
+    stats = fs.statSync(absolute);
+  } catch {
+    // The file can vanish between the resolve above and this call. That is a
+    // missing attachment, not a server fault, and it must not throw out of the
+    // request handler.
+    sendJson(res, 404, { ok: false, error: { code: 'not_found', message: 'Attachment not found.' } });
+    return;
+  }
+
   res.writeHead(200, {
     ...securityHeaders(),
     'Content-Type': getMimeType(absolute),
@@ -709,7 +722,9 @@ async function serveAttachment(res: http.ServerResponse, url: URL): Promise<void
     // them private to this browser rather than allowing shared caches.
     'Cache-Control': 'private, max-age=3600',
   });
-  fs.createReadStream(absolute).pipe(res);
+  const stream = fs.createReadStream(absolute);
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
 }
 
 /** Content-hashed filenames (`app.<hash>.js`) can be cached indefinitely. */

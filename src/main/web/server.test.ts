@@ -46,17 +46,15 @@ vi.mock('./event-hub', () => ({
 }));
 
 const space: { id: string; folder: string } | null = { id: 'sp1', folder: 'space-one' };
-let attachmentPath: string | null = null;
 
 vi.mock('../database', () => ({
   isInitialized: () => true,
   getSpace: (id: string) => (space && space.id === id ? space : null),
 }));
 
-vi.mock('../workspace', () => ({
-  resolveAttachmentPath: () => attachmentPath,
-  getMimeType: () => 'image/png',
-}));
+// `../workspace` is deliberately left real: the attachment route's containment
+// and synthetic-id rules are the thing under test here, and a stubbed resolver
+// would assert nothing about them.
 
 vi.mock('qrcode', () => ({
   toDataURL: async () => 'data:image/png;base64,stub',
@@ -132,8 +130,27 @@ function request(
   });
 }
 
+/**
+ * A real workspace on disk, so the attachment route resolves paths for real.
+ * `spaces/space-one` holds the space's own files; `outside` stands in for
+ * anywhere else on the machine.
+ */
+let workspaceRoot: string;
+let outsideRoot: string;
+
+function spaceDir(): string {
+  return path.join(workspaceRoot, 'space-one');
+}
+
 beforeEach(async () => {
-  attachmentPath = null;
+  workspaceRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'whim-web-ws-')));
+  outsideRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'whim-web-out-')));
+  fs.mkdirSync(path.join(spaceDir(), 'assets'), { recursive: true });
+  fs.writeFileSync(path.join(spaceDir(), 'assets', 'a.png'), 'pixels');
+  fs.writeFileSync(path.join(spaceDir(), 'canvas.md'), '# notes');
+  fs.writeFileSync(path.join(outsideRoot, 'secret.txt'), 'classified');
+  config.workspace = workspaceRoot;
+
   config.webRemotePort = 0;
   config.webRemoteBindSelections = [{ kind: 'address', address: '127.0.0.1' }];
   await startWebRemoteServer();
@@ -142,6 +159,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await stopWebRemoteServer();
+  fs.rmSync(workspaceRoot, { recursive: true, force: true });
+  fs.rmSync(outsideRoot, { recursive: true, force: true });
 });
 
 describe('web remote server', () => {
@@ -626,8 +645,10 @@ describe('web remote server', () => {
   });
 
   describe('attachment route', () => {
+    const auth = { headers: { Authorization: `Bearer ${TOKEN}` } };
+
     it('requires spaceId and path', async () => {
-      const res = await request('/api/attachment', { headers: { Authorization: `Bearer ${TOKEN}` } });
+      const res = await request('/api/attachment', auth);
       expect(res.status).toBe(400);
     });
 
@@ -636,36 +657,66 @@ describe('web remote server', () => {
       expect(res.status).toBe(401);
     });
 
-    it('404s when the attachment escapes or is missing', async () => {
-      attachmentPath = null;
-      const res = await request('/api/attachment?spaceId=sp1&path=../../etc/passwd', {
-        headers: { Authorization: `Bearer ${TOKEN}` },
-      });
+    it('404s when the path escapes the space', async () => {
+      const res = await request('/api/attachment?spaceId=sp1&path=../../etc/passwd', auth);
       expect(res.status).toBe(404);
     });
 
     it('404s for an unknown space', async () => {
-      const res = await request('/api/attachment?spaceId=nope&path=a.png', {
-        headers: { Authorization: `Bearer ${TOKEN}` },
-      });
+      const res = await request('/api/attachment?spaceId=nope&path=a.png', auth);
+      expect(res.status).toBe(404);
+    });
+
+    it('404s for a missing file', async () => {
+      const res = await request('/api/attachment?spaceId=sp1&path=assets/gone.png', auth);
+      expect(res.status).toBe(404);
+    });
+
+    it('404s for a directory rather than faulting', async () => {
+      // Streaming a directory throws, which would take the request handler
+      // down instead of answering it.
+      const res = await request('/api/attachment?spaceId=sp1&path=assets', auth);
       expect(res.status).toBe(404);
     });
 
     it('serves the file with a private cache policy', async () => {
-      const file = path.join(os.tmpdir(), `whim-attachment-${Date.now()}.png`);
-      fs.writeFileSync(file, 'pixels');
-      attachmentPath = file;
-      try {
-        const res = await request('/api/attachment?spaceId=sp1&path=a.png', {
-          headers: { Authorization: `Bearer ${TOKEN}` },
-        });
-        expect(res.status).toBe(200);
-        expect(res.headers['content-type']).toBe('image/png');
-        expect(res.headers['cache-control']).toBe('private, max-age=3600');
-        expect(res.body).toBe('pixels');
-      } finally {
-        fs.unlinkSync(file);
-      }
+      const res = await request('/api/attachment?spaceId=sp1&path=assets/a.png', auth);
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toBe('image/png');
+      expect(res.headers['cache-control']).toBe('private, max-age=3600');
+      expect(res.body).toBe('pixels');
+    });
+
+    it('serves an image referenced from a page in that space', async () => {
+      // A page is a canvas with a synthetic id. Looking it up as a space
+      // returns nothing, which is why images in pages used to 404.
+      const id = encodeURIComponent(`__page__sp1/${encodeURIComponent('Meeting notes')}`);
+      const res = await request(`/api/attachment?spaceId=${id}&path=assets/a.png`, auth);
+      expect(res.status).toBe(200);
+      expect(res.body).toBe('pixels');
+    });
+
+    it('serves an image referenced from a linked workspace file', async () => {
+      const target = encodeURIComponent(path.join(spaceDir(), 'canvas.md'));
+      const id = encodeURIComponent(`__file__${target}`);
+      const res = await request(`/api/attachment?spaceId=${id}&path=assets/a.png`, auth);
+      expect(res.status).toBe(200);
+      expect(res.body).toBe('pixels');
+    });
+
+    it('refuses a linked-file id pointing outside the workspace', async () => {
+      // Both the id and the path come from the client, so the id must not be
+      // able to relocate the read to anywhere on disk.
+      const target = encodeURIComponent(path.join(outsideRoot, 'secret.txt'));
+      const id = encodeURIComponent(`__file__${target}`);
+      const res = await request(`/api/attachment?spaceId=${id}&path=secret.txt`, auth);
+      expect(res.status).toBe(404);
+    });
+
+    it('refuses a symlink pointing out of the space', async () => {
+      fs.symlinkSync(path.join(outsideRoot, 'secret.txt'), path.join(spaceDir(), 'leak.txt'));
+      const res = await request('/api/attachment?spaceId=sp1&path=leak.txt', auth);
+      expect(res.status).toBe(404);
     });
   });
 });

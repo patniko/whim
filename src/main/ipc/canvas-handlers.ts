@@ -2,18 +2,33 @@ import { registerIpcHandler } from './registry';
 import { shell, BrowserWindow } from 'electron';
 import { isInitialized, getSpace, getSkill, assignSpaceFolder, updateCanvasContent } from '../database';
 import { getConfigValue } from '../config';
-import { initSpaceCanvas, ensureSpaceCanvas, readCanvas, scheduleAutoCommit, saveAttachment, resolveAttachmentPath, getMimeType, readSpaceFile, getSpaceHistory, restoreSpaceVersion, getSpaceVersionContent, resolveSpaceFolder, resolvePagePath, createPage, readPage, writePage, listPages } from '../workspace';
+import { initSpaceCanvas, ensureSpaceCanvas, readCanvas, scheduleAutoCommit, saveAttachment, resolveAttachmentPath, getMimeType, getSpaceHistory, restoreSpaceVersion, getSpaceVersionContent, resolveSpaceFolder, resolvePagePath, createPage, readPage, writePage, listPages } from '../workspace';
 import { parseFrontmatter, serializeFrontmatter } from '../frontmatter';
 import { fetchLinkPreview } from '../services/link-preview';
 import { startWatching, stopWatching } from '../canvas-watcher';
 import { mirrorRendererEvent } from '../web/event-hub';
 import { forgetCanvasEditorContent, rememberCanvasEditorContent, writeEditorFileWithMerge, writeMainCanvasWithMerge, type CanvasWriteResult } from '../services/canvas-editor-state';
 import { openFileInNewWindow, isWorkspaceMdFile } from '../window-manager';
+import { readCanvasFile } from '../canvas/canvas-file-root';
+import { resolveLinkTarget, type LinkTarget } from '../canvas/link-target';
 import type { SkillFrontmatter } from '../../shared/types';
 import * as fs from 'fs';
 import * as path from 'path';
 
 const CANVAS_FILE = 'canvas.md';
+
+/** Space lookup for the canvas file resolver, which stays database-agnostic. */
+const spaceFolderLookup = (spaceId: string): string | null => getSpace(spaceId)?.folder ?? null;
+
+/** Decide what a link means, or null when there is no workspace to decide against. */
+function resolveLinkFor(spaceId: string, url: string): LinkTarget | null {
+  const workspace = getConfigValue('workspace');
+  if (!workspace) return null;
+  return resolveLinkTarget(url, {
+    baseDir: resolveCanvasBaseDir(workspace, spaceId),
+    isWorkspaceMdFile,
+  });
+}
 
 function parseSyntheticPageId(spaceId: string): { realSpaceId: string; pageName: string } | null {
   if (!spaceId.startsWith('__page__')) return null;
@@ -317,10 +332,9 @@ export function registerCanvasHandlers(): void {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
-    const space = getSpace(spaceId);
-    if (!space || !space.folder) return { error: 'not_found' };
-
-    const result = readSpaceFile(workspace, space.folder, relativePath);
+    // Pages and linked workspace files are canvases too, and their ids are
+    // synthetic — looking them up as spaces is why their images never loaded.
+    const result = readCanvasFile(workspace, spaceId, relativePath, spaceFolderLookup);
     if (!result) return { error: 'not_found' };
 
     // Return as array of bytes + mimeType so it can cross the IPC boundary
@@ -508,52 +522,34 @@ export function registerCanvasHandlers(): void {
   // Resolves file paths relative to the current canvas context and opens
   // .md files under workspace in a new canvas window, or opens externally.
   registerIpcHandler('canvas:open-link', (_event, spaceId: string, url: string) => {
-    const workspace = getConfigValue('workspace');
-    if (!workspace) return { action: 'none' as const, error: 'no_workspace' };
+    const target = resolveLinkFor(spaceId, url);
+    if (!target) return { action: 'none' as const, error: 'no_workspace' };
 
-    // Strip fragment (#heading) and query string before filesystem checks
-    const hashIdx = url.indexOf('#');
-    const cleanUrl = hashIdx >= 0 ? url.slice(0, hashIdx) : url;
-
-    let filePath: string | null = null;
-
-    if (cleanUrl.startsWith('file://')) {
-      try {
-        filePath = decodeURIComponent(new URL(cleanUrl).pathname);
-      } catch {
-        return { action: 'none' as const, error: 'invalid_url' };
-      }
-    } else if (cleanUrl.startsWith('/')) {
-      // Absolute path
-      filePath = cleanUrl;
-    } else if (!cleanUrl.includes('://')) {
-      // Relative path — resolve against current canvas context
-      const baseDir = resolveCanvasBaseDir(workspace, spaceId);
-      if (baseDir) {
-        filePath = path.resolve(baseDir, decodeURIComponent(cleanUrl));
-      }
-    }
-
-    if (!filePath) {
-      // Not a file path — open externally if it's a valid URL
-      if (cleanUrl.startsWith('http://') || cleanUrl.startsWith('https://') || cleanUrl.startsWith('mailto:')) {
-        shell.openExternal(url);
+    switch (target.kind) {
+      case 'external':
+        shell.openExternal(target.url);
         return { action: 'external' as const };
-      }
-      return { action: 'none' as const };
+      case 'canvas':
+        openFileInNewWindow(target.filePath);
+        return { action: 'canvas' as const };
+      case 'file':
+        // Not a canvas — hand it to whatever the OS opens it with.
+        shell.openPath(target.filePath);
+        return { action: 'external' as const };
+      default:
+        return target.reason === 'invalid_url'
+          ? { action: 'none' as const, error: 'invalid_url' }
+          : { action: 'none' as const };
     }
+  });
 
-    // Decode percent-encoded path components
-    filePath = decodeURIComponent(filePath);
-
-    if (isWorkspaceMdFile(filePath)) {
-      openFileInNewWindow(filePath);
-      return { action: 'canvas' as const };
-    }
-
-    // Non-.md file or not in workspace — open with OS default
-    shell.openPath(filePath);
-    return { action: 'external' as const };
+  // ── Decide what a link means, without acting on it ────
+  //
+  // The browser needs the same answer `canvas:open-link` acts on, but every
+  // action above happens on the desktop machine — so it gets the decision and
+  // applies it where it is: a new tab, or navigation within the page.
+  registerIpcHandler('canvas:resolve-link', (_event, spaceId: string, url: string) => {
+    return resolveLinkFor(spaceId, url) ?? { kind: 'none' as const, reason: 'no_workspace' as const };
   });
 
   // ── Rehydrate live comment-thread agents for a (re)mounted canvas ──

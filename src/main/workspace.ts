@@ -760,17 +760,32 @@ function realpathOrSelf(target: string): string {
   }
 }
 
+/**
+ * Resolve `relativePath` inside `root`, or null if it escapes or is missing.
+ *
+ * The one place the containment check lives, so every caller that serves a
+ * file to a canvas — over IPC or over the web remote's HTTP endpoint — gets
+ * the same symlink-aware guard rather than its own approximation of one.
+ */
+export function resolveFileInDir(root: string, relativePath: string): string | null {
+  const resolved = path.resolve(path.join(root, relativePath));
+  if (!isPathInside(root, resolved)) return null;
+  if (!fs.existsSync(resolved)) return null;
+  return resolved;
+}
+
 /** Resolve an attachment path to an absolute path (with security check). */
 export function resolveAttachmentPath(
   workspaceRoot: string,
   folder: string,
   relativePath: string
 ): string | null {
-  const folderRoot = resolveSpaceFolder(workspaceRoot, folder);
-  const resolved = path.resolve(path.join(folderRoot, relativePath));
-  if (!isPathInside(folderRoot, resolved)) return null;
-  if (!fs.existsSync(resolved)) return null;
-  return resolved;
+  return resolveFileInDir(resolveSpaceFolder(workspaceRoot, folder), relativePath);
+}
+
+/** True when `candidate` is contained by `root` (symlinks resolved). */
+export function isPathContainedBy(root: string, candidate: string): boolean {
+  return isPathInside(root, candidate);
 }
 
 /** Read a file from an space folder and return its raw bytes + MIME type. */

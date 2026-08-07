@@ -172,6 +172,9 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   'canvas:close-page': 'allow',
   'canvas:list-pages': 'allow',
   'canvas:open-link': 'desktop-only',
+  // Deciding what a link means is a question about the workspace, not an
+  // action on the host — the browser applies the answer itself.
+  'canvas:resolve-link': 'allow',
   'canvas:read-file': 'allow',
   // Export and share write to host filesystem paths chosen on the desktop.
   'canvas:export': 'deny',
@@ -241,6 +244,7 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   'skill:invoke': 'allow',
   'skill:set-schedule': 'allow',
   'skill:clear-schedule': 'allow',
+  'skill:set-canvas': 'allow',
 
   // The updater drives a native download and relaunch.
   'update:install': 'desktop-only',

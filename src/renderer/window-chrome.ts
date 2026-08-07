@@ -50,3 +50,40 @@ export function shouldStartHidden(ctx: WindowChromeContext): boolean {
 export function shouldHideWindow(ctx: Pick<WindowChromeContext, 'isWebRemote'>): boolean {
   return !ctx.isWebRemote;
 }
+
+/**
+ * Whether opening a canvas should pop out a separate desktop window.
+ *
+ * On the desktop the main window never renders a canvas itself — it asks the
+ * main process for a dedicated window and returns. That request is
+ * `canvas-window:open`, a fire-and-forget `send` rather than an `invoke`,
+ * because there is no reply to wait for.
+ *
+ * A browser has no second window to open, and the web transport drops every
+ * `send` precisely because each one drives a native surface a tab does not
+ * have. So over the web the pop-out branch returned having done nothing at
+ * all: clicking a space produced no canvas, no error, no request, and an empty
+ * console. The renderer already carries the code to draw a canvas in place —
+ * it is what the popout runs — so the browser takes that path instead.
+ */
+export function shouldPopOutCanvas(
+  ctx: Pick<WindowChromeContext, 'isCanvasMode' | 'isWebRemote'>,
+): boolean {
+  if (ctx.isWebRemote) return false;
+  return !ctx.isCanvasMode;
+}
+
+/**
+ * Whether closing a canvas should close the window it lives in.
+ *
+ * The popout is a whole window, so closing the canvas closes it. A browser
+ * refuses `window.close()` for a tab it did not open, which left the web
+ * remote's canvas with no way back to the list — and, because the canvas is
+ * drawn in the main window there, no need for one: hiding it reveals the list
+ * that was underneath all along.
+ */
+export function shouldCloseWindowOnCanvasClose(
+  ctx: Pick<WindowChromeContext, 'isWebRemote'>,
+): boolean {
+  return !ctx.isWebRemote;
+}

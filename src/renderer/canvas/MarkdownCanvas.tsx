@@ -28,6 +28,8 @@ import { SpaceLinkPicker, type SpaceResult } from './SpaceLinkPicker';
 import { merge3 } from '../../shared/text-merge';
 import { hasDisplayableFrontmatter, serializeFrontmatter, tryParseFrontmatter } from '../../shared/frontmatter';
 import { deriveMarkdownTitle } from '../../shared/markdown-title';
+import { isWebRemote } from '../transport-mode';
+import type { CanvasLinkTarget } from '../../shared/ipc-contract';
 
 declare const whimAPI: {
   writeCanvas(spaceId: string, content: string): Promise<CanvasSaveResult>;
@@ -47,6 +49,7 @@ declare const whimAPI: {
   openCanvasArtifact(spaceId: string, artifactId: string): Promise<{ ok?: true; error?: string }>;
   openExternal(url: string): Promise<{ ok: true }>;
   openLink(spaceId: string, url: string): Promise<{ action: string; error?: string }>;
+  resolveLink(spaceId: string, url: string): Promise<CanvasLinkTarget>;
   approveAgent(agentId: string, requestId: string, approved: boolean): Promise<void>;
   respondToUserInput(agentId: string, requestId: string, answer: string, wasFreeform: boolean): Promise<void>;
   respondToElicitation(agentId: string, requestId: string, action: 'accept' | 'decline' | 'cancel', content?: Record<string, unknown>): Promise<void>;
@@ -59,11 +62,38 @@ export interface CanvasSaveResult {
   error?: string;
 }
 
-/** Route a whim:// resource click to the matching window opener. */
-export function openWhimResource(url: string): void {
+/** A canvas to navigate to in this window. Mirrors the desktop's window target. */
+export interface CanvasTargetRequest {
+  kind: string;
+  id: string;
+  title: string;
+  spaceId?: string;
+  page?: string;
+  filePath?: string;
+}
+
+/**
+ * Route a whim:// resource click.
+ *
+ * On the desktop each of these opens a window, requested with a
+ * fire-and-forget send. A browser has no second window, and the web transport
+ * drops those sends — so every link in a document was dead over the web
+ * remote. Where the canvas is drawn inline, `openCanvasTarget` navigates this
+ * window instead; the window openers remain the desktop path.
+ *
+ * `notify` reports what could not be done. Silence is the failure mode this
+ * whole function exists to avoid: the user clicked a link that plainly refers
+ * to something, and deserves to know it is not reachable from here.
+ */
+export function openWhimResource(url: string, notify?: (message: string) => void): void {
+  const openInline = (globalThis as { openCanvasTarget?: (t: CanvasTargetRequest) => void })
+    .openCanvasTarget;
+
   if (url.startsWith('whim://space/')) {
     const id = url.slice('whim://space/'.length);
-    if (id) whimAPI.openCanvasWindow({ kind: 'space', id, title: '' });
+    if (!id) return;
+    if (openInline) openInline({ kind: 'space', id, title: '' });
+    else whimAPI.openCanvasWindow({ kind: 'space', id, title: '' });
     return;
   }
   if (url.startsWith('whim://artifact/')) {
@@ -72,7 +102,14 @@ export function openWhimResource(url: string): void {
       try {
         const spaceId = decodeURIComponent(parts[0]);
         const artifactId = decodeURIComponent(parts.slice(1).join('/'));
-        if (spaceId && artifactId) void whimAPI.openCanvasArtifact(spaceId, artifactId);
+        if (spaceId && artifactId) {
+          // Reports are agent-authored HTML served from a private Electron
+          // scheme that deliberately never leaves the desktop app, so there is
+          // nothing to route to here — say so rather than doing nothing.
+          void whimAPI.openCanvasArtifact(spaceId, artifactId).catch(() => {
+            notify?.('Reports open in the desktop app.');
+          });
+        }
       } catch { /* a malformed link opens nothing rather than throwing */ }
     }
     return;
@@ -82,7 +119,8 @@ export function openWhimResource(url: string): void {
     if (parts.length >= 2) {
       const [spaceId, ...rest] = parts;
       const page = rest.join('/');
-      whimAPI.openPageWindow({ kind: 'page', spaceId, page, title: page });
+      if (openInline) openInline({ kind: 'page', id: spaceId, spaceId, page, title: page });
+      else whimAPI.openPageWindow({ kind: 'page', spaceId, page, title: page });
     }
   }
 }
@@ -192,6 +230,19 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
 
     const contentRef = useRef(content);
     const threadsRef = useRef(threads);
+
+    /**
+     * Say why something did not happen.
+     *
+     * Reuses the save-status line rather than introducing a second
+     * notification surface. Held in a ref so link handlers do not have to be
+     * rebuilt when the callback identity changes.
+     */
+    const notifyRef = useRef<(message: string) => void>(() => {});
+    notifyRef.current = (message: string) => {
+      onSaveStatus(message);
+      setTimeout(() => onSaveStatus(''), 4000);
+    };
     const frontmatterRef = useRef(frontmatter);
     const editorModeRef = useRef<EditorMode>(editorMode);
     const rawContentRef = useRef(rawContent);
@@ -672,6 +723,18 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
 
     // Resolve workspace-relative image srcs into object URLs for display.
     const resolveImageSrc = useCallback(async (src: string): Promise<string | null> => {
+      // Over the web, point the browser at the attachment endpoint rather than
+      // pulling the bytes through the RPC. `canvas:read-file` hands back a
+      // JSON array of numbers — roughly four times the size of the image, and
+      // one rate-limit token per picture — and then the blob URL it becomes is
+      // uncacheable, so every remount re-fetches everything. A plain URL
+      // streams once and is cached by the browser.
+      if (isWebRemote()) {
+        if (!src) return null;
+        // Absolute and inline sources are already loadable as they stand.
+        if (/^(https?:|data:|blob:|\/)/i.test(src)) return src;
+        return `/api/attachment?spaceId=${encodeURIComponent(spaceId)}&path=${encodeURIComponent(src)}`;
+      }
       try {
         const r = await whimAPI.readFile(spaceId, src);
         if (r.error || !r.data) return null;
@@ -695,13 +758,41 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       }
     }, [spaceId]);
 
-    // Route link clicks: whim:// to window openers, everything else to the host.
+    // Route link clicks. `whim://` navigates within whim; everything else is
+    // resolved against the workspace and then applied here — because what a
+    // link means is a shared question, but opening it is not: the desktop has
+    // a shell and a file manager, and a browser has a new tab.
     const handleLinkClick = useCallback((url: string) => {
       if (url.startsWith('whim://')) {
-        openWhimResource(url);
+        openWhimResource(url, notifyRef.current);
         return;
       }
-      whimAPI.openLink(spaceId, url);
+      if (!isWebRemote()) {
+        whimAPI.openLink(spaceId, url);
+        return;
+      }
+      void whimAPI.resolveLink(spaceId, url).then((target) => {
+        if (target.kind === 'external') {
+          // `noopener` keeps the opened page from reaching back through
+          // `window.opener` into a tab holding this session.
+          window.open(target.url, '_blank', 'noopener,noreferrer');
+          return;
+        }
+        if (target.kind === 'canvas') {
+          const openInline = (globalThis as { openCanvasTarget?: (t: CanvasTargetRequest) => void })
+            .openCanvasTarget;
+          const title = target.filePath.split('/').pop() ?? target.filePath;
+          if (openInline) openInline({ kind: 'file', id: target.filePath, filePath: target.filePath, title });
+          return;
+        }
+        if (target.kind === 'file') {
+          // The file is on the machine running whim, not the one holding this
+          // tab, so there is nowhere here to open it.
+          notifyRef.current?.('That file opens in the desktop app.');
+        }
+      }).catch(() => {
+        notifyRef.current?.('Could not open that link.');
+      });
     }, [spaceId]);
 
     // ── Comment interactions ───────────────────────────────

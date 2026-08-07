@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shouldStartHidden, shouldHideWindow } from './window-chrome';
+import { shouldStartHidden, shouldHideWindow, shouldPopOutCanvas, shouldCloseWindowOnCanvasClose } from './window-chrome';
 import { DESKTOP_ONLY_EVENT_CHANNELS } from '../main/web/event-hub';
 
 /**
@@ -54,5 +54,45 @@ describe('window chrome', () => {
   it('confirms the reveal event is never forwarded to a browser', () => {
     expect(DESKTOP_ONLY_EVENT_CHANNELS.has('window:shown')).toBe(true);
     expect(DESKTOP_ONLY_EVENT_CHANNELS.has('window:toggle')).toBe(true);
+  });
+});
+
+/**
+ * Where a canvas is drawn, and what closing it means.
+ *
+ * The desktop main window hands canvases to a dedicated window with a
+ * fire-and-forget send, and the web transport drops every send — so clicking a
+ * space in a browser produced no canvas, no request and no error. Closing had
+ * the mirror problem: `window.close()` on a tab the app did not open.
+ */
+describe('shouldPopOutCanvas', () => {
+  it('pops out from the desktop main window', () => {
+    expect(shouldPopOutCanvas({ isCanvasMode: false, isWebRemote: false })).toBe(true);
+  });
+
+  it('does not pop out from the popout itself', () => {
+    expect(shouldPopOutCanvas({ isCanvasMode: true, isWebRemote: false })).toBe(false);
+  });
+
+  it('never pops out in a browser, which has no window to open', () => {
+    expect(shouldPopOutCanvas({ isCanvasMode: false, isWebRemote: true })).toBe(false);
+  });
+
+  it('pins that the request to pop out is a dropped send', async () => {
+    // The reason this decision exists: `canvas-window:open` is not in the
+    // access map at all, because it is a send rather than an invoke — so a
+    // browser cannot make it fail loudly, only quietly do nothing.
+    const { WEB_ACCESS } = await import('../shared/web-access');
+    expect('canvas-window:open' in WEB_ACCESS).toBe(false);
+  });
+});
+
+describe('shouldCloseWindowOnCanvasClose', () => {
+  it('closes the popout window on the desktop', () => {
+    expect(shouldCloseWindowOnCanvasClose({ isWebRemote: false })).toBe(true);
+  });
+
+  it('leaves the browser tab alone', () => {
+    expect(shouldCloseWindowOnCanvasClose({ isWebRemote: true })).toBe(false);
   });
 });

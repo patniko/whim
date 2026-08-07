@@ -259,6 +259,7 @@ export interface WhimAPI {
   listPages(spaceId: string): Promise<{ pages: string[]; error?: string }>;
   openPageWindow(target: { kind: 'page'; spaceId: string; page: string; title: string }): void;
   openLink(spaceId: string, url: string): Promise<{ action: string; error?: string }>;
+  resolveLink(spaceId: string, url: string): Promise<IpcCommandResult<'canvas:resolve-link'>>;
 
   // ── Settings popout window ──────────────────────────────
   openSettingsWindow(): void;
@@ -316,6 +317,7 @@ export interface WhimAPI {
   invokeSkill(input: IpcCommandArgs<'skill:invoke'>[0]): Promise<IpcCommandResult<'skill:invoke'>>;
   setSkillSchedule(skillId: string, frequency: SkillScheduleFrequency, time: string, day: number | null): Promise<IpcCommandResult<'skill:set-schedule'>>;
   clearSkillSchedule(skillId: string): Promise<IpcCommandResult<'skill:clear-schedule'>>;
+  setSkillCanvas(skillId: string, canvas: string | null, spaceMode: 'new' | 'reuse' | null): Promise<IpcCommandResult<'skill:set-canvas'>>;
   onSkillsChanged(callback: () => void): void;
 
   // ── Updates ──────────────────────────────────────────────
@@ -622,6 +624,7 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     listPages: (spaceId) => ipcRenderer.invoke('canvas:list-pages', spaceId),
     openPageWindow: (target) => ipcRenderer.send('canvas-window:open-page', target),
     openLink: (spaceId, url) => ipcRenderer.invoke('canvas:open-link', spaceId, url),
+    resolveLink: (spaceId, url) => ipcRenderer.invoke('canvas:resolve-link', spaceId, url),
 
     // ── Settings popout window ──────────────────────────────
     openSettingsWindow: () => ipcRenderer.send('settings-window:open'),
@@ -741,6 +744,7 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     invokeSkill: (input) => ipcRenderer.invoke('skill:invoke', input),
     setSkillSchedule: (skillId, frequency, time, day) => ipcRenderer.invoke('skill:set-schedule', skillId, frequency, time, day),
     clearSkillSchedule: (skillId) => ipcRenderer.invoke('skill:clear-schedule', skillId),
+    setSkillCanvas: (skillId, canvas, spaceMode) => ipcRenderer.invoke('skill:set-canvas', skillId, canvas, spaceMode),
     onSkillsChanged: (callback) => {
       ipcRenderer.on('skills:changed', callback);
     },

@@ -62,6 +62,12 @@ describe('web remote gateway', () => {
   });
 
   it('allows canvas, agent-launch and git-sync channels', () => {
+    // `canvas:read`/`write`/`close` are served by their registered desktop
+    // handlers rather than a gateway override, so they are only reachable
+    // once registration has run -- as it has by the time a browser connects.
+    registerIpcHandler('canvas:read', () => ({ content: '' }));
+    registerIpcHandler('canvas:write', () => ({ success: true }));
+    registerIpcHandler('canvas:close', () => ({ success: true }));
     for (const channel of [
       'canvas:read', 'canvas:write', 'canvas:close', 'canvas:history',
       'canvas:restore', 'canvas:list-pages', 'agent:launch', 'agent:list',
@@ -72,6 +78,42 @@ describe('web remote gateway', () => {
     // Mutating workspace/settings channels remain denied.
     expect(isAllowedWebRemoteCommand('workspace:clear')).toBe(false);
     expect(isAllowedWebRemoteCommand('canvas:export')).toBe(false);
+  });
+
+  // The gateway used to override these three with space-only reimplementations.
+  // `canvas:close` returned `null`, which the renderer reads `.success` off, so
+  // closing a canvas in a browser threw and left the user stuck in the document;
+  // all three were blind to `__page__`/`__file__`/`__skill__` canvases. Keep
+  // them flowing to the one real implementation.
+  it('answers canvas read, write and close from the desktop handlers', async () => {
+    const seen: string[] = [];
+    registerIpcHandler('canvas:read', (_event, spaceId: string) => {
+      seen.push(`read:${spaceId}`);
+      return { content: '# from the desktop handler' };
+    });
+    registerIpcHandler('canvas:write', (_event, spaceId: string) => {
+      seen.push(`write:${spaceId}`);
+      return { success: true };
+    });
+    registerIpcHandler('canvas:close', (_event, spaceId: string) => {
+      seen.push(`close:${spaceId}`);
+      return { success: true };
+    });
+
+    // A synthetic page id: the removed overrides resolved every id through
+    // `getSpace`, so these would have failed with `space_not_found`.
+    const pageId = '__page__space-1__notes';
+    await expect(invokeWebRemoteCommand('canvas:read', [pageId]))
+      .resolves.toEqual({ content: '# from the desktop handler' });
+    await expect(invokeWebRemoteCommand('canvas:write', [pageId, 'body']))
+      .resolves.toEqual({ success: true });
+
+    // The one that broke the back button: a result the renderer can read.
+    const closed = await invokeWebRemoteCommand('canvas:close', [pageId, 'body']);
+    expect(closed).not.toBeNull();
+    expect(closed).toEqual({ success: true });
+
+    expect(seen).toEqual([`read:${pageId}`, `write:${pageId}`, `close:${pageId}`]);
   });
 
   it('rejects denied channels before dispatch', async () => {

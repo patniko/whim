@@ -19,6 +19,17 @@ export interface CanvasSaveResult {
   error?: string;
 }
 
+/**
+ * What a link inside a canvas refers to. The decision is shared; each client
+ * applies it in the way that makes sense where it runs. See
+ * main/canvas/link-target.ts.
+ */
+export type CanvasLinkTarget =
+  | { kind: 'external'; url: string }
+  | { kind: 'canvas'; filePath: string }
+  | { kind: 'file'; filePath: string }
+  | { kind: 'none'; reason: 'no_workspace' | 'invalid_url' | 'unresolved' };
+
 export type SpaceUpdates = Partial<
   Pick<Space, 'description' | 'body' | 'client' | 'due_at' | 'due_at_utc' | 'status' | 'attachments'>
 >;
@@ -494,6 +505,8 @@ export interface IpcCommands {
   'canvas:close-page': { args: [spaceId: string, pageName: string, content: string]; result: CanvasSaveResult };
   'canvas:list-pages': { args: [spaceId: string]; result: { pages: string[]; error?: string } };
   'canvas:open-link': { args: [spaceId: string, url: string]; result: { action: 'canvas' | 'external' | 'none'; error?: string } };
+  /** What a link refers to, without opening it — see main/canvas/link-target.ts. */
+  'canvas:resolve-link': { args: [spaceId: string, url: string]; result: CanvasLinkTarget };
   'canvas:read-file': { args: [spaceId: string, relativePath: string]; result: { data?: number[]; mimeType?: string; error?: string } };
 
   // ── Canvas export / sharing ───────────────────────────────
@@ -587,6 +600,7 @@ export interface IpcCommands {
   'skill:invoke': { args: [input: SkillInvocationInput]; result: SkillInvocationResult | { error: string } };
   'skill:set-schedule': { args: [skillId: string, frequency: SkillScheduleFrequency, time: string, day: number | null]; result: Skill | { error: string } };
   'skill:clear-schedule': { args: [skillId: string]; result: { success: boolean } | { error: string } };
+  'skill:set-canvas': { args: [skillId: string, canvas: string | null, spaceMode: 'new' | 'reuse' | null]; result: Skill | { error: string } };
 
   // ── Updates ──────────────────────────────────────────────
   'update:install': { args: []; result: void };

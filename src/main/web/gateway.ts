@@ -20,7 +20,6 @@ import { getConfigValue, DEFAULT_PERSONAS, type AgentPersona } from '../config';
 import { materializeSpaceCanvas, scheduleAutoCommit } from '../workspace';
 import { processSpaceInBackground } from '../services/space-processing';
 import { notifyAllWindows } from '../notify';
-import { rememberCanvasEditorContent, writeMainCanvasWithMerge } from '../services/canvas-editor-state';
 import { resolveCommentLaunchTarget } from '../services/comment-launch-target';
 
 /**
@@ -158,15 +157,6 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
     return personas.length > 0 ? personas : DEFAULT_PERSONAS;
   },
   'models:list': () => listAvailableModels(),
-  'canvas:read': async (args) => {
-    const spaceId = expectString(args, 0, 'spaceId');
-    const resolved = await resolveCanvasFolder(spaceId);
-    if ('error' in resolved) return { content: '', error: resolved.error };
-    const { readCanvas } = await import('../workspace');
-    const content = readCanvas(resolved.workspace, resolved.folder);
-    rememberCanvasEditorContent(spaceId, content);
-    return { content };
-  },
   'canvas:has-content': async (args) => {
     const spaceId = expectString(args, 0, 'spaceId');
     const workspace = getConfigValue('workspace');
@@ -177,26 +167,15 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
     const { readCanvas } = await import('../workspace');
     return { hasContent: readCanvas(workspace, space.folder).trim().length > 0 };
   },
-  'canvas:write': async (args) => {
-    const spaceId = expectString(args, 0, 'spaceId');
-    const content = expectStringAllowEmpty(args, 1, 'content');
-    const resolved = await resolveCanvasFolder(spaceId);
-    if ('error' in resolved) return { error: resolved.error };
-    const { scheduleAutoCommit } = await import('../workspace');
-    const result = writeMainCanvasWithMerge(resolved.workspace, spaceId, resolved.folder, content);
-    scheduleAutoCommit(resolved.workspace);
-    return result;
-  },
-  'canvas:close': async (args) => {
-    const spaceId = expectString(args, 0, 'spaceId');
-    const content = expectStringAllowEmpty(args, 1, 'content');
-    const resolved = await resolveCanvasFolder(spaceId);
-    if ('error' in resolved) return null;
-    const { scheduleAutoCommit } = await import('../workspace');
-    writeMainCanvasWithMerge(resolved.workspace, spaceId, resolved.folder, content);
-    scheduleAutoCommit(resolved.workspace);
-    return null;
-  },
+  // `canvas:read`, `canvas:write` and `canvas:close` deliberately have no
+  // entry here. They used to, written when the only web client was the
+  // lightweight one that opens plain spaces — so they resolved every id
+  // through `getSpace` and knew nothing of the `__page__`, `__file__` and
+  // `__skill__` canvases the real renderer opens. `canvas:close` also
+  // returned `null`, which the renderer reads `.success` off, so closing a
+  // canvas in a browser threw and the document could never be left. The
+  // registered desktop handlers already do all of this correctly, including
+  // the watcher and editor-state bookkeeping these dropped.
   'canvas:history': async (args) => {
     const spaceId = expectString(args, 0, 'spaceId');
     const workspace = getConfigValue('workspace');

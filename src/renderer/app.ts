@@ -442,7 +442,7 @@ import {
 import { mountLists } from './views/mount.tsx';
 import { bootValue, UNKNOWN_CLI_RUNTIME } from './boot-guard';
 import { isWebRemote } from './transport-mode';
-import { shouldStartHidden, shouldHideWindow } from './window-chrome';
+import { shouldStartHidden, shouldHideWindow, shouldPopOutCanvas, shouldCloseWindowOnCanvasClose } from './window-chrome';
 import type { WhimAPI as PreloadWhimAPI } from '../shared/whim-api';
 import type { Skill as SharedSkill, CanvasAgentStateSnapshot, ExportFormat, ExportDestination, SkillInvocationInput, SkillInvocationResult, UpdateState } from '../shared/types';
 
@@ -577,6 +577,18 @@ if (shouldStartHidden({ isCanvasMode, isSettingsMode, isWebRemote: isWebRemote()
 if (isWebRemote()) {
   windowVisualState = 'visible';
 }
+
+/**
+ * Whether a canvas is drawn in this window or handed to a new one.
+ *
+ * True in the desktop main window, which pops canvases out. False in the
+ * popout itself, and false in a browser — which has no second window to open
+ * and drops the request to open one. See window-chrome.ts.
+ */
+const canvasPopsOut = shouldPopOutCanvas({ isCanvasMode, isWebRemote: isWebRemote() });
+
+/** True where a canvas shares the window with the spaces list and must yield it back. */
+const canvasIsInline = !canvasPopsOut && !isCanvasMode;
 
 function slideIn(side: 'left' | 'right'): void {
   slideTransitionId++;
@@ -3797,13 +3809,13 @@ async function openSkillEditor(skillId: string): Promise<void> {
   const skill = cachedSkills.find(s => s.id === skillId);
   if (!skill) return;
 
-  // In main window, always pop out to separate canvas window
-  if (!isCanvasMode) {
+  // See openCanvas: the browser has no popout to hand a skill to either.
+  if (canvasPopsOut) {
     whimAPI.openCanvasWindow({ kind: 'skill', id: skillId, title: skill.name });
     return;
   }
 
-  // ── Below runs only inside the canvas popout window ──
+  // ── Below draws the canvas in this window ──
   const result = await whimAPI.readSkill(skillId);
   if ('error' in result) {
     return;
@@ -3827,7 +3839,7 @@ async function openSkillEditor(skillId: string): Promise<void> {
   closeCanvasMenu();
   updateCanvasMenuContext(true);
 
-  canvasView.classList.remove('hidden');
+  revealCanvasView();
 
   const myGen = ++canvasMountGen;
   const currentTheme = getResolvedTheme();
@@ -3888,8 +3900,11 @@ async function deleteSkill(skillId: string): Promise<void> {
   render();
 }
 
-async function launchSkillAsSpace(skillId: string): Promise<void> {
-  const result = await whimAPI.invokeSkill({ skillId, run: true, source: 'skill-editor' });
+async function launchSkillAsSpace(
+  skillId: string,
+  source: 'skill-card' | 'skill-editor' = 'skill-editor',
+): Promise<void> {
+  const result = await whimAPI.invokeSkill({ skillId, run: true, source });
   if ('error' in result && !('space' in result)) {
     showStatus(`Failed: ${result.error}`, true);
     return;
@@ -3956,6 +3971,20 @@ async function invokeSkillFromPrompt(raw: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * Run a skill immediately, from the skill card or the schedule picker.
+ *
+ * A manual run deliberately leaves `next_run_at` alone: "run it now" answers a
+ * question you have now, and silently pushing the schedule out a day is not
+ * something the button says it does.
+ */
+async function runSkillNow(skillId: string): Promise<void> {
+  closeSchedulePicker();
+  const skill = cachedSkills.find(s => s.id === skillId);
+  showStatus(`▶ Running ${skill?.name || 'skill'}...`);
+  await launchSkillAsSpace(skillId, 'skill-card');
+}
+
 // Wire up skills changed event
 whimAPI.onSkillsChanged(() => {
   if (currentFilter === 'skills') {
@@ -3968,6 +3997,7 @@ whimAPI.onSkillsChanged(() => {
 (window as any).openSkillFolder = openSkillFolder;
 (window as any).createSpaceFromSkill = createSpaceFromSkill;
 (window as any).launchSkillAsSpace = launchSkillAsSpace;
+(window as any).runSkillNow = runSkillNow;
 (window as any).deleteSkill = deleteSkill;
 (window as any).openSchedulePicker = openSchedulePicker;
 
@@ -4016,6 +4046,8 @@ function formatRelativeDate(isoDate: string): string {
 
 let activeSchedulePickerSkillId: string | null = null;
 
+const WHIM_REPORT_CANVAS_ID = 'whim-report';
+
 function openSchedulePicker(skillId: string): void {
   // Close any existing picker
   closeSchedulePicker();
@@ -4023,6 +4055,19 @@ function openSchedulePicker(skillId: string): void {
 
   const skill = cachedSkills.find(s => s.id === skillId);
   if (!skill) return;
+
+  const reportsOn = !!skill.canvas;
+  const template = skill.canvas_template || null;
+  // A skill that ships its own template offers a choice; one that does not
+  // would render a select with a single option, so it does not get one.
+  const templateOptions = template
+    ? `
+        <label>Layout</label>
+        <select id="schedule-canvas-template">
+          <option value="${WHIM_REPORT_CANVAS_ID}" ${skill.canvas !== template.id ? 'selected' : ''}>Built-in report</option>
+          <option value="${escapeHtml(template.id)}" ${skill.canvas === template.id ? 'selected' : ''}>${escapeHtml(template.displayName)}</option>
+        </select>`
+    : '';
 
   const overlay = document.createElement('div');
   overlay.id = 'schedule-picker-overlay';
@@ -4054,10 +4099,28 @@ function openSchedulePicker(skillId: string): void {
           </select>
         </div>
 
+        <div class="schedule-section">
+          <label class="schedule-check">
+            <input type="checkbox" id="schedule-canvas" ${reportsOn ? 'checked' : ''} />
+            <span>Publish a report</span>
+          </label>
+          <div class="schedule-hint">The run writes a page you can open later from the space, the tray, or a notification.</div>
+          <div id="schedule-canvas-options" style="${reportsOn ? '' : 'display:none'}">
+            ${templateOptions}
+            <label>Space</label>
+            <select id="schedule-space-mode">
+              <option value="reuse" ${skill.space_mode !== 'new' ? 'selected' : ''}>Refresh one space</option>
+              <option value="new" ${skill.space_mode === 'new' ? 'selected' : ''}>New space each run</option>
+            </select>
+          </div>
+        </div>
+
         ${skill.next_run_at ? `<div class="schedule-next-run">Next run: ${formatRelativeDate(skill.next_run_at)}</div>` : ''}
         ${skill.schedule ? (skill.last_run_at ? `<div class="schedule-next-run">Last run: ${formatRelativeDate(skill.last_run_at)}</div>` : '<div class="schedule-next-run schedule-no-runs">Never run yet</div>') : ''}
       </div>
       <div class="schedule-picker-footer">
+        <button class="schedule-run-btn" onclick="runScheduledSkillNow()">▶ Run now</button>
+        <span class="schedule-footer-spacer"></span>
         ${skill.schedule ? '<button class="schedule-clear-btn" onclick="clearSchedule()">Remove schedule</button>' : ''}
         <button class="schedule-save-btn" onclick="saveSchedule()">Save</button>
       </div>
@@ -4074,6 +4137,12 @@ function openSchedulePicker(skillId: string): void {
     const dayRow = document.getElementById('schedule-day-row') as HTMLDivElement;
     dayRow.style.display = (freqSelect.value === 'weekly' || freqSelect.value === 'biweekly') ? '' : 'none';
   });
+
+  const canvasCheck = document.getElementById('schedule-canvas') as HTMLInputElement;
+  canvasCheck.addEventListener('change', () => {
+    const options = document.getElementById('schedule-canvas-options') as HTMLDivElement;
+    options.style.display = canvasCheck.checked ? '' : 'none';
+  });
 }
 
 function closeSchedulePicker(): void {
@@ -4082,23 +4151,55 @@ function closeSchedulePicker(): void {
   activeSchedulePickerSkillId = null;
 }
 
+/**
+ * Persist the report settings the picker is showing.
+ *
+ * Kept separate from the schedule write because reports are not a scheduling
+ * concept: a skill with no schedule at all can still publish one when you run
+ * it by hand, so turning "Off" the frequency must not turn reports off too.
+ */
+async function saveCanvasSettingsFromPicker(skillId: string): Promise<void> {
+  const canvasCheck = document.getElementById('schedule-canvas') as HTMLInputElement | null;
+  if (!canvasCheck) return;
+
+  if (!canvasCheck.checked) {
+    await whimAPI.setSkillCanvas(skillId, null, null);
+    return;
+  }
+
+  const templateSelect = document.getElementById('schedule-canvas-template') as HTMLSelectElement | null;
+  const modeSelect = document.getElementById('schedule-space-mode') as HTMLSelectElement | null;
+  const canvas = templateSelect?.value || WHIM_REPORT_CANVAS_ID;
+  const spaceMode = modeSelect?.value === 'new' ? 'new' : 'reuse';
+  await whimAPI.setSkillCanvas(skillId, canvas, spaceMode);
+}
+
 async function saveSchedule(): Promise<void> {
   if (!activeSchedulePickerSkillId) return;
+  const skillId = activeSchedulePickerSkillId;
 
   const freqSelect = document.getElementById('schedule-frequency') as HTMLSelectElement;
   const timeInput = document.getElementById('schedule-time') as HTMLInputElement;
   const daySelect = document.getElementById('schedule-day') as HTMLSelectElement;
 
   const frequency = freqSelect.value;
+  await saveCanvasSettingsFromPicker(skillId);
+
   if (!frequency) {
-    await clearSchedule();
+    await whimAPI.clearSkillSchedule(skillId);
+    closeSchedulePicker();
+    showStatus('✓ Saved');
+    setTimeout(hideStatus, 2000);
+    cachedSkills = await whimAPI.listSkills();
+    if (currentFilter === 'skills') renderSkillsList();
+    if (canvasSkillId) updateCanvasMenuContext(true);
     return;
   }
 
   const time = timeInput.value || '09:00';
   const day = (frequency === 'weekly' || frequency === 'biweekly') ? parseInt(daySelect.value, 10) : null;
 
-  await whimAPI.setSkillSchedule(activeSchedulePickerSkillId, frequency, time, day);
+  await whimAPI.setSkillSchedule(skillId, frequency, time, day);
   closeSchedulePicker();
   showStatus('✓ Schedule saved');
   setTimeout(hideStatus, 2000);
@@ -4106,6 +4207,15 @@ async function saveSchedule(): Promise<void> {
   if (currentFilter === 'skills') renderSkillsList();
   // Refresh the canvas overflow menu label if we're viewing this skill
   if (canvasSkillId) updateCanvasMenuContext(true);
+}
+
+/** Save what the picker is showing, then run the skill straight away. */
+async function runScheduledSkillNow(): Promise<void> {
+  if (!activeSchedulePickerSkillId) return;
+  const skillId = activeSchedulePickerSkillId;
+  await saveCanvasSettingsFromPicker(skillId);
+  cachedSkills = await whimAPI.listSkills();
+  await runSkillNow(skillId);
 }
 
 async function clearSchedule(): Promise<void> {
@@ -4123,6 +4233,7 @@ async function clearSchedule(): Promise<void> {
 (window as any).closeSchedulePicker = closeSchedulePicker;
 (window as any).saveSchedule = saveSchedule;
 (window as any).clearSchedule = clearSchedule;
+(window as any).runScheduledSkillNow = runScheduledSkillNow;
 
 async function renderAgentsList(filterQuery?: string): Promise<void> {
   const gen = ++renderGeneration;
@@ -6444,6 +6555,25 @@ let canvasChatPaneOpen = false;
 let canvasMountGen = 0;
 let canvasLinkedSkillIds: string[] = [];
 
+/**
+ * Give the window over to the canvas, and take it back again.
+ *
+ * The popout does this once at startup because the canvas is all it ever
+ * shows. Inline — which is how a browser sees it — the canvas and the spaces
+ * list share one window, so the swap happens on every open and close. The
+ * back button already exists in the header; only the popout hides it, so it
+ * needs no new affordance here.
+ */
+function revealCanvasView(): void {
+  canvasView.classList.remove('hidden');
+  if (canvasIsInline) mainView.classList.add('hidden');
+}
+
+function hideInlineCanvas(): void {
+  canvasView.classList.add('hidden');
+  mainView.classList.remove('hidden');
+}
+
 function setCanvasHeaderTitle(title: string): void {
   const displayTitle = title.trim() || 'Untitled';
   canvasTitle.textContent = displayTitle;
@@ -7090,13 +7220,16 @@ async function openCanvas(spaceId: string, expanded = false): Promise<void> {
   const space = spaces.find(i => i.id === spaceId);
   if (!space) return;
 
-  // In main window, always pop out to separate canvas window
-  if (!isCanvasMode) {
+  // The desktop main window hands canvases to a dedicated window; the popout
+  // and the browser draw them here. See window-chrome.ts.
+  if (canvasPopsOut) {
     whimAPI.openCanvasWindow({ kind: 'space', id: spaceId, title: space.description });
     return;
   }
 
-  // ── Below runs only inside the canvas popout window ──
+  // Inline, the canvas shares the window with the spaces list, so it has to
+  // take the space over rather than appear behind it — `revealCanvasView`
+  // below does that.
   canvasSpaceId = spaceId;
   canvasSkillId = null;
   canvasPageSpaceId = null;
@@ -7121,7 +7254,7 @@ async function openCanvas(spaceId: string, expanded = false): Promise<void> {
   closeCanvasMenu();
   updateCanvasMenuContext(false);
 
-  canvasView.classList.remove('hidden');
+  revealCanvasView();
 
   const myGen = ++canvasMountGen;
 
@@ -7231,7 +7364,7 @@ async function openPage(spaceId: string, pageName: string): Promise<void> {
 
   closeCanvasMenu();
   updateCanvasMenuContext(false);
-  canvasView.classList.remove('hidden');
+  revealCanvasView();
 
   const [result, canvasPersonas] = await Promise.all([
     whimAPI.readPage(spaceId, pageName),
@@ -7283,7 +7416,7 @@ async function openWorkspaceFile(filePath: string, title: string): Promise<void>
 
   closeCanvasMenu();
   updateCanvasMenuContext(false);
-  canvasView.classList.remove('hidden');
+  revealCanvasView();
 
   const fileSpaceId = `__file__${encodeURIComponent(filePath)}`;
   const result = await whimAPI.readCanvas(fileSpaceId);
@@ -7380,7 +7513,16 @@ async function closeCanvas(): Promise<void> {
 
   // Canvas always runs in the popout window now — close it.
   // Keep canvasClosing=true so beforeunload doesn't double-save.
-  window.close();
+  if (shouldCloseWindowOnCanvasClose({ isWebRemote: isWebRemote() })) {
+    window.close();
+    return;
+  }
+
+  // In a browser the canvas is drawn over the spaces list, and the tab is not
+  // ours to close — reveal the list again instead.
+  hideInlineCanvas();
+  canvasClosing = false;
+  await loadSpaces();
 }
 
 // Guard against double-save in beforeunload
@@ -7724,7 +7866,103 @@ modeToggleRaw.addEventListener('click', () => {
   updateModeToggleUI(result.mode);
 });
 
+
+/**
+ * Open a canvas target, saving and unmounting whatever is open first.
+ *
+ * The popout receives targets from the main process over
+ * `canvas-window:load-target`. Inline — in a browser — nothing sends that
+ * event, so navigation calls this directly. Both need the same
+ * save-then-swap sequence, so it lives in one place rather than being
+ * reimplemented on the side that came second.
+ */
+export type CanvasTarget = {
+  kind: string;
+  id: string;
+  title: string;
+  spaceId?: string;
+  page?: string;
+  filePath?: string;
+};
+
+async function saveAndUnmountCurrent(): Promise<boolean> {
+  const saveResult = await saveCanvasEditor();
+  if (!saveResult.success) {
+    canvasSaveStatus.textContent = '✗ save failed — current canvas kept open';
+    return false;
+  }
+  const finalContent = getCanvasContent();
+  let closeResult: CanvasSaveResult = { success: true };
+  if (canvasSkillId) {
+    await saveSkillFromCanvas(canvasSkillId, finalContent);
+  } else if (canvasFilePath) {
+    const fileSpaceId = `__file__${encodeURIComponent(canvasFilePath)}`;
+    closeResult = await whimAPI.closeCanvas(fileSpaceId, finalContent);
+  } else if (canvasPageSpaceId && canvasPageName) {
+    closeResult = await whimAPI.closePage(canvasPageSpaceId, canvasPageName, finalContent);
+  } else if (canvasSpaceId) {
+    closeResult = await whimAPI.closeCanvas(canvasSpaceId, finalContent);
+  }
+  if (!closeResult.success) {
+    canvasSaveStatus.textContent = '✗ close save failed — current canvas kept open';
+    return false;
+  }
+  await unmountCanvas(false);
+  canvasSkillId = null;
+  canvasFilePath = null;
+  canvasPageSpaceId = null;
+  canvasPageName = null;
+  canvasSpaceId = null;
+  resetCanvasAgentMaps();
+  syncCanvasAgentThreadStatuses();
+  return true;
+}
+
+async function openCanvasTarget(target: CanvasTarget): Promise<void> {
+  // If a canvas is already open, save and close it first
+  if (canvasSpaceId || canvasSkillId || canvasPageSpaceId || canvasFilePath) {
+    if (!await saveAndUnmountCurrent()) return;
+  }
+
+  if (target.kind === 'skill') {
+    cachedSkills = await whimAPI.listSkills();
+    await openSkillEditor(target.id);
+  } else if (target.kind === 'page') {
+    await openPage(target.spaceId!, target.page!);
+  } else if (target.kind === 'file') {
+    await openWorkspaceFile(target.filePath!, target.title);
+  } else {
+    // Populate space data so openCanvas() can find it
+    const targetTitle = target.title?.trim();
+    if (!spaces.find(i => i.id === target.id)) {
+      spaces.push({
+        id: target.id,
+        description: targetTitle || 'Untitled',
+        body: null, raw_text: null, client: null,
+        due_at: null, due_at_utc: null, recurrence: null,
+        completed_at: null, folder: null, session_id: null,
+        attachments: [],
+        status: 'captured',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+    } else {
+      const existing = spaces.find(i => i.id === target.id)!;
+      if (targetTitle) existing.description = targetTitle;
+    }
+
+    await openCanvas(target.id);
+  }
+}
+
 (window as any).openCanvas = openCanvas;
+
+// Inline navigation — `whim://` links inside a canvas, and anywhere else that
+// would have asked the main process for a window. Only meaningful where the
+// canvas shares this window; the popout is driven by the main process instead.
+if (!canvasPopsOut) {
+  (window as any).openCanvasTarget = openCanvasTarget;
+}
 
 // ── Agent Chat View ────────────────────────────────────
 import { mountChat, unmountChat } from './chat/mount.tsx';
@@ -9323,6 +9561,7 @@ function mountReactLists(): void {
       },
       skillsActions: {
         onSkillClick: (id) => { void openSkillEditor(id); },
+        onRunNow: (id) => (window as any).runSkillNow?.(id),
         onSchedule: (id) => (window as any).openSchedulePicker?.(id),
         onCreateSpace: (id) => (window as any).createSpaceFromSkill?.(id),
         onOpenFolder: (id) => (window as any).openSkillFolder?.(id),
@@ -9441,7 +9680,7 @@ whimAPI.onWorkspaceChanged((path: string | null) => {
 if (isCanvasMode) {
   // Hide everything except canvas view
   mainView.classList.add('hidden');
-  canvasView.classList.remove('hidden');
+  revealCanvasView();
   document.body.classList.add('canvas-window');
 
   // ── Always-on-top toggle ────────────────────────────────
@@ -9507,76 +9746,8 @@ if (isCanvasMode) {
   whimAPI.onCanvasThemeChanged((theme: string) => {
     applyTheme(normalizeChoice(theme));
   });
-  async function saveAndUnmountCurrent(): Promise<boolean> {
-    const saveResult = await saveCanvasEditor();
-    if (!saveResult.success) {
-      canvasSaveStatus.textContent = '✗ save failed — current canvas kept open';
-      return false;
-    }
-    const finalContent = getCanvasContent();
-    let closeResult: CanvasSaveResult = { success: true };
-    if (canvasSkillId) {
-      await saveSkillFromCanvas(canvasSkillId, finalContent);
-    } else if (canvasFilePath) {
-      const fileSpaceId = `__file__${encodeURIComponent(canvasFilePath)}`;
-      closeResult = await whimAPI.closeCanvas(fileSpaceId, finalContent);
-    } else if (canvasPageSpaceId && canvasPageName) {
-      closeResult = await whimAPI.closePage(canvasPageSpaceId, canvasPageName, finalContent);
-    } else if (canvasSpaceId) {
-      closeResult = await whimAPI.closeCanvas(canvasSpaceId, finalContent);
-    }
-    if (!closeResult.success) {
-      canvasSaveStatus.textContent = '✗ close save failed — current canvas kept open';
-      return false;
-    }
-    await unmountCanvas(false);
-    canvasSkillId = null;
-    canvasFilePath = null;
-    canvasPageSpaceId = null;
-    canvasPageName = null;
-    canvasSpaceId = null;
-    resetCanvasAgentMaps();
-    syncCanvasAgentThreadStatuses();
-    return true;
-  }
-
-  // Listen for target to load (from main process)
-  whimAPI.onLoadCanvasTarget(async (target: { kind: string; id: string; title: string }) => {
-    // If a canvas is already open, save and close it first
-    if (canvasSpaceId || canvasSkillId || canvasPageSpaceId || canvasFilePath) {
-      if (!await saveAndUnmountCurrent()) return;
-    }
-
-    if (target.kind === 'skill') {
-      cachedSkills = await whimAPI.listSkills();
-      await openSkillEditor(target.id);
-    } else if (target.kind === 'page') {
-      await openPage((target as any).spaceId, (target as any).page);
-    } else if (target.kind === 'file') {
-      await openWorkspaceFile((target as any).filePath, target.title);
-    } else {
-      // Populate space data so openCanvas() can find it
-      const targetTitle = target.title?.trim();
-      if (!spaces.find(i => i.id === target.id)) {
-        spaces.push({
-          id: target.id,
-          description: targetTitle || 'Untitled',
-          body: null, raw_text: null, client: null,
-          due_at: null, due_at_utc: null, recurrence: null,
-          completed_at: null, folder: null, session_id: null,
-          attachments: [],
-          status: 'captured',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        });
-      } else {
-        const existing = spaces.find(i => i.id === target.id)!;
-        if (targetTitle) existing.description = targetTitle;
-      }
-
-      await openCanvas(target.id);
-    }
-  });
+  // Load a target handed over by the main process.
+  whimAPI.onLoadCanvasTarget(openCanvasTarget);
 
   // Hide-on-close path: main intercepts the user's close click and asks
   // the renderer to flush unsaved edits before actually hiding. This keeps
