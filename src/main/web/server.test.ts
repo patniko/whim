@@ -302,7 +302,14 @@ describe('web remote server', () => {
     });
     afterEach(() => {
       delete process.env.WHIM_WEB_ROOT;
-      fs.rmSync(webRoot, { recursive: true, force: true });
+      // Windows keeps a short-lived lock on files the server just streamed, so
+      // an immediate rmdir races the release and throws ENOTEMPTY. Retry, and
+      // never let fixture teardown fail a test that already passed.
+      try {
+        fs.rmSync(webRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      } catch {
+        /* the OS temp dir is cleaned up independently */
+      }
     });
 
     it('rejects a path traversal attempt', async () => {
