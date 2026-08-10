@@ -2527,208 +2527,149 @@ body.dark .persona-form-checkbox-label {
   font-weight: 600;
 }
 
-.activity-summary {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
+/* ── Activity list: one card per day, rows inside ───────
+   Each day is a single surface rather than a stack of floating cards, so a
+   busy day reads as one block instead of a dozen competing tiles. */
+.activity-day {
   background: var(--card-bg);
   border: var(--card-border);
   border-radius: var(--card-radius);
   backdrop-filter: var(--card-backdrop);
   box-shadow: var(--card-shadow);
+  overflow: hidden;
 }
 
-.activity-summary-stat {
+.activity-day-header {
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: var(--fs-label);
-  color: rgba(0, 0, 0, 0.65);
-  font-weight: 500;
-}
-
-.activity-summary-stat .stat-value {
-  font-weight: 700;
-  color: #1d1d1f;
-  font-size: var(--fs-card-title);
-}
-
-.activity-summary-sep {
-  width: 1px;
-  height: 16px;
-  background: rgba(0, 0, 0, 0.1);
-  flex-shrink: 0;
-}
-
-/* ── Activity date group headers ─────────────────────── */
-
-.history-date-label {
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 12px;
   font-size: var(--fs-caption);
   font-weight: 600;
-  color: rgba(0, 0, 0, 0.5);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  padding: 6px 0 2px;
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: inherit;
+  color: rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.02);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
 }
 
-.history-date-label:first-child {
-  padding-top: 2px;
+.activity-day-count {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  color: rgba(0, 0, 0, 0.35);
 }
 
-/* ── History cards (compact redesign) ────────────────── */
+/* Columns: status · title (flexes) · tags · time · restore.
+   Fixed trailing columns are what make the rows scan as a table. */
+.activity-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto 22px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-left: 2px solid transparent;
+  transition: background 0.12s ease;
+}
 
-.history-card {
-  position: relative;
-  background: var(--card-bg);
-  border: var(--card-border);
-  border-radius: var(--card-radius);
-  padding: var(--card-padding);
+.activity-row + .activity-row {
+  border-top: 1px solid rgba(0, 0, 0, 0.04);
+}
+
+.activity-row[role="button"] {
   cursor: pointer;
-  transition: var(--card-transition);
-  backdrop-filter: var(--card-backdrop);
-  box-shadow: var(--card-shadow);
-  border-left: 3px solid transparent;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
 }
 
-.history-card:hover {
+.activity-row[role="button"]:hover {
   background: var(--card-hover-bg);
-  box-shadow: var(--card-hover-shadow);
 }
 
-/* Status-color left borders */
-.history-card--completed { border-left-color: #34c759; }
-.history-card--session { border-left-color: #a594e8; }
-.history-card--recurring { border-left-color: #ff9f0a; }
-.history-card--dismissed { border-left-color: rgba(0, 0, 0, 0.15); }
+.activity-row:focus-visible {
+  outline: 2px solid rgba(124, 102, 220, 0.55);
+  outline-offset: -2px;
+}
 
-.history-card-icon {
-  font-size: var(--fs-body);
-  flex-shrink: 0;
-  margin-top: 1px;
+.activity-row--completed { border-left-color: #34c759; }
+.activity-row--session { border-left-color: #a594e8; }
+.activity-row--recurring { border-left-color: #ff9f0a; }
+.activity-row--dismissed { border-left-color: rgba(0, 0, 0, 0.15); }
+
+.activity-row-icon {
+  font-size: var(--fs-caption);
   line-height: 1;
+  color: rgba(0, 0, 0, 0.45);
+  text-align: center;
 }
 
-.history-card-body {
-  flex: 1;
-  min-width: 0;
+.activity-row-title {
+  font-size: var(--fs-label);
+  color: #1d1d1f;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.history-card-restore {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 24px;
-  height: 24px;
+.activity-row-tags {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.activity-tag {
+  max-width: 90px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.04);
+  color: rgba(0, 0, 0, 0.5);
+  font-size: var(--fs-meta);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-tag--agents {
+  background: rgba(124, 102, 220, 0.1);
+  color: #7c66dc;
+}
+
+.activity-row-time {
+  font-size: var(--fs-meta);
+  color: rgba(0, 0, 0, 0.35);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.activity-row-restore {
+  width: 22px;
+  height: 22px;
   border: none;
   border-radius: var(--btn-radius);
-  background: rgba(0, 0, 0, 0.06);
-  color: rgba(0, 0, 0, 0.65);
-  font-size: var(--fs-body);
+  background: transparent;
+  color: rgba(0, 0, 0, 0.5);
+  font-size: var(--fs-label);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   opacity: 0;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  transition: opacity 0.12s ease, background 0.12s ease;
 }
 
-.history-card:hover .history-card-restore {
+.activity-row:hover .activity-row-restore,
+.activity-row-restore:focus-visible {
   opacity: 1;
 }
 
-.history-card-restore:hover {
-  background: rgba(0, 0, 0, 0.12);
+.activity-row-restore:hover {
+  background: rgba(0, 0, 0, 0.08);
   color: rgba(0, 0, 0, 0.85);
 }
 
-.history-card-type {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: var(--fs-label);
-  color: rgba(0, 0, 0, 0.6);
-  margin-bottom: 8px;
-}
-
-.history-type-icon {
-  font-size: var(--fs-body);
-}
-
-.history-card-title {
-  font-size: var(--fs-body);
-  font-weight: 600;
-  color: #1d1d1f;
-  line-height: 1.35;
-  margin-bottom: 3px;
-}
-
-.history-card-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: var(--fs-caption);
-  color: rgba(0, 0, 0, 0.5);
-  margin-top: 2px;
-  line-height: 1.4;
-}
-
-.history-card-meta .meta-sep {
-  color: rgba(0, 0, 0, 0.2);
-  font-size: var(--fs-meta);
-}
-
-.history-meta-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-size: var(--fs-meta);
-  font-weight: 500;
-}
-
-.history-meta-badge--agents {
-  background: rgba(124, 102, 220, 0.1);
-  color: #7c66dc;
-}
-
-.history-meta-badge--session {
-  background: rgba(90, 156, 246, 0.1);
-  color: #5a9cf6;
-}
-
-.history-meta-badge--duration {
-  background: rgba(0, 0, 0, 0.04);
-  color: rgba(0, 0, 0, 0.55);
-}
-
-.history-meta-badge--recycled {
-  background: rgba(0, 0, 0, 0.04);
-  color: rgba(0, 0, 0, 0.55);
-}
-
-.history-card-client {
-  font-size: var(--fs-label);
-  color: rgba(0, 0, 0, 0.6);
-  margin-bottom: 8px;
-}
-
-.history-card-mini {
-  padding: 8px 14px;
-}
-
-.history-card-mini .history-card-title {
-  font-size: var(--fs-label);
-  font-weight: 500;
+/* Holds the column open on rows with nothing to restore. */
+.activity-row-restore--empty {
+  pointer-events: none;
 }
 
 .input-wrapper {
@@ -7786,28 +7727,22 @@ body.dark .agent-summary-header { color: #a594e8; }
 body.dark .agent-summary-body { color: #e0e0e0; }
 
 /* Dark past cards */
-body.dark .activity-summary { background: var(--card-bg); border-color: rgba(255, 255, 255, 0.06); box-shadow: var(--card-shadow); }
-body.dark .activity-summary-stat { color: rgba(255, 255, 255, 0.6); }
-body.dark .activity-summary-stat .stat-value { color: #e0e0e0; }
-body.dark .activity-summary-sep { background: rgba(255, 255, 255, 0.08); }
-body.dark .history-card { background: var(--card-bg); border-color: rgba(255, 255, 255, 0.06); box-shadow: var(--card-shadow); }
-body.dark .history-card:hover { background: var(--card-hover-bg); box-shadow: var(--card-hover-shadow); }
-body.dark .history-card--completed { border-left-color: #30d158; }
-body.dark .history-card--session { border-left-color: #a594e8; }
-body.dark .history-card--recurring { border-left-color: #ff9f0a; }
-body.dark .history-card--dismissed { border-left-color: rgba(255, 255, 255, 0.15); }
-body.dark .history-card-restore { background: rgba(255, 255, 255, 0.08); color: rgba(255, 255, 255, 0.65); }
-body.dark .history-card-restore:hover { background: rgba(255, 255, 255, 0.15); color: rgba(255, 255, 255, 0.9); }
-body.dark .history-card-type { color: rgba(255, 255, 255, 0.6); }
-body.dark .history-card-title { color: #e0e0e0; }
-body.dark .history-card-client { color: rgba(255, 255, 255, 0.55); }
-body.dark .history-card-meta { color: rgba(255, 255, 255, 0.45); }
-body.dark .history-card-meta .meta-sep { color: rgba(255, 255, 255, 0.15); }
-body.dark .history-meta-badge--agents { background: rgba(124, 102, 220, 0.15); color: #b5a5f0; }
-body.dark .history-meta-badge--session { background: rgba(90, 156, 246, 0.15); color: #7ab8ff; }
-body.dark .history-meta-badge--duration { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.5); }
-body.dark .history-meta-badge--recycled { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.5); }
-body.dark .history-date-label { color: rgba(255, 255, 255, 0.5); }
+body.dark .activity-day { background: var(--card-bg); border-color: rgba(255, 255, 255, 0.06); box-shadow: var(--card-shadow); }
+body.dark .activity-day-header { background: rgba(255, 255, 255, 0.03); border-bottom-color: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.45); }
+body.dark .activity-day-count { color: rgba(255, 255, 255, 0.3); }
+body.dark .activity-row + .activity-row { border-top-color: rgba(255, 255, 255, 0.05); }
+body.dark .activity-row[role="button"]:hover { background: var(--card-hover-bg); }
+body.dark .activity-row--completed { border-left-color: #30d158; }
+body.dark .activity-row--session { border-left-color: #a594e8; }
+body.dark .activity-row--recurring { border-left-color: #ff9f0a; }
+body.dark .activity-row--dismissed { border-left-color: rgba(255, 255, 255, 0.15); }
+body.dark .activity-row-icon { color: rgba(255, 255, 255, 0.4); }
+body.dark .activity-row-title { color: #e0e0e0; }
+body.dark .activity-tag { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.5); }
+body.dark .activity-tag--agents { background: rgba(124, 102, 220, 0.18); color: #b5a5f0; }
+body.dark .activity-row-time { color: rgba(255, 255, 255, 0.3); }
+body.dark .activity-row-restore { color: rgba(255, 255, 255, 0.5); }
+body.dark .activity-row-restore:hover { background: rgba(255, 255, 255, 0.12); color: rgba(255, 255, 255, 0.9); }
 body.dark .activity-tile { background: var(--card-inner-bg); }
 body.dark .activity-tile-value { color: #f0f0f0; }
 body.dark .activity-tile-label { color: rgba(255, 255, 255, 0.45); }

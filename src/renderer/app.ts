@@ -929,6 +929,12 @@ filterBar.addEventListener('click', (e) => {
   if (filter) setFilter(filter);
 });
 
+/**
+ * Only rows backed by a space are focusable — loose timeline events have no
+ * space left to open, so arrow keys skip over them.
+ */
+const ACTIVITY_ROW_SELECTOR = '.activity-row[tabindex]';
+
 filterBar.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
     e.preventDefault();
@@ -945,8 +951,8 @@ filterBar.addEventListener('keydown', (e) => {
     e.preventDefault();
     e.stopPropagation();
     if (currentFilter === 'closed') {
-      // Activity tab: form is hidden, focus first history card
-      const firstCard = listEl.querySelector('.history-card') as HTMLElement;
+      // Activity tab: form is hidden, focus first activity row
+      const firstCard = listEl.querySelector(ACTIVITY_ROW_SELECTOR) as HTMLElement;
       if (firstCard) firstCard.focus();
     } else {
       descInput.focus();
@@ -955,11 +961,11 @@ filterBar.addEventListener('keydown', (e) => {
   }
 });
 
-// ── History card keyboard navigation (Activity tab) ─────
+// ── Activity row keyboard navigation (Activity tab) ─────
 listEl.addEventListener('keydown', (e) => {
-  const card = (e.target as HTMLElement).closest('.history-card') as HTMLElement;
+  const card = (e.target as HTMLElement).closest(ACTIVITY_ROW_SELECTOR) as HTMLElement;
   if (!card || currentFilter !== 'closed') return;
-  const cards = Array.from(listEl.querySelectorAll('.history-card')) as HTMLElement[];
+  const cards = Array.from(listEl.querySelectorAll(ACTIVITY_ROW_SELECTOR)) as HTMLElement[];
   const idx = cards.indexOf(card);
   if (e.key === 'ArrowUp') {
     e.preventDefault();
