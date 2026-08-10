@@ -2423,6 +2423,7 @@ body.dark .persona-form-checkbox-label {
   border-radius: var(--card-radius);
   backdrop-filter: var(--card-backdrop);
   box-shadow: var(--card-shadow);
+  flex-shrink: 0;
 }
 
 .activity-tiles {
@@ -2537,6 +2538,10 @@ body.dark .persona-form-checkbox-label {
   backdrop-filter: var(--card-backdrop);
   box-shadow: var(--card-shadow);
   overflow: hidden;
+  /* The list is a flex column, and `overflow: hidden` switches off the
+     automatic minimum size that would otherwise stop a flex item shrinking
+     past its content — without this the day cards collapse into each other. */
+  flex-shrink: 0;
 }
 
 .activity-day-header {
