@@ -374,6 +374,32 @@ body {
   user-select: none;
 }
 
+/* ── Web remote window surface ─────────────────────────
+   Every rule above assumes something is painted *behind* the page: the
+   Electron window's own material (macOS vibrancy, Windows Mica), which is why
+   `body` and `#app` are transparent and why dark mode only overrides tokens
+   rather than painting a background. A browser tab has no material — the page
+   canvas is opaque white — so over the web remote the dark theme rendered its
+   pale text and hairline borders straight onto white and looked half-applied.
+   Paint the missing surface here, and hand the browser a `color-scheme` so its
+   scrollbars and form controls follow the theme too. */
+body.web-remote {
+  background: #e9e9ef;
+  color-scheme: light;
+}
+
+body.web-remote.dark {
+  background: #16181d;
+  color-scheme: dark;
+}
+
+/* macOS dark leaves `#app` fully transparent so the window's dark vibrancy can
+   show; with no vibrancy to show, give the panel the faint lift that material
+   provided. */
+body.web-remote.dark #app {
+  background: rgba(255, 255, 255, 0.03);
+}
+
 #app {
   position: relative;
   background: transparent;

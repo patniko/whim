@@ -560,6 +560,15 @@ if (__platform) {
   document.body.classList.add(`platform-${__platform}`);
 }
 
+// The desktop window paints its own material (macOS vibrancy, Windows Mica) and
+// the stylesheet leans on it: `body` and `#app` are transparent so it shows
+// through. A browser tab has no material — the page canvas is plain white — so
+// dark mode landed as pale text on white. Mark the browser so styles.css can
+// paint the surface the window would have.
+if (isWebRemote()) {
+  document.body.classList.add('web-remote');
+}
+
 // ── Window slide animation ──────────────────────────────
 const appEl = document.getElementById('app')!;
 let windowSide: 'left' | 'right' = 'right';
