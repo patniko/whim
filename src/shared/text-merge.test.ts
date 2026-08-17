@@ -147,4 +147,43 @@ describe('merge3', () => {
     expect(r.merged).toContain('revised by agent');
     expect(r.hasConflicts).toBe(false);
   });
+
+  // ── Duplication regressions ──
+
+  it('does not duplicate identical insertions made by both sides', () => {
+    const base = 'A\nB';
+    const ours = 'A\nNEW1\nNEW2\nB';
+    const theirs = 'A\nNEW1\nNEW2\nB';
+    const r = merge3(base, ours, theirs);
+    expect(r.merged).toBe('A\nNEW1\nNEW2\nB');
+  });
+
+  it('does not duplicate agent content the editor copy already has', () => {
+    const base = 'A\nB';
+    const ours = 'A\nNEW1\nNEW2\nB\ntail';
+    const theirs = 'A\nNEW1\nNEW2\nB';
+    const r = merge3(base, ours, theirs);
+    expect(r.merged).toBe('A\nNEW1\nNEW2\nB\ntail');
+    expect(r.hasConflicts).toBe(false);
+  });
+
+  it('does not duplicate sections when the editor is a stale-base superset', () => {
+    const base = ['# Doc', '', '## TL;DR', '', '* win', ''].join('\n');
+    const theirs = ['# Doc', '', '**Date:** x', '', '## TL;DR', '', '* win', '', '## Metrics', '', '| a |', ''].join('\n');
+    const ours = theirs + '\n';
+    const r = merge3(base, ours, theirs);
+    expect(r.merged.match(/## TL;DR/g)).toHaveLength(1);
+    expect(r.merged.match(/## Metrics/g)).toHaveLength(1);
+    expect(r.merged.match(/\*\*Date:\*\* x/g)).toHaveLength(1);
+  });
+
+  it('still keeps both versions when the sides genuinely differ at the same spot', () => {
+    const base = 'A\nB';
+    const ours = 'A\nMINE\nB';
+    const theirs = 'A\nTHEIRS\nB';
+    const r = merge3(base, ours, theirs);
+    expect(r.merged).toContain('MINE');
+    expect(r.merged).toContain('THEIRS');
+    expect(r.hasConflicts).toBe(true);
+  });
 });

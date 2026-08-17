@@ -149,11 +149,48 @@ function extractHunks(diff: DiffOp[]): Hunk[] {
 /**
  * Check if two hunks overlap (including adjacency, which we treat as conflict
  * to be safe).
+ *
+ * Pure insertions have a zero-length base range, so a strict interval test
+ * would never report them as overlapping. Two sides inserting at the same
+ * point (or one inserting inside the other's replaced range) do collide, so
+ * insertions are compared with inclusive bounds.
  */
 function hunksOverlap(a: Hunk, b: Hunk): boolean {
   const aEnd = a.baseStart + a.baseCount;
   const bEnd = b.baseStart + b.baseCount;
+  if (a.baseCount === 0 || b.baseCount === 0) {
+    return a.baseStart <= bEnd && b.baseStart <= aEnd;
+  }
   return a.baseStart < bEnd && b.baseStart < aEnd;
+}
+
+/** Lines that carry content, normalized for comparison. */
+function significantLines(lines: string[]): string[] {
+  return lines.map(l => l.trim()).filter(l => l.length > 0);
+}
+
+/**
+ * True if `outer` already contains every significant line of `inner` as a
+ * contiguous run. Used to avoid re-emitting agent content the user's copy
+ * already has (which is what produced duplicated sections).
+ */
+function containsBlock(outer: string[], inner: string[]): boolean {
+  const hay = significantLines(outer);
+  const needle = significantLines(inner);
+  if (needle.length === 0) return true;
+  if (needle.length > hay.length) return false;
+
+  for (let i = 0; i + needle.length <= hay.length; i++) {
+    let match = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (hay[i + j] !== needle[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
 }
 
 /**
@@ -189,13 +226,18 @@ export function merge3(base: string, ours: string, theirs: string): MergeResult 
   // Detect overlapping hunks
   let hasConflicts = false;
   const conflictingTheirHunks = new Set<number>();
+  // "Their" hunks whose content the user's version already contains. These are
+  // suppressed rather than appended, so shared content isn't duplicated.
+  const duplicateTheirHunks = new Set<number>();
 
-  for (const oh of ourHunks) {
-    for (let ti = 0; ti < theirHunks.length; ti++) {
-      if (hunksOverlap(oh, theirHunks[ti])) {
-        hasConflicts = true;
-        conflictingTheirHunks.add(ti);
-      }
+  for (let ti = 0; ti < theirHunks.length; ti++) {
+    const overlapping = ourHunks.filter(oh => hunksOverlap(oh, theirHunks[ti]));
+    if (overlapping.length === 0) continue;
+    conflictingTheirHunks.add(ti);
+    if (overlapping.some(oh => containsBlock(oh.lines, theirHunks[ti].lines))) {
+      duplicateTheirHunks.add(ti);
+    } else {
+      hasConflicts = true;
     }
   }
 
@@ -233,16 +275,21 @@ export function merge3(base: string, ours: string, theirs: string): MergeResult 
 
       // Emit our replacement
       result.push(...hunk.lines);
-      baseIdx += hunk.baseCount;
+      baseIdx = Math.max(baseIdx, hunk.baseStart + hunk.baseCount);
       appliedOurs.add(hunk);
 
       // For conflicting "their" hunks overlapping this one, append their version
       for (let ti = 0; ti < theirHunks.length; ti++) {
-        if (conflictingTheirHunks.has(ti) && !appliedTheirs.has(ti) && hunksOverlap(hunk, theirHunks[ti])) {
+        if (appliedTheirs.has(ti)) continue;
+        if (!conflictingTheirHunks.has(ti)) continue;
+        if (!hunksOverlap(hunk, theirHunks[ti])) continue;
+
+        if (!duplicateTheirHunks.has(ti)) {
           result.push('');
           result.push(...theirHunks[ti].lines);
-          appliedTheirs.add(ti);
         }
+        appliedTheirs.add(ti);
+        baseIdx = Math.max(baseIdx, theirHunks[ti].baseStart + theirHunks[ti].baseCount);
       }
     } else {
       // "theirs" hunk
@@ -258,7 +305,7 @@ export function merge3(base: string, ours: string, theirs: string): MergeResult 
 
       // Emit their replacement
       result.push(...hunk.lines);
-      baseIdx += hunk.baseCount;
+      baseIdx = Math.max(baseIdx, hunk.baseStart + hunk.baseCount);
       appliedTheirs.add(ti);
     }
   }
