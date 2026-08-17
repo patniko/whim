@@ -34,6 +34,15 @@ const fs = require('fs');
 const path = require('path');
 
 /**
+ * `npm` and `npx` are shell shims on Windows (`npm.cmd`, `npx.cmd`), and
+ * `execFileSync` does no PATHEXT resolution — asking for the bare name there
+ * fails with ENOENT before the build ever starts.
+ */
+function npmBin(name) {
+  return process.platform === 'win32' ? `${name}.cmd` : name;
+}
+
+/**
  * Native modules that must match the host runtime's ABI.
  *
  * `probe` has to *exercise* the binding, not merely require the package.
@@ -133,13 +142,13 @@ function build(target, moduleName) {
     // running this script — and if they differ, the build silently targets the
     // wrong ABI. Put our own interpreter first so they cannot disagree.
     const env = { ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}` };
-    execFileSync('npm', ['rebuild', moduleName], { cwd: ROOT, stdio: 'pipe', env });
+    execFileSync(npmBin('npm'), ['rebuild', moduleName], { cwd: ROOT, stdio: 'pipe', env });
     return;
   }
 
   const version = require(path.join(ROOT, 'node_modules', 'electron', 'package.json')).version;
   execFileSync(
-    'npx',
+    npmBin('npx'),
     [
       '--yes', 'node-gyp', 'rebuild',
       `--target=${version}`,
