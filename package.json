@@ -80,7 +80,8 @@
         "LSUIElement": true,
         "NSMicrophoneUsageDescription": "whim needs microphone access for voice input."
       }
-    }
+    },
+    "afterPack": "scripts/fix-shallow-frameworks.js"
   },
   "electronmon": {
     "patterns": [
