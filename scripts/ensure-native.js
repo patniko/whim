@@ -34,12 +34,31 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * `npm` and `npx` are shell shims on Windows (`npm.cmd`, `npx.cmd`), and
- * `execFileSync` does no PATHEXT resolution — asking for the bare name there
- * fails with ENOENT before the build ever starts.
+ * `npm` and `npx` are batch shims on Windows (`npm.cmd`, `npx.cmd`). Asking for
+ * the bare name fails with ENOENT because `execFileSync` does no PATHEXT
+ * resolution, and asking for the `.cmd` fails with EINVAL because Node refuses
+ * to spawn a batch file without a shell. Running the CLI's own JavaScript entry
+ * point with the interpreter already executing this script avoids both, and
+ * guarantees the build targets the ABI we actually checked.
  */
-function npmBin(name) {
-  return process.platform === 'win32' ? `${name}.cmd` : name;
+function cliScript(request) {
+  try {
+    return require.resolve(request, { paths: [ROOT] });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Last resort when a CLI's entry point can't be resolved: go through the shim,
+ * which on Windows means going through a shell.
+ */
+function runShim(name, args, options) {
+  if (process.platform !== 'win32') {
+    execFileSync(name, args, options);
+    return;
+  }
+  execFileSync(`${name}.cmd`, args, { ...options, shell: true });
 }
 
 /**
@@ -142,22 +161,29 @@ function build(target, moduleName) {
     // running this script — and if they differ, the build silently targets the
     // wrong ABI. Put our own interpreter first so they cannot disagree.
     const env = { ...process.env, PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}` };
-    execFileSync(npmBin('npm'), ['rebuild', moduleName], { cwd: ROOT, stdio: 'pipe', env });
+    const npmCli = process.env.npm_execpath;
+    if (npmCli && npmCli.endsWith('.js')) {
+      execFileSync(process.execPath, [npmCli, 'rebuild', moduleName], { cwd: ROOT, stdio: 'pipe', env });
+    } else {
+      runShim('npm', ['rebuild', moduleName], { cwd: ROOT, stdio: 'pipe', env });
+    }
     return;
   }
 
   const version = require(path.join(ROOT, 'node_modules', 'electron', 'package.json')).version;
-  execFileSync(
-    npmBin('npx'),
-    [
-      '--yes', 'node-gyp', 'rebuild',
-      `--target=${version}`,
-      `--arch=${process.arch}`,
-      '--dist-url=https://electronjs.org/headers',
-      '--runtime=electron',
-    ],
-    { cwd, stdio: 'pipe' },
-  );
+  const gypArgs = [
+    'rebuild',
+    `--target=${version}`,
+    `--arch=${process.arch}`,
+    '--dist-url=https://electronjs.org/headers',
+    '--runtime=electron',
+  ];
+  const gyp = cliScript('node-gyp/bin/node-gyp.js');
+  if (gyp) {
+    execFileSync(process.execPath, [gyp, ...gypArgs], { cwd, stdio: 'pipe' });
+    return;
+  }
+  runShim('npx', ['--yes', 'node-gyp', ...gypArgs], { cwd, stdio: 'pipe' });
 }
 
 /**
