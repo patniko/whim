@@ -645,6 +645,7 @@ export interface IpcEvents {
   'canvas-window:load-target': CanvasTarget;
   'canvas-window:closed': void;
   'canvas-window:theme-changed': { theme: string };
+  'settings:font-changed': { font: import('./fonts').FontChoice };
   'canvas-window:request-hide': void;
   'window:shown': { side: 'left' | 'right'; expanded: boolean; source: WindowToggleSource };
   'window:toggle': { source: WindowToggleSource };

@@ -75,6 +75,7 @@ const ALLOWED_EVENT_CHANNELS = new Set([
   // desktop-only, but a remote client still needs this to refresh its list.
   'canvas-artifact:published',
   'workspace:committed',
+  'settings:font-changed',
   'workspace:git-sync-changed',
 ]);
 

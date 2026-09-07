@@ -15,6 +15,8 @@ import { setAutoDownload } from '../update-service';
 import { getWebRemoteState, restartWebRemoteServer, sessionStore, syncWebRemoteServer } from '../web/server';
 import { listWebRemoteInterfaces, normalizeBindSelections } from '../web/interfaces';
 import { readSetting } from '../services/settings';
+import { isFontChoice } from '../../shared/fonts';
+import { sendToAllWindows } from './typed-handler';
 
 const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -24,6 +26,11 @@ export function registerSettingsHandlers(): void {
   registerIpcHandler('settings:set', async (_event, key: string, value: string) => {
     if (key === 'theme') {
       setConfigValue('theme', value as 'light' | 'dark' | 'system');
+    } else if (key === 'font') {
+      if (!isFontChoice(value)) throw new Error('Unknown font selection');
+      setConfigValue('font', value);
+      sendToAllWindows('settings:font-changed', { font: value });
+      return value;
     } else if (key === 'model') {
       setConfigValue('model', value);
       await setAIModel(value);

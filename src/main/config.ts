@@ -4,6 +4,7 @@ import { randomBytes } from 'crypto';
 import { app } from 'electron';
 import { DEFAULT_SANDBOX_POLICY, type SandboxPolicy } from '../shared/ipc-contract';
 import type { ExportFormat, ExportDestination } from '../shared/types';
+import { normalizeFontChoice, type FontChoice } from '../shared/fonts';
 import {
   classifyInterfaceScope,
   defaultBindSelections,
@@ -145,6 +146,7 @@ export interface WorkspaceProfile {
 export interface AppConfig {
   workspace: string | null;
   theme: 'light' | 'dark' | 'system';
+  font: FontChoice;
   model: string | null;
   cliPath: string | null;          // user override for Copilot CLI path; null = auto-detect
   cliSource: CliSource;            // which Copilot runtime to use (default: 'bundled')
@@ -361,6 +363,7 @@ This persona is for demonstrating MXC enforcement, not for general-purpose safe 
 const DEFAULT_CONFIG: AppConfig = {
   workspace: null,
   theme: 'system',
+  font: 'default',
   model: null,
   cliPath: null,
   cliSource: 'bundled',
@@ -437,6 +440,7 @@ export function loadConfig(): AppConfig {
       const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
       config = { ...DEFAULT_CONFIG, ...parsed };
+      config.font = normalizeFontChoice(config.font);
       preserveInactiveProfileState =
         Object.prototype.hasOwnProperty.call(parsed, 'activeProfileId') &&
         parsed.activeProfileId === null &&

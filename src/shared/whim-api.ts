@@ -240,6 +240,7 @@ export interface WhimAPI {
   getCanvasAlwaysOnTop(): Promise<boolean>;
   notifyCanvasThemeChanged(theme: string): void;
   onCanvasThemeChanged(callback: (theme: string) => void): void;
+  onFontChanged(callback: (font: string) => void): void;
   onCanvasRequestHide(callback: () => void): void;
   canvasHideReady(): void;
   openAgentChatInPanel(data: { agentId: string; agentPrompt: string; agentStatus: string; agentSource?: 'sdk' | 'cli'; spaceId?: string }): void;
@@ -600,6 +601,9 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     notifyCanvasThemeChanged: (theme) => ipcRenderer.send('canvas-window:theme-changed', theme),
     onCanvasThemeChanged: (callback) => {
       ipcRenderer.on('canvas-window:theme-changed', (_event: unknown, theme: string) => callback(theme));
+    },
+    onFontChanged: (callback) => {
+      ipcRenderer.on('settings:font-changed', (_event: unknown, payload: IpcEventPayload<'settings:font-changed'>) => callback(payload.font));
     },
     onCanvasRequestHide: (callback) => {
       ipcRenderer.on('canvas-window:request-hide', () => callback());

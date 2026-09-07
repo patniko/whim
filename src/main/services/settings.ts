@@ -10,6 +10,7 @@ import { getConfigValue, type AppConfig } from '../config';
 const SETTING_CONFIG_KEYS: Record<string, keyof AppConfig> = {
   workspace_root: 'workspace',
   theme: 'theme',
+  font: 'font',
   model: 'model',
   cli_path: 'cliPath',
   cli_source: 'cliSource',

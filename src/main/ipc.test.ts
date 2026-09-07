@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { subscribeWebRemoteEvents } from './web/event-hub';
 
 // ── Capture handlers registered via ipcMain.handle ──────────────────
 const handlers = new Map<string, Function>();
@@ -357,6 +358,11 @@ describe('IPC handlers', () => {
       expect(result).toBe('dark');
     });
 
+    it('maps font to font', () => {
+      invoke('settings:get', 'font');
+      expect(getConfigValue).toHaveBeenCalledWith('font');
+    });
+
     it('returns null for unknown keys', () => {
       const result = invoke('settings:get', 'nonexistent_key');
       expect(result).toBeNull();
@@ -364,6 +370,28 @@ describe('IPC handlers', () => {
   });
 
   describe('settings:set', () => {
+    it('font: saves a supported choice', async () => {
+      const listener = vi.fn();
+      const unsubscribe = subscribeWebRemoteEvents(listener);
+      try {
+        expect(await invoke('settings:set', 'font', 'georgia')).toBe('georgia');
+        expect(setConfigValue).toHaveBeenCalledWith('font', 'georgia');
+        expect(listener).toHaveBeenCalledWith(expect.objectContaining({
+          channel: 'settings:font-changed',
+          payload: { font: 'georgia' },
+          source: { channel: 'settings:font-changed', args: [{ font: 'georgia' }] },
+        }));
+      } finally {
+        unsubscribe();
+      }
+    });
+
+    it('font: rejects unknown choices without saving', async () => {
+      vi.mocked(setConfigValue).mockClear();
+      await expect(invoke('settings:set', 'font', 'not-a-font')).rejects.toThrow('Unknown font selection');
+      expect(setConfigValue).not.toHaveBeenCalled();
+    });
+
     it('theme: calls setConfigValue', async () => {
       await invoke('settings:set', 'theme', 'light');
       expect(setConfigValue).toHaveBeenCalledWith('theme', 'light');

@@ -8,6 +8,7 @@ describe('settings access policy', () => {
     // interface silently never mounted.
     expect(canReadSetting('workspace_root')).toBe(true);
     expect(canReadSetting('theme')).toBe(true);
+    expect(canReadSetting('font')).toBe(true);
   });
 
   it('never exposes credentials or host execution config', () => {

@@ -28,6 +28,7 @@ describe('config', () => {
     it('returns defaults when no config file exists', () => {
       const config = loadConfig();
       expect(config.theme).toBe('system');
+      expect(config.font).toBe('default');
       expect(config.model).toBeNull();
       expect(config.workspace).toBeNull();
       expect(config.personas).toEqual([]);
@@ -35,6 +36,17 @@ describe('config', () => {
       expect(config.webRemoteEnabled).toBe(false);
       expect(config.webRemotePort).toBe(DEFAULT_WEB_REMOTE_PORT);
       expect(config.webRemoteToken.length).toBeGreaterThan(20);
+    });
+
+    it('persists the selected font across reloads', () => {
+      loadConfig();
+      setConfigValue('font', 'georgia');
+      expect(loadConfig().font).toBe('georgia');
+    });
+
+    it.each([undefined, null, 'missing-font', 42])('defaults old or invalid font settings (%s)', font => {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ theme: 'dark', font }));
+      expect(loadConfig().font).toBe('default');
     });
 
     it('includes new cliTools field with default empty array', () => {

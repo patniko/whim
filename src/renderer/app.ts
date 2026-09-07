@@ -297,6 +297,7 @@ interface WhimAPI {
   updateCanvasWindowTitle(title: string): void;
   notifyCanvasThemeChanged(theme: string): void;
   onCanvasThemeChanged(callback: (theme: string) => void): void;
+  onFontChanged(callback: (font: string) => void): void;
   onCanvasRequestHide(callback: () => void): void;
   canvasHideReady(): void;
   openAgentChatInPanel(data: { agentId: string; agentPrompt: string; agentStatus: string; agentSource?: 'sdk' | 'cli'; spaceId?: string }): void;
@@ -422,6 +423,7 @@ const mainView = document.getElementById('main-view') as HTMLDivElement;
 // ── Update banner ───────────────────────────────────────
 import { mountUpdateBanner } from './views/UpdateBanner.tsx';
 import { applyTheme, getResolvedTheme, normalizeChoice, type ThemeChoice } from './theme';
+import { initFontSetting } from './font-setting';
 
 // ── React migration: stores + IPC bridge + mount for the four main lists ──
 // These run alongside the legacy imperative DOM code during the migration.
@@ -1388,6 +1390,8 @@ async function loadSettings(): Promise<void> {
 }
 
 // ── Theme ───────────────────────────────────────────────
+void initFontSetting(whimAPI);
+
 // Theme resolve/apply/persist + OS-change handling lives in ./theme.
 // app.ts only loads the stored choice and wires the Settings control.
 
@@ -7190,7 +7194,7 @@ function showCanvasInputDialog(label: string, onSubmit: (value: string) => void)
   Object.assign(box.style, {
     background: '#1e1e1e', borderRadius: '8px', padding: '16px 20px',
     minWidth: '300px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-    fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
+    fontFamily: 'var(--font-body)',
   });
 
   const labelEl = document.createElement('div');

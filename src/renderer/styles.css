@@ -152,6 +152,10 @@
   box-sizing: border-box;
 }
 
+:where(button, input, select, textarea) {
+  font-family: inherit;
+}
+
 /* ── Generic utility ───────────────────────────────────── */
 .hidden {
   display: none !important;
@@ -183,6 +187,8 @@
 /* ── Design tokens ─────────────────────────────────────── */
 /* Neutral baseline (also used on Linux) */
 :root {
+  --font-body: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+  --font-heading: 'Fraunces', Georgia, serif;
   /* Typography scale (ladder — never reference raw px in components) */
   --fs-2xs: 10px;
   --fs-xs:  11px;
@@ -367,7 +373,7 @@ body.platform-darwin:not(.dark) #app {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+  font-family: var(--font-body);
   background: transparent;
   color: #2c2c3a;
   overflow: hidden;
@@ -481,7 +487,7 @@ body.web-remote.dark #app {
   opacity: 0.9;
 }
 .tour-header h1 {
-  font-family: 'Fraunces', Georgia, serif;
+  font-family: var(--font-heading);
   font-style: italic;
   font-weight: 500;
   font-size: var(--fs-section);
@@ -1079,7 +1085,7 @@ header {
 }
 
 header h1 {
-  font-family: 'Fraunces', Georgia, serif;
+  font-family: var(--font-heading);
   font-size: var(--fs-card-title);
   font-weight: 500;
   font-style: italic;
@@ -1380,7 +1386,7 @@ body.platform-darwin.settings-window .settings-sidebar {
 }
 
 .settings-topbar-title {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-family: var(--font-body);
   font-size: var(--fs-card-title);
   font-weight: 600;
   font-style: normal;
@@ -2050,6 +2056,77 @@ body.dark .sandbox-block-banner-btn:hover {
 .settings-row select option {
   background: var(--set-bg);
   color: var(--set-text);
+}
+
+.font-picker {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.font-picker-trigger {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--set-control-border);
+  border-radius: var(--set-radius-sm);
+  background: var(--set-control-bg);
+  color: var(--set-text);
+  font-size: var(--fs-body);
+  cursor: pointer;
+  text-align: left;
+}
+
+.font-picker-trigger::after {
+  content: '';
+  border: 4px solid transparent;
+  border-bottom: 0;
+  border-top-color: currentColor;
+}
+
+.font-picker-trigger:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.font-picker-options {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 10;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--set-control-border);
+  border-radius: var(--set-radius-sm);
+  background: var(--set-bg);
+  color: var(--set-text);
+  box-shadow: var(--card-hover-shadow);
+}
+
+.font-picker-option {
+  padding: 8px 10px;
+  border-radius: var(--set-radius-sm);
+  font-size: var(--fs-lg);
+  cursor: pointer;
+}
+
+.font-picker-option:hover,
+.font-picker-option.active {
+  background: var(--set-accent-subtle);
+}
+
+.font-picker-option[aria-selected='true'] {
+  color: var(--set-accent);
+  font-weight: 600;
+}
+
+.font-setting-error {
+  color: var(--color-danger-text);
 }
 
 .settings-hint {
@@ -4847,7 +4924,7 @@ body.dark .help-modal { background: rgba(32, 32, 38, 0.96); }
   margin-bottom: var(--space-4);
 }
 .help-header h1 {
-  font-family: 'Fraunces', Georgia, serif;
+  font-family: var(--font-heading);
   font-style: italic;
   font-weight: 500;
   font-size: var(--fs-section);
@@ -6084,7 +6161,7 @@ body.dark .skill-picker-desc {
 .markdown-canvas-container .milkdown-prose h4,
 .markdown-canvas-container .milkdown-prose h5,
 .markdown-canvas-container .milkdown-prose h6 {
-  font-family: 'Fraunces', Georgia, serif;
+  font-family: var(--font-heading);
   font-weight: 500;
   line-height: var(--lh-tight);
   margin: 1.2em 0 0.5em;

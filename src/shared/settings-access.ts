@@ -22,6 +22,7 @@
  */
 const READABLE_SETTINGS = new Set([
   'theme',
+  'font',
   'focused_intent',
   'auto_hide_side_pane',
   'comment_trigger',
@@ -68,4 +69,3 @@ export function canReadSetting(key: unknown): boolean {
 export function readableSettings(): string[] {
   return [...READABLE_SETTINGS];
 }
-
