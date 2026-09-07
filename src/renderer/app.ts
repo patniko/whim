@@ -298,6 +298,7 @@ interface WhimAPI {
   notifyCanvasThemeChanged(theme: string): void;
   onCanvasThemeChanged(callback: (theme: string) => void): void;
   onFontChanged(callback: (font: string) => void): void;
+  listInstalledFonts(): Promise<string[]>;
   onCanvasRequestHide(callback: () => void): void;
   canvasHideReady(): void;
   openAgentChatInPanel(data: { agentId: string; agentPrompt: string; agentStatus: string; agentSource?: 'sdk' | 'cli'; spaceId?: string }): void;
@@ -1390,7 +1391,7 @@ async function loadSettings(): Promise<void> {
 }
 
 // ── Theme ───────────────────────────────────────────────
-void initFontSetting(whimAPI);
+void initFontSetting(whimAPI, isSettingsMode && !isWebRemote());
 
 // Theme resolve/apply/persist + OS-change handling lives in ./theme.
 // app.ts only loads the stored choice and wires the Settings control.

@@ -43,6 +43,7 @@ describe('WEB_ACCESS', () => {
     // The distinction matters: a remote client should degrade the UI for these
     // rather than present them as a permission failure.
     const nativeOnly: IpcCommandChannel[] = [
+      'fonts:list',
       'dialog:select-folder',
       'shell:openPath',
       'shell:openExternal',

@@ -17,17 +17,22 @@ import { listWebRemoteInterfaces, normalizeBindSelections } from '../web/interfa
 import { readSetting } from '../services/settings';
 import { isFontChoice } from '../../shared/fonts';
 import { sendToAllWindows } from './typed-handler';
+import { listInstalledFonts } from '../services/fonts';
 
 const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 export function registerSettingsHandlers(): void {
   registerIpcHandler('settings:get', (_event, key: string) => readSetting(key));
+  registerIpcHandler('fonts:list', () => listInstalledFonts());
 
   registerIpcHandler('settings:set', async (_event, key: string, value: string) => {
     if (key === 'theme') {
       setConfigValue('theme', value as 'light' | 'dark' | 'system');
     } else if (key === 'font') {
       if (!isFontChoice(value)) throw new Error('Unknown font selection');
+      if (value.startsWith('local:') && !(await listInstalledFonts()).includes(value.slice(6))) {
+        throw new Error('The selected font is no longer installed');
+      }
       setConfigValue('font', value);
       sendToAllWindows('settings:font-changed', { font: value });
       return value;

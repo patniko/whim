@@ -372,6 +372,7 @@ export interface IpcCommands {
 
   // ── Settings ─────────────────────────────────────────────
   'settings:get': { args: [key: string]; result: unknown };
+  'fonts:list': { args: []; result: string[] };
   'settings:set': { args: [key: string, value: string]; result: string | null | undefined };
   'web-remote:get-state': { args: []; result: WebRemoteState };
   'web-remote:set-enabled': { args: [enabled: boolean]; result: WebRemoteState };

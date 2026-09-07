@@ -38,10 +38,10 @@ describe('config', () => {
       expect(config.webRemoteToken.length).toBeGreaterThan(20);
     });
 
-    it('persists the selected font across reloads', () => {
+    it.each(['georgia', 'local:Apex Serif'] as const)('persists the selected font across reloads (%s)', font => {
       loadConfig();
-      setConfigValue('font', 'georgia');
-      expect(loadConfig().font).toBe('georgia');
+      setConfigValue('font', font);
+      expect(loadConfig().font).toBe(font);
     });
 
     it.each([undefined, null, 'missing-font', 42])('defaults old or invalid font settings (%s)', font => {

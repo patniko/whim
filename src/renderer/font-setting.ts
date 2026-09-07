@@ -1,15 +1,18 @@
-import { FONT_OPTIONS, normalizeFontChoice, type FontChoice } from '../shared/fonts';
+import { FONT_OPTIONS, buildFontOptions, getFontOption, normalizeFontChoice, type FontChoice } from '../shared/fonts';
 import type { WhimAPI } from '../shared/whim-api';
 
 export function applyFont(value: unknown): FontChoice {
   const choice = normalizeFontChoice(value);
-  const font = FONT_OPTIONS.find(option => option.id === choice)!;
+  const font = getFontOption(choice);
   document.documentElement.style.setProperty('--font-body', font.family);
   document.documentElement.style.setProperty('--font-heading', choice === 'default' ? FONT_OPTIONS[1].family : font.family);
   return choice;
 }
 
-export async function initFontSetting(api: Pick<WhimAPI, 'getSetting' | 'setSetting' | 'onFontChanged'>): Promise<void> {
+export async function initFontSetting(
+  api: Pick<WhimAPI, 'getSetting' | 'setSetting' | 'onFontChanged' | 'listInstalledFonts'>,
+  allowSelection = true,
+): Promise<void> {
   const root = document.getElementById('font-setting');
   const error = document.getElementById('font-setting-error');
   let choice: FontChoice = 'default';
@@ -17,6 +20,12 @@ export async function initFontSetting(api: Pick<WhimAPI, 'getSetting' | 'setSett
   let expanded = false;
   let revision = 0;
   let saving = false;
+  let loading = false;
+  let families: string[] = [];
+  let fonts = buildFontOptions(families, choice);
+  let options: HTMLDivElement[] = [];
+  let typed = '';
+  let lastTypedAt = 0;
 
   const trigger = document.createElement('button');
   trigger.type = 'button';
@@ -36,26 +45,36 @@ export async function initFontSetting(api: Pick<WhimAPI, 'getSetting' | 'setSett
   list.setAttribute('role', 'listbox');
   list.setAttribute('aria-labelledby', 'font-setting-label');
   list.hidden = true;
-  const options = FONT_OPTIONS.map((font, index) => {
-    const option = document.createElement('div');
-    option.id = `font-option-${font.id}`;
-    option.className = 'font-picker-option';
-    option.setAttribute('role', 'option');
-    option.textContent = font.label;
-    option.style.fontFamily = font.family;
-    option.addEventListener('mousedown', event => event.preventDefault());
-    option.addEventListener('click', () => { void select(index); });
-    list.append(option);
-    return option;
-  });
   root?.append(trigger, list);
+
+  function renderOptions(): void {
+    const activeId = fonts[active]?.id;
+    fonts = buildFontOptions(families, choice);
+    options = fonts.map(font => {
+      const option = document.createElement('div');
+      option.id = `font-option-${encodeURIComponent(font.id)}`;
+      option.className = 'font-picker-option';
+      option.setAttribute('role', 'option');
+      option.setAttribute('aria-selected', String(font.id === choice));
+      option.textContent = font.label;
+      option.style.fontFamily = font.family;
+      option.addEventListener('mousedown', event => event.preventDefault());
+      option.addEventListener('click', () => { void select(font.id); });
+      return option;
+    });
+    list.replaceChildren(...options);
+    if (expanded) {
+      const index = fonts.findIndex(font => font.id === activeId);
+      highlight(index === -1 ? fonts.findIndex(font => font.id === choice) : index);
+    }
+  }
 
   function sync(value: unknown): void {
     choice = applyFont(value);
-    const index = FONT_OPTIONS.findIndex(font => font.id === choice);
-    trigger.textContent = FONT_OPTIONS[index].label;
-    trigger.style.fontFamily = FONT_OPTIONS[index].family;
-    options.forEach((option, i) => option.setAttribute('aria-selected', String(i === index)));
+    const font = getFontOption(choice);
+    trigger.textContent = font.label;
+    trigger.style.fontFamily = font.family;
+    renderOptions();
   }
 
   function highlight(index: number): void {
@@ -69,7 +88,11 @@ export async function initFontSetting(api: Pick<WhimAPI, 'getSetting' | 'setSett
     expanded = open;
     list.hidden = !open;
     trigger.setAttribute('aria-expanded', String(open));
-    if (open) highlight(FONT_OPTIONS.findIndex(font => font.id === choice));
+    typed = '';
+    if (open) {
+      highlight(fonts.findIndex(font => font.id === choice));
+      void refreshFonts();
+    }
     else trigger.removeAttribute('aria-activedescendant');
   }
 
@@ -81,7 +104,24 @@ export async function initFontSetting(api: Pick<WhimAPI, 'getSetting' | 'setSett
     }
   }
 
-  async function select(index: number): Promise<void> {
+  async function refreshFonts(): Promise<void> {
+    if (loading || !allowSelection || !root) return;
+    loading = true;
+    trigger.setAttribute('aria-busy', 'true');
+    try {
+      families = await api.listInstalledFonts();
+      renderOptions();
+      if (error?.dataset.source === 'fonts') error.hidden = true;
+    } catch (cause) {
+      reportError('Could not load installed fonts. Reopen the dropdown to try again.', cause);
+      if (error) error.dataset.source = 'fonts';
+    } finally {
+      loading = false;
+      trigger.removeAttribute('aria-busy');
+    }
+  }
+
+  async function select(font: FontChoice): Promise<void> {
     if (saving) return;
     toggle(false);
     trigger.focus();
@@ -89,11 +129,11 @@ export async function initFontSetting(api: Pick<WhimAPI, 'getSetting' | 'setSett
     trigger.disabled = true;
     if (error) error.hidden = true;
     try {
-      const font = FONT_OPTIONS[index].id;
       await api.setSetting('font', font);
       sync(font);
     } catch (cause) {
       reportError('Could not save the font. Please try again.', cause);
+      if (error) error.dataset.source = 'save';
     } finally {
       saving = false;
       trigger.disabled = false;
@@ -114,8 +154,8 @@ export async function initFontSetting(api: Pick<WhimAPI, 'getSetting' | 'setSett
     event.preventDefault();
     event.stopPropagation();
     if (event.key === 'Escape') toggle(false);
-    else if (event.key === 'Enter' || event.key === ' ') {
-      if (expanded) void select(active);
+    else if (event.key === 'Enter' || (event.key === ' ' && (!typed || Date.now() - lastTypedAt > 700))) {
+      if (expanded) void select(fonts[active].id);
       else toggle(true);
     } else {
       const wasExpanded = expanded;
@@ -125,8 +165,15 @@ export async function initFontSetting(api: Pick<WhimAPI, 'getSetting' | 'setSett
       else if (event.key === 'ArrowDown' && wasExpanded) highlight(active + 1);
       else if (event.key === 'ArrowUp' && wasExpanded) highlight(active - 1);
       else if (event.key.length === 1) {
-        const index = FONT_OPTIONS.findIndex(font => font.label.toLowerCase().startsWith(event.key.toLowerCase()));
-        if (index !== -1) highlight(index);
+        const now = Date.now();
+        typed = now - lastTypedAt > 700 ? event.key : typed + event.key;
+        lastTypedAt = now;
+        const repeated = [...typed].every(char => char.toLowerCase() === typed[0].toLowerCase());
+        const prefix = (repeated ? typed[0] : typed).toLowerCase();
+        const start = repeated ? active + 1 : active;
+        const index = Array.from({ length: fonts.length }, (_, i) => (start + i) % fonts.length)
+          .find(i => fonts[i].label.toLowerCase().startsWith(prefix));
+        if (index !== undefined) highlight(index);
       }
     }
   });
@@ -141,7 +188,7 @@ export async function initFontSetting(api: Pick<WhimAPI, 'getSetting' | 'setSett
   api.onFontChanged(font => {
     revision++;
     sync(font);
-    if (expanded) highlight(FONT_OPTIONS.findIndex(option => option.id === choice));
+    if (expanded) highlight(fonts.findIndex(option => option.id === choice));
   });
   const initialRevision = revision;
   try {
@@ -150,6 +197,7 @@ export async function initFontSetting(api: Pick<WhimAPI, 'getSetting' | 'setSett
   } catch (cause) {
     reportError('Could not load the font setting.', cause);
   } finally {
-    trigger.disabled = false;
+    await refreshFonts();
+    trigger.disabled = !allowSelection;
   }
 }

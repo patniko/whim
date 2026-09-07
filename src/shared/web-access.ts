@@ -82,6 +82,7 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   // The channel has to be reachable because the renderer cannot boot without
   // reading `workspace_root`.
   'settings:get': 'allow',
+  'fonts:list': 'desktop-only',
   // Writes stay denied: the desktop setter respawns the CLI and reconfigures
   // the updater, which is more than a browser should reach.
   'settings:set': 'deny',

@@ -75,6 +75,7 @@ export interface WhimAPI {
 
   // ── Settings ─────────────────────────────────────────────
   getSetting(key: string): Promise<IpcCommandResult<'settings:get'>>;
+  listInstalledFonts(): Promise<IpcCommandResult<'fonts:list'>>;
   setSetting(key: string, value: string): Promise<IpcCommandResult<'settings:set'>>;
   getWebRemoteState(): Promise<WebRemoteState>;
   setWebRemoteEnabled(enabled: boolean): Promise<WebRemoteState>;
@@ -379,6 +380,7 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     // ── Settings ─────────────────────────────────────────────
     getSetting: (key) => ipcRenderer.invoke('settings:get', key),
     setSetting: (key, value) => ipcRenderer.invoke('settings:set', key, value),
+    listInstalledFonts: () => ipcRenderer.invoke('fonts:list'),
     getWebRemoteState: () => ipcRenderer.invoke('web-remote:get-state'),
     setWebRemoteEnabled: (enabled) => ipcRenderer.invoke('web-remote:set-enabled', enabled),
     setWebRemoteConfig: (config) => ipcRenderer.invoke('web-remote:set-config', config),

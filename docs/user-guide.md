@@ -278,7 +278,7 @@ Open settings with the **⚙** button in the header.
 Toggle between **Light** ☀️ and **Dark** 🌙 themes.
 
 ### Font
-Under **General > Appearance**, choose a font from the dropdown. Each font name is displayed in that font to preview it before choosing. The selection is saved and applies immediately to the interface and canvas, including open popout windows; code remains monospace. **Default (System)** restores the original system text and Fraunces headings. Fraunces is bundled; other choices use local fonts with fallbacks where unavailable.
+Under **General > Appearance**, choose from your installed font families, listed alphabetically with each name displayed in its own font. Type a font's name while the dropdown is open to jump to it, or use the arrow keys. The list refreshes when you reopen the dropdown after installing fonts. The selection is saved and applies immediately to the interface and canvas, including open popout windows; code remains monospace. **Default (System)** restores the original system text and Fraunces headings. Fraunces is bundled. If a previously selected font is removed, it is marked **not installed** and text uses a fallback until you choose another font. Font selection is available in desktop Settings.
 
 ### AI Model
 Select which Copilot model to use for AI refinement and agent sessions.

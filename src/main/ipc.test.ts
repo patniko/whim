@@ -4,6 +4,10 @@ import { subscribeWebRemoteEvents } from './web/event-hub';
 // ── Capture handlers registered via ipcMain.handle ──────────────────
 const handlers = new Map<string, Function>();
 
+vi.mock('font-list', () => ({
+  getFonts: vi.fn(async () => ['Arial', 'Apex Serif']),
+}));
+
 vi.mock('electron', () => ({
   app: { getPath: () => '/mock/space-test' },
   ipcMain: {
@@ -347,6 +351,10 @@ describe('IPC handlers', () => {
   // ── Settings ────────────────────────────────────────────────────
 
   describe('settings:get', () => {
+    it('lists installed OS font families', async () => {
+      expect(await invoke('fonts:list')).toEqual(['Apex Serif', 'Arial']);
+    });
+
     it('maps workspace_root to config workspace', () => {
       const result = invoke('settings:get', 'workspace_root');
       expect(getConfigValue).toHaveBeenCalledWith('workspace');
@@ -370,6 +378,17 @@ describe('IPC handlers', () => {
   });
 
   describe('settings:set', () => {
+    it('font: saves an installed family', async () => {
+      expect(await invoke('settings:set', 'font', 'local:Apex Serif')).toBe('local:Apex Serif');
+      expect(setConfigValue).toHaveBeenCalledWith('font', 'local:Apex Serif');
+    });
+
+    it('font: rejects a family removed since the list was loaded', async () => {
+      vi.mocked(setConfigValue).mockClear();
+      await expect(invoke('settings:set', 'font', 'local:Removed')).rejects.toThrow('no longer installed');
+      expect(setConfigValue).not.toHaveBeenCalled();
+    });
+
     it.each(['bundled', 'inprocess', 'auto', 'path', 'server'])('preserves the selected runtime source: %s', async source => {
       vi.mocked(setConfigValue).mockClear();
       expect(await invoke('settings:set', 'cli_source', source)).toBe(source);
