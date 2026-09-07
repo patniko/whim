@@ -4,6 +4,7 @@ import React, {
   useEffect,
   useImperativeHandle,
   useRef,
+  useState,
 } from 'react';
 import {
   Editor,
@@ -13,13 +14,13 @@ import {
   editorViewOptionsCtx,
   parserCtx,
 } from '@milkdown/kit/core';
-import { commonmark, toggleStrongCommand, toggleEmphasisCommand, toggleInlineCodeCommand } from '@milkdown/kit/preset/commonmark';
-import { gfm, toggleStrikethroughCommand } from '@milkdown/kit/preset/gfm';
+import { commonmark, linkAttr } from '@milkdown/kit/preset/commonmark';
+import { gfm } from '@milkdown/kit/preset/gfm';
 import { listener, listenerCtx } from '@milkdown/kit/plugin/listener';
 import { clipboard } from '@milkdown/kit/plugin/clipboard';
 import { history } from '@milkdown/kit/plugin/history';
 import { cursor } from '@milkdown/kit/plugin/cursor';
-import { getMarkdown, replaceAll, insert, callCommand } from '@milkdown/kit/utils';
+import { $prose, getMarkdown, replaceAll, insert } from '@milkdown/kit/utils';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { MilkdownProvider, Milkdown, useEditor } from '@milkdown/react';
 import { hostDecorationPlugin, decorationPluginKey } from './plugins/decoration-plugin';
@@ -37,31 +38,18 @@ import { SUPPRESS_TYPING_EFFECTS, typingEffectsPlugin } from './plugins/typing-e
 import type { CanvasDecoration, CanvasPresence, CanvasThreadAgentStatus, CommentThread, CommentTrigger, TextAnchor } from '../types';
 import type { Rect, SelectionInfo, MentionQuery, FormatMark } from './geometry';
 import { detectMentionBeforeCaret } from './mentions';
-import type { EditorState } from '@milkdown/kit/prose/state';
+import { Plugin, type Command, type EditorState } from '@milkdown/kit/prose/state';
 import type { Node as ProseNode } from '@milkdown/kit/prose/model';
-
-const MARK_COMMANDS = {
-  strong: toggleStrongCommand,
-  emphasis: toggleEmphasisCommand,
-  inlineCode: toggleInlineCodeCommand,
-  strikethrough: toggleStrikethroughCommand,
-} as const;
+import { closeHistory } from '@milkdown/kit/prose/history';
+import { eventMatchesAccelerator } from '../../lib/hotkeys';
+import { EditorToolbar, LinkEditor } from './EditorControls';
+import { formatCommand, getFormattingState, markActive, setTextStyle, splitTaskItem, type FormattingState } from './formatting';
+import { applyLink, getLinkTarget, linkEditingKey, linkEditingPlugin, normalizeLinkUrl, pasteLink, type LinkTarget } from './links';
+import { createListItemNodeView } from './plugins/list-item-view';
 
 /**
- * Run a Milkdown listener / DOM-event callback with error isolation.
- *
- * This matters most for `selectionUpdated`, which runs *inside* the ProseMirror transaction
- * `apply`: an uncaught throw there propagates out of `EditorState.apply`, aborting the whole
- * transaction. The practical effect is catastrophic and exactly the reported symptom cluster
- * — the edit is dropped, typing effects never run, autosave's debounce is never scheduled,
- * and the selection toolbar never updates. Because the caret moves on almost every edit, a
- * selection callback that throws on some doc/selection edge case bricks the editor for the
- * whole session.
- *
- * `markdownUpdated` (debounced) and the focus/blur + DOM handlers are wrapped for the same
- * defensive reason: these callbacks reach into `textBetween`, `selectionRect`, comment/
- * mention detection and host callbacks, any of which can throw on an unexpected input.
- * Swallow + log so one bad event can never disable these core canvas features.
+ * Host callbacks must not abort the editor's transaction or DOM-event pipeline.
+ * Report failures without disabling typing, autosave, or subsequent selections.
  */
 function runIsolated<T>(where: string, fn: () => T): T | undefined {
   try {
@@ -89,6 +77,7 @@ export interface MilkdownEditorHandle {
   applyMention(handle: string, from: number, to: number): { lineMarkdown: string; lineNumber: number } | null;
   /** Toggle an inline formatting mark over the current selection. */
   toggleMark(mark: FormatMark): void;
+  openLinkEditor(): void;
   focus(): void;
 }
 
@@ -120,6 +109,7 @@ export interface MilkdownEditorProps {
   onMentionQuery?: (info: MentionQuery | null) => void;
   /** Fired when a link is clicked, with its raw href (for whim:// / external routing). */
   onLinkClick?: (url: string) => void;
+  onLinkEditingChange?: (open: boolean) => void;
 }
 
 /** Detect an in-progress `@`-mention immediately before a collapsed caret. */
@@ -190,7 +180,7 @@ function replaceChangedRange(view: EditorView, nextDoc: ProseNode): void {
 
 const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
   function MilkdownInner(
-    { initialContent, onContentChanged, onFocus, onBlur, decorations, presence, commentThreads, commentAgentStatuses, activeCommentId, commentTrigger, resolveImageSrc, uploadFile, onCommentActivate, onSelectionChange, onMentionQuery, onLinkClick },
+    { initialContent, theme, onContentChanged, onFocus, onBlur, decorations, presence, commentThreads, commentAgentStatuses, activeCommentId, commentTrigger, resolveImageSrc, uploadFile, onCommentActivate, onSelectionChange, onMentionQuery, onLinkClick, onLinkEditingChange },
     ref,
   ) {
     // Latest callbacks via refs so the editor factory (created once) never goes stale.
@@ -208,6 +198,8 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
     onMentionQueryRef.current = onMentionQuery;
     const onLinkClickRef = useRef(onLinkClick);
     onLinkClickRef.current = onLinkClick;
+    const onLinkEditingChangeRef = useRef(onLinkEditingChange);
+    onLinkEditingChangeRef.current = onLinkEditingChange;
     const commentTriggerRef = useRef<CommentTrigger>(commentTrigger ?? 'caret');
     commentTriggerRef.current = commentTrigger ?? 'caret';
     const resolveImageSrcRef = useRef<ImageSrcResolver | undefined>(resolveImageSrc);
@@ -220,12 +212,57 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
     // by a programmatic replaceAll and skip the one echo that matches it, so a
     // host-initiated write isn't re-delivered as a user edit.
     const pendingEchoRef = useRef<string | null>(null);
+    const toolbarRef = useRef<HTMLDivElement>(null);
+    const [formatting, setFormatting] = useState<FormattingState | null>(null);
+    const [linkTarget, setLinkTarget] = useState<LinkTarget | null>(null);
+    const plainPasteRef = useRef(false);
+
+    const openLinkAt = useCallback((view: EditorView): boolean => {
+      const target = getLinkTarget(view.state);
+      if (!target) return false;
+      view.dispatch(view.state.tr.setMeta(linkEditingKey, target));
+      setLinkTarget(target);
+      return true;
+    }, []);
+
+    const reportSelection = useCallback((view: EditorView) => {
+      const { state } = view;
+      const { from, to, empty } = state.selection;
+      if (!empty) {
+        onMentionQueryRef.current?.(null);
+        const text = state.doc.textBetween(from, to, '\n', '\uFFFC');
+        const rect = selectionRect(view, from, to);
+        onSelectionChangeRef.current?.(rect && text.trim() ? { text, from, to, rect } : null);
+        return;
+      }
+      onSelectionChangeRef.current?.(null);
+      const range = commentThreadAt(state, from);
+      if (range) {
+        onCommentActivateRef.current?.(range.threadId, rectFromRange(view, range.from, range.to));
+      } else {
+        onCommentActivateRef.current?.(null, null);
+      }
+      const mention = detectMention(state);
+      const rect = mention ? rectFromRange(view, mention.from, mention.from) : null;
+      onMentionQueryRef.current?.(mention && rect ? { ...mention, rect } : null);
+    }, []);
+
+    useEffect(() => {
+      onLinkEditingChangeRef.current?.(linkTarget !== null);
+      return () => onLinkEditingChangeRef.current?.(false);
+    }, [linkTarget]);
 
     const { loading, get } = useEditor((root) => {
       return Editor.make()
         .config((ctx) => {
           ctx.set(rootCtx, root);
           ctx.set(defaultValueCtx, initialContent);
+          // Milkdown excludes app/file schemes from native hrefs. These links
+          // still need their supported destination for the host's click router.
+          ctx.set(linkAttr.key, mark => {
+            const href = normalizeLinkUrl(mark.attrs.href);
+            return href && /^(?:whim|file):/.test(href) ? { 'data-canvas-href': href } : {};
+          });
           ctx.update(editorViewOptionsCtx, (prev) => ({
             ...prev,
             attributes: {
@@ -235,15 +272,62 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
             nodeViews: {
               ...prev.nodeViews,
               image: createImageNodeView(resolveImageSrcRef),
+              list_item: createListItemNodeView,
             },
-            handlePaste: createImagePasteHandler(uploadFileRef),
+            handlePaste: (view, event, slice) => {
+              const plain = plainPasteRef.current;
+              plainPasteRef.current = false;
+              if (createImagePasteHandler(uploadFileRef)(view, event)) return true;
+              const text = event.clipboardData?.getData('text/plain');
+              const code = view.state.selection.$from.parent.type.spec.code || markActive(view.state, 'inlineCode');
+              if ((plain || code) && text && !event.clipboardData?.files.length) {
+                const tr = code
+                  ? view.state.tr.insertText(text.replace(/\r\n?/g, '\n'))
+                  : view.state.tr.replaceSelection(slice);
+                tr.setMeta('paste', true).setMeta('uiEvent', 'paste');
+                view.dispatch(closeHistory(tr).scrollIntoView());
+                return true;
+              }
+              return pasteLink(view, event);
+            },
+            handleKeyDown: (view, event) => {
+              plainPasteRef.current = event.shiftKey && (event.metaKey || event.ctrlKey) && (event.code === 'KeyV' || event.key.toLowerCase() === 'v');
+              if (event.altKey && event.key === 'F10') {
+                toolbarRef.current?.querySelector<HTMLElement>('select:not(:disabled), button:not(:disabled)')?.focus();
+                return true;
+              }
+              const platform = navigator.platform;
+              if (eventMatchesAccelerator(event, 'CommandOrControl+K', platform)) {
+                openLinkAt(view);
+                return true;
+              }
+              const shortcuts = [
+                ['CommandOrControl+B', 'strong'],
+                ['CommandOrControl+I', 'emphasis'],
+                ['CommandOrControl+E', 'inlineCode'],
+                ['CommandOrControl+Shift+X', 'strikethrough'],
+                ['CommandOrControl+Alt+8', 'bulletList'],
+                ['CommandOrControl+Alt+7', 'orderedList'],
+                ['CommandOrControl+Alt+9', 'taskList'],
+              ] as const;
+              for (const [shortcut, action] of shortcuts) {
+                if (eventMatchesAccelerator(event, shortcut, platform)) {
+                  formatCommand(action)(view.state, view.dispatch, view);
+                  return true;
+                }
+              }
+              if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+                return splitTaskItem(view.state, view.dispatch, view);
+              }
+              return false;
+            },
             handleDOMEvents: {
               ...prev.handleDOMEvents,
               click: (_view, event) => runIsolated('linkClick', () => {
                 const target = event.target as HTMLElement | null;
                 const a = target?.closest?.('a') as HTMLAnchorElement | null;
                 if (!a) return false;
-                const href = a.getAttribute('href');
+                const href = a.getAttribute('data-canvas-href') || a.getAttribute('href');
                 if (!href) return false;
                 event.preventDefault();
                 onLinkClickRef.current?.(href);
@@ -276,39 +360,6 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
           }));
           l.focus(() => runIsolated('focus', () => onFocusRef.current?.()));
           l.blur(() => runIsolated('blur', () => onBlurRef.current?.()));
-          l.selectionUpdated((sctx, selection) => runIsolated('selectionUpdated', () => {
-            const view = sctx.get(editorViewCtx);
-            const { from, to, empty } = selection;
-            if (!empty) {
-              onMentionQueryRef.current?.(null);
-              const text = view.state.doc.textBetween(from, to, '\n', '\uFFFC');
-              const rect = selectionRect(view, from, to);
-              if (rect && text.trim()) {
-                onSelectionChangeRef.current?.({ text, from, to, rect });
-              } else {
-                onSelectionChangeRef.current?.(null);
-              }
-              return;
-            }
-            // Collapsed caret: surface the comment thread under the caret, if any.
-            onSelectionChangeRef.current?.(null);
-            const range = commentThreadAt(view.state, from);
-            if (range) {
-              const rect = rectFromRange(view, range.from, range.to);
-              onCommentActivateRef.current?.(range.threadId, rect);
-            } else {
-              onCommentActivateRef.current?.(null, null);
-            }
-            // Surface any in-progress @-mention query for the suggestion popup.
-            const mention = detectMention(view.state);
-            if (mention) {
-              const rect = rectFromRange(view, mention.from, mention.from);
-              if (rect) onMentionQueryRef.current?.({ ...mention, rect });
-              else onMentionQueryRef.current?.(null);
-            } else {
-              onMentionQueryRef.current?.(null);
-            }
-          }));
         })
         .use(commonmark)
         .use(gfm)
@@ -319,8 +370,47 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
         .use(typingEffectsPlugin)
         .use(hostDecorationPlugin)
         .use(commentPlugin)
-        .use(presencePlugin);
+        .use(presencePlugin)
+        .use($prose(() => linkEditingPlugin))
+        .use($prose(() => new Plugin({
+          view(view) {
+            const update = (view: EditorView, previous?: EditorState) => {
+              runIsolated('formattingUpdated', () => {
+                const next = getFormattingState(view.state);
+                setFormatting(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
+              });
+              // Milkdown's selection listener runs during state.apply, before
+              // the view has its new document (or even its initial state).
+              if (!previous || previous.doc !== view.state.doc || !previous.selection.eq(view.state.selection)) {
+                runIsolated('selectionUpdated', () => reportSelection(view));
+              }
+            };
+            update(view);
+            return { update };
+          },
+        })));
     }, []);
+
+    const runCommand = useCallback((command: Command) => {
+      get()?.action(ctx => {
+        const view = ctx.get(editorViewCtx);
+        command(view.state, view.dispatch, view);
+        view.focus();
+      });
+    }, [get]);
+
+    const openLinkEditor = useCallback(() => {
+      get()?.action(ctx => openLinkAt(ctx.get(editorViewCtx)));
+    }, [get, openLinkAt]);
+
+    const cancelLink = useCallback(() => {
+      get()?.action(ctx => {
+        const view = ctx.get(editorViewCtx);
+        view.dispatch(view.state.tr.setMeta(linkEditingKey, null));
+        view.focus();
+      });
+      setLinkTarget(null);
+    }, [get]);
 
     // Dispatch a plugin meta transaction, tolerating a torn-down view (can happen
     // under React StrictMode's mount→destroy→remount with async editor create).
@@ -444,13 +534,9 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
           });
         },
         toggleMark: (mark: FormatMark) => {
-          const ed = get();
-          if (!ed) return;
-          const command = MARK_COMMANDS[mark];
-          if (!command) return;
-          ed.action(callCommand(command.key));
-          ed.action((ctx) => ctx.get(editorViewCtx).focus());
+          runCommand(formatCommand(mark));
         },
+        openLinkEditor,
         focus: () => {
           get()?.action((ctx) => {
             const view = ctx.get(editorViewCtx);
@@ -458,10 +544,37 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
           });
         },
       }),
-      [get],
+      [get, openLinkEditor, runCommand],
     );
 
-    return <Milkdown />;
+    return (
+      <div className="md-editor">
+        <EditorToolbar
+          ref={toolbarRef}
+          state={formatting}
+          onAction={action => runCommand(formatCommand(action))}
+          onTextStyle={style => runCommand(setTextStyle(style))}
+          onLink={openLinkEditor}
+          onReturnToEditor={() => get()?.action(ctx => ctx.get(editorViewCtx).focus())}
+        />
+        <Milkdown />
+        {linkTarget && (
+          <LinkEditor
+            target={linkTarget}
+            theme={theme}
+            onApply={(href, text) => {
+              const editor = get();
+              if (!editor) return 'The editor is not ready. Try again.';
+              const error = editor.action(ctx => applyLink(ctx.get(editorViewCtx), href, text));
+              if (!error) setLinkTarget(null);
+              return error;
+            }}
+            onCancel={cancelLink}
+            onOpen={onLinkClick}
+          />
+        )}
+      </div>
+    );
   },
 );
 

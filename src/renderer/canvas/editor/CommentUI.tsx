@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Bold, Italic, Strikethrough, Code, MessageSquarePlus, GitFork, FileOutput, Check, Trash2, CornerDownLeft } from 'lucide-react';
+import { Bold, Italic, Strikethrough, Code, Link, MessageSquarePlus, GitFork, FileOutput, Check, Trash2, CornerDownLeft } from 'lucide-react';
 import type { CanvasAgentInteraction, CanvasThreadAgentStatus, CommentThread } from '../types';
 import type { Rect, FormatMark } from './geometry';
 import { useAnchoredPosition } from './floating';
@@ -270,23 +270,25 @@ interface SelectionAction {
 }
 
 /**
- * Bold and italic belong to the editor's own keymap. They are listed here so
+ * Formatting actions belong to the editor's own keymap. They are listed here so
  * the tooltip can show the shortcut, but the toolbar must not claim them —
  * intercepting them would take the action away from ProseMirror and out of its
  * undo history.
  */
-const EDITOR_OWNED_ACTIONS = new Set(['strong', 'emphasis']);
+const EDITOR_OWNED_ACTIONS = new Set(['strong', 'emphasis', 'strikethrough', 'inlineCode', 'link']);
 
 /** Floating toolbar shown over a text selection. */
 export function SelectionToolbar({
   rect,
   onFormat,
+  onLink,
   onComment,
   onFork,
   onExtract,
 }: {
   rect: Rect;
   onFormat: (mark: FormatMark) => void;
+  onLink?: () => void;
   onComment: () => void;
   onFork?: () => void;
   onExtract?: () => void;
@@ -299,10 +301,11 @@ export function SelectionToolbar({
     { id: 'emphasis', label: 'Italic', accelerator: 'CommandOrControl+I', icon: <Italic size={14} />, run: () => onFormat('emphasis') },
     { id: 'strikethrough', label: 'Strikethrough', accelerator: 'CommandOrControl+Shift+X', icon: <Strikethrough size={14} />, run: () => onFormat('strikethrough') },
     { id: 'inlineCode', label: 'Inline code', accelerator: 'CommandOrControl+E', icon: <Code size={14} />, run: () => onFormat('inlineCode') },
+    ...(onLink ? [{ id: 'link', label: 'Insert or edit link', accelerator: 'CommandOrControl+K', icon: <Link size={14} />, run: onLink }] : []),
     { id: 'comment', label: 'Comment', accelerator: 'CommandOrControl+Shift+M', icon: <MessageSquarePlus size={14} />, text: 'Comment', run: onComment },
     ...(onFork ? [{ id: 'fork', label: 'Fork to new space', accelerator: 'CommandOrControl+Shift+F', icon: <GitFork size={14} />, run: onFork }] : []),
     ...(onExtract ? [{ id: 'extract', label: 'Extract to page', accelerator: 'CommandOrControl+Shift+O', icon: <FileOutput size={14} />, run: onExtract }] : []),
-  ]), [onFormat, onComment, onFork, onExtract]);
+  ]), [onFormat, onLink, onComment, onFork, onExtract]);
 
   // The toolbar only exists while there is a selection, so binding the
   // accelerators to its lifetime is what scopes them: no selection, no

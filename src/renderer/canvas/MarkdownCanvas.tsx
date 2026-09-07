@@ -292,6 +292,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     // Comment UI state
     const [activeComment, setActiveComment] = useState<{ id: string; rect: Rect } | null>(null);
     const [selection, setSelection] = useState<SelectionInfo | null>(null);
+    const [linkEditing, setLinkEditing] = useState(false);
     const [composer, setComposer] = useState<{ quote: string; anchor: { prefix?: string; suffix?: string; kind?: string }; rect: Rect } | null>(null);
 
     // Mention suggestion state
@@ -910,7 +911,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
 
     // Intercept navigation keys while the mention popup is open (before the editor).
     useEffect(() => {
-      if (!mentionQuery) return;
+      if (!mentionQuery || linkEditing) return;
       const handler = (e: KeyboardEvent) => {
         const list = mentionCandidatesRef.current;
         if (list.length === 0) {
@@ -934,7 +935,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       };
       document.addEventListener('keydown', handler, true);
       return () => document.removeEventListener('keydown', handler, true);
-    }, [mentionQuery, applySelectedMention, closeMentionQuery]);
+    }, [mentionQuery, linkEditing, applySelectedMention, closeMentionQuery]);
 
     // File drag-and-drop handler
     useEffect(() => {
@@ -1119,6 +1120,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
                 onSelectionChange={handleSelectionChange}
                 onMentionQuery={handleMentionQuery}
                 onLinkClick={handleLinkClick}
+                onLinkEditingChange={setLinkEditing}
               />
               {isTranscribing && (
                 <div className="canvas-voice-transcribing-bar">
@@ -1134,16 +1136,17 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
                 disabled={isTranscribing}
               />
             </div>
-            {selection && !composer && (
+            {selection && !composer && !linkEditing && (
               <SelectionToolbar
                 rect={selection.rect}
                 onFormat={handleFormat}
+                onLink={() => editorRef.current?.openLinkEditor()}
                 onComment={handleStartComment}
                 onFork={onForkSelection ? () => { onForkSelection(selection.text); setSelection(null); } : undefined}
                 onExtract={onExtractToPage ? () => { onExtractToPage(selection.text); setSelection(null); } : undefined}
               />
             )}
-            {composer && (
+            {composer && !linkEditing && (
               <CommentComposer
                 rect={composer.rect}
                 quote={composer.quote}
@@ -1152,7 +1155,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
                 onCancel={() => setComposer(null)}
               />
             )}
-            {activeThread && activeComment && (
+            {activeThread && activeComment && !linkEditing && (
               <CommentPopover
                 thread={activeThread}
                 rect={activeComment.rect}
@@ -1180,7 +1183,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
                 onClose={() => setActiveComment(null)}
               />
             )}
-            {mentionQuery && mentionCandidates.length > 0 && (
+            {mentionQuery && mentionCandidates.length > 0 && !linkEditing && (
               <MentionPopup
                 rect={mentionQuery.rect}
                 candidates={mentionCandidates}

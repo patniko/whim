@@ -105,13 +105,38 @@ The canvas is a rich markdown editor where you flesh out your intents.
 
 ### Editing
 
-The canvas supports:
-- Headings, bold, italic, strikethrough
-- Bullet and numbered lists
-- Code blocks with syntax highlighting
-- Links and images
-- File attachments (paste or drag-drop)
-- Comments and threads
+The formatting toolbar stays visible while you scroll. It includes text styles
+(normal text, headings, and code blocks), bold, italic, strikethrough, inline code,
+links, bulleted lists, numbered lists, checklists, block quotes, list indentation,
+and undo/redo. Active formatting is highlighted; unavailable actions are disabled.
+Markdown typing shortcuts still work.
+
+Select text before applying inline formatting, or toggle it at the caret before
+typing. List buttons convert the current list to the chosen type; pressing the
+active list button removes the selected items from that list. Use **Tab** and
+**Shift+Tab**, or the indentation buttons, to nest and unnest items. Checklist boxes
+can be clicked or toggled with **Space** when focused. **Enter** continues a checklist
+with an unchecked item; **Enter** on an empty item exits it.
+
+Press **Alt+F10** to focus the toolbar. Use Tab or the arrow keys to move between
+controls, and **Escape** to return to the document.
+
+### Links and Pasting
+
+- Select text and click the **link** button (in either toolbar), or press
+  **Cmd/Ctrl+K**, to turn it into a link. With no selection, enter link text and an
+  address to insert a new link at the caret.
+- Place the caret in an existing link, or select it, then use **Cmd/Ctrl+K** to
+  change its text/address, open it, or remove the link while keeping the text.
+- Paste a single URL over selected text to link that text without replacing it.
+  Paste at the caret to insert a clickable URL. Existing bold/italic formatting
+  is preserved.
+- **Cmd/Ctrl+Shift+V** pastes plain text without interpreting links or Markdown.
+  URLs pasted into code remain literal text. Regular rich-text/Markdown pastes
+  and image attachments keep their existing behavior.
+
+The canvas also supports images, file attachments (paste or drag-drop), and
+comments with threads.
 
 ### Saving
 
@@ -320,6 +345,13 @@ This path is fixed for every build (development and installed), so your settings
 | `↑ / ↓` | Navigate intent/agent list |
 | `← / →` | Switch between Spaces / Workers / Past tabs |
 | `Cmd+S` | Save canvas |
+| `Cmd/Ctrl+K` | Insert or edit a link |
+| `Cmd/Ctrl+B` / `Cmd/Ctrl+I` | Bold / italic |
+| `Cmd/Ctrl+E` / `Cmd/Ctrl+Shift+X` | Inline code / strikethrough |
+| `Cmd/Ctrl+Alt+8` / `Cmd/Ctrl+Alt+7` / `Cmd/Ctrl+Alt+9` | Bulleted list / numbered list / checklist |
+| `Cmd/Ctrl+Z` / `Cmd/Ctrl+Shift+Z` | Undo / redo |
+| `Cmd/Ctrl+Shift+V` | Paste plain text |
+| `Alt+F10` | Focus the formatting toolbar |
 
 ---
 

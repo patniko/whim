@@ -88,15 +88,25 @@ describe('SelectionToolbar', () => {
     expect(onFormat).not.toHaveBeenCalled();
   });
 
-  it('claims the marks the editor keymap does not provide', () => {
+  it('leaves inline code and strikethrough to the editor keymap too', () => {
     const onFormat = vi.fn();
     render({ onFormat });
 
     press('x', { shift: true });
     press('e');
 
-    expect(onFormat).toHaveBeenCalledWith('strikethrough');
-    expect(onFormat).toHaveBeenCalledWith('inlineCode');
+    expect(onFormat).not.toHaveBeenCalled();
+  });
+
+  it('offers a link action without stealing the editor shortcut', () => {
+    const onLink = vi.fn();
+    render({ onLink });
+    const button = document.querySelector<HTMLButtonElement>('[aria-label="Insert or edit link"]')!;
+    act(() => button.click());
+    expect(onLink).toHaveBeenCalledTimes(1);
+
+    press('k');
+    expect(onLink).toHaveBeenCalledTimes(1);
   });
 
   it('stops listening once the selection is gone', () => {

@@ -24,5 +24,5 @@ export interface MentionQuery {
   rect: Rect;
 }
 
-/** Inline formatting marks the selection toolbar can toggle. */
+/** Inline formatting marks supported by the editor controls. */
 export type FormatMark = 'strong' | 'emphasis' | 'inlineCode' | 'strikethrough';
