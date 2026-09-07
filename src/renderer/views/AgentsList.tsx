@@ -384,7 +384,7 @@ export function AgentsList(props: AgentsListProps): React.ReactElement {
       />
     );
     return <>{agentState.page && <PageControls nextCursor={agentState.page.nextCursor}
-      total={agentState.page.total} count={0} scope={props.filterQuery ?? ''}
+      scope={props.filterQuery ?? ''}
       load={cursor => loadAgentsSnapshot(getAPI(), { cursor, invalidate: true })} />}{empty}</>;
   }
 
@@ -393,8 +393,8 @@ export function AgentsList(props: AgentsListProps): React.ReactElement {
 
   return (
     <>
-      {agentState.page && <PageControls nextCursor={agentState.page.nextCursor} total={agentState.page.total}
-        count={sorted.length} scope={props.filterQuery ?? ''}
+      {agentState.page && <PageControls nextCursor={agentState.page.nextCursor}
+        scope={props.filterQuery ?? ''}
         load={cursor => loadAgentsSnapshot(getAPI(), { cursor, invalidate: true })} />}
       <VirtualRows rows={sorted} rowId={agent => agent.agentId} selectedIndex={selectedIndex} total={agentState.page?.total} offset={agentState.page?.offset}
         render={(agent, idx) => {

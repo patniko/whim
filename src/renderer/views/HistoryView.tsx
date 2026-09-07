@@ -92,7 +92,7 @@ export function HistoryView({ onCardClick, onUnarchive }: HistoryViewProps): Rea
   if (page) {
     return <>
       <ActivityStatsPanel />
-      <PageControls nextCursor={page.nextCursor} total={page.total} count={page.items.length} scope="history"
+      <PageControls nextCursor={page.nextCursor} scope="history"
         load={cursor => loadHistorySnapshot(getAPI(), 60, { cursor, invalidate: true })} />
       <VirtualRows rows={page.items} rowId={row => row.key} total={page.total} offset={page.offset} render={row =>
         <section aria-label={new Date(row.at).toLocaleDateString()}>

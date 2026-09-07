@@ -113,7 +113,7 @@ export function SpaceLinkPicker({ onSelect, onDismiss }: SpaceLinkPickerProps) {
             </div>
           ))}
         </div>
-        {page && <PageControls nextCursor={page.nextCursor} total={page.total} count={results.length} scope={query} load={loadPage} />}
+        {page && <PageControls nextCursor={page.nextCursor} scope={query} load={loadPage} />}
       </div>
     </div>
   );

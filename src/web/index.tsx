@@ -538,8 +538,8 @@ function SpacesView({ client, spaces, agents, page, onPage, onRefresh, onOpenSpa
 
       <input className="search" value={query} onChange={(e) => { void search(e.target.value).catch(error => console.error('[search]', error)); }} placeholder="Search spaces" />
       {searchError && <p role="alert">{searchError}</p>}
-      <PageControls nextCursor={(searchPage ?? page).nextCursor} total={(searchPage ?? page).total}
-        count={list.length} scope={query} load={cursor => query ? search(query, cursor) : onPage(cursor)} />
+      <PageControls nextCursor={(searchPage ?? page).nextCursor}
+        scope={query} load={cursor => query ? search(query, cursor) : onPage(cursor)} />
 
       {list.length === 0 && <Empty icon="🎯" title={results ? 'No matching spaces' : 'No spaces yet'} detail={results ? 'Try another search.' : 'Capture an intent above to get started.'} />}
 
@@ -641,7 +641,7 @@ function WorkersView({ client, agents, personas, page, onPage, onRefresh, onOpen
       {agents.length === 0 && <Empty icon="🤖" title="No workers" detail="Deploy an agent from a canvas or with + New." />}
 
       <div className="space-list">
-        <PageControls nextCursor={page.nextCursor} total={page.total} count={agents.length} scope="workers" load={onPage} />
+        <PageControls nextCursor={page.nextCursor} scope="workers" load={onPage} />
         <VirtualRows rows={agents} rowId={agent => agent.agentId} total={page.total} offset={page.offset} render={agent => (
           <WorkerCard key={agent.agentId} client={client} agent={agent} onRefresh={onRefresh} onOpen={() => onOpenAgent(agent.agentId)} />
         )} />
@@ -750,7 +750,7 @@ function HistoryView({ client, page, onPage, onRefresh, onOpenSpace }: {
         <span className="stat-sep" />
         <div className="stat"><span className="stat-value">{page.closedCounts.total}</span> closed</div>
       </div>}
-      <PageControls nextCursor={page.nextCursor} total={page.total} count={page.items.length} scope="activity" load={onPage} />
+      <PageControls nextCursor={page.nextCursor} scope="activity" load={onPage} />
       {page.items.length === 0 && <Empty icon="✨" title="No activity yet" detail="Complete a space to see it here." />}
       <div className="space-list">
         <VirtualRows rows={page.items} rowId={row => row.key} total={page.total} offset={page.offset} render={row => (
@@ -969,7 +969,7 @@ function CanvasScreen({ client, space, agentUpdates, personas, onClose, onOpenAg
           {panel === 'workers' && (
             <>
               {workerError && <p role="alert">{workerError}</p>}
-              <PageControls nextCursor={workerPage.nextCursor} total={workerPage.total} count={workerPage.items.length}
+              <PageControls nextCursor={workerPage.nextCursor}
                 scope={`canvas:${space.id}`} load={loadWorkers} />
               <CanvasWorkers client={client} space={space} target={target} agents={workerPage.items} personas={personas} selection={() => readSelection(textRef.current)} onOpenAgent={onOpenAgent} onRefreshAgents={onRefreshAgents} />
             </>

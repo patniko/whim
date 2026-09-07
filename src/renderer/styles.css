@@ -4863,6 +4863,51 @@ body.dark .emoji-picker-popup {
   font-style: italic;
 }
 
+.list-navigation {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  font-size: var(--fs-caption);
+  color: var(--text-muted);
+}
+
+.list-navigation button {
+  appearance: none;
+  border: 0;
+  border-radius: var(--btn-radius);
+  padding: var(--space-3) var(--space-5);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.list-navigation button:hover:not(:disabled) {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent-text);
+}
+
+.list-navigation button:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+.list-navigation button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.list-navigation [role="alert"] {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--color-danger-text);
+  text-align: center;
+}
+
 .empty-state {
   display: flex;
   flex-direction: column;

@@ -2764,7 +2764,7 @@ async function submitCapture(): Promise<void> {
     showStatus('Select a workspace first; capture text has been kept.', true);
     return;
   }
-  if (text) await waitForCaptureStorage(bridgeApi, () => generation === getWorkspaceGeneration());
+  if (text && await waitForCaptureStorage(bridgeApi, () => generation === getWorkspaceGeneration()) !== 'ready') return;
 
   if (text && await invokeSkillFromPrompt(descInput.value.trim())) {
     return;
@@ -6871,7 +6871,11 @@ whimAPI.getSetting('workspace_root').then(async ws => {
     // they render empty states while no workspace is configured.
     mountReactLists();
   } else if (!isSettingsMode && !isCanvasMode) {
-    await waitForCaptureStorage(bridgeApi, () => bootWorkspaceGeneration === getWorkspaceGeneration());
+    const readiness = await waitForCaptureStorage(bridgeApi, () => bootWorkspaceGeneration === getWorkspaceGeneration());
+    if (readiness === 'superseded') {
+      finishCaptureTiming(false);
+      return;
+    }
     finishCaptureTiming();
     // Capture is usable before collection hydration and optional services.
     await loadSpacesSnapshot(bridgeApi);
@@ -6884,8 +6888,9 @@ whimAPI.getSetting('workspace_root').then(async ws => {
   // exact failure this catch exists to end: a page that renders nothing and
   // says nothing. Mounting is idempotent, so recovering here is safe.
   finishCaptureTiming(false);
+  if (bootWorkspaceGeneration !== getWorkspaceGeneration()) return;
   console.error('[boot] startup failed', err);
-  showStatus(err instanceof Error ? err.message : 'Storage could not start; text is kept.', true);
+  showStatus("Couldn't open your workspace. Your text is still here; please try again shortly.", true);
 });
 
 // Load personas in the main window so the @-mention dropdown on the Workers

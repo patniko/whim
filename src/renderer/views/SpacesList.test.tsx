@@ -61,6 +61,7 @@ beforeEach(() => {
   host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
+  spaceStore.reset();
   spaceStore.setSpaces(spaces);
   spaceStore.setFocusedSpace(null);
   skillStore.setSkills([scheduledSkill()]);
@@ -73,12 +74,20 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   host.remove();
-  spaceStore.setSpaces([]);
+  spaceStore.reset();
   skillStore.setSkills([]);
   agentStore.reset();
   vi.unstubAllGlobals();
 });
 describe('SpacesList history expansion', () => {
+  it('shows a complete 44-space list without paging bookkeeping', () => {
+    const items = Array.from({ length: 44 }, (_, i) => space(`Space ${i}`, null));
+    spaceStore.setPage({ items, total: 44, nextCursor: null, counts: { open: 44, closed: 0 } });
+    act(() => root.render(<SpacesList {...actions} />));
+    expect(host.querySelector('[data-id="Space 0"]')).not.toBeNull();
+    expect(host.querySelector('nav')).toBeNull();
+    expect(host.textContent).not.toMatch(/shown|total|Previous|Next/);
+  });
   it('expands known history and reports visible row order for keyboard navigation', () => {
     act(() => root.render(<SpacesList {...actions} />));
     expect(host.querySelector('[data-id="older"]')).toBeNull();

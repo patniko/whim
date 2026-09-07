@@ -321,13 +321,13 @@ export function SpacesList(props: SpacesListProps): React.ReactElement {
         cta={{ label: 'Capture a space', onClick: focusCaptureInput }}
       />
     );
-    return <>{page && <PageControls nextCursor={page.nextCursor} total={page.total} count={0}
+    return <>{page && <PageControls nextCursor={page.nextCursor}
       scope={`${filter}:${activeSearchQuery}`} load={cursor => loadSpacesSnapshot(getAPI(), { cursor, invalidate: true })} />}{empty}</>;
   }
 
   return (
     <>
-      {page && <PageControls nextCursor={page.nextCursor} total={page.total} count={page.items.length}
+      {page && <PageControls nextCursor={page.nextCursor}
         scope={`${filter}:${activeSearchQuery}`} load={cursor => loadSpacesSnapshot(getAPI(), { cursor, invalidate: true })} />}
       <VirtualRows rows={grouped.current} rowId={space => space.id} render={renderRow}
         selectedIndex={selectedIndex} total={page?.total} offset={page?.offset} />
@@ -341,7 +341,7 @@ export function SpacesList(props: SpacesListProps): React.ReactElement {
               else next.add(group.skillId);
               return next;
             })}>
-            {expandedHistory.has(group.skillId) ? '▾' : '▸'} {group.name} history{page ? ' on this page' : ''} ({group.spaces.length})
+            {expandedHistory.has(group.skillId) ? '▾' : '▸'} {group.name} history ({group.spaces.length})
           </button>
           {expandedHistory.has(group.skillId) ? <VirtualRows rows={group.spaces} rowId={space => space.id} render={renderRow}
             selectedIndex={group.spaces.findIndex(space => visibleIndexes.get(space.id) === selectedIndex)} /> : null}

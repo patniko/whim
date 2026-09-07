@@ -3,14 +3,10 @@ import React from "react";
 /** Page replacement bounds retained list data; navigation never drains all pages. */
 export function PageControls({
   nextCursor,
-  total,
-  count,
   load,
   scope,
 }: {
   nextCursor: string | null;
-  total: number;
-  count: number;
   load: (cursor?: string) => Promise<void>;
   scope: string;
 }) {
@@ -21,8 +17,11 @@ export function PageControls({
   const admitted = React.useRef(false);
   React.useEffect(() => {
     generation.current++;
+    admitted.current = false;
+    setBusy(false);
     setCursors([undefined]);
     setError("");
+    return () => { generation.current++; };
   }, [scope]);
   const navigate = async (next: Array<string | undefined>) => {
     if (admitted.current) return;
@@ -34,33 +33,35 @@ export function PageControls({
       await load(next[next.length - 1]);
       if (generation.current === epoch) setCursors(next);
     } catch (failure) {
-      if (generation.current === epoch)
-        setError(failure instanceof Error ? failure.message : "Could not load page");
+      if (generation.current === epoch) {
+        console.error("[list] navigation failed", failure);
+        setError("Couldn't load more items. Please try again.");
+      }
     } finally {
-      admitted.current = false;
-      setBusy(false);
+      if (generation.current === epoch) {
+        admitted.current = false;
+        setBusy(false);
+      }
     }
   };
+  if (!nextCursor && cursors.length < 2 && !busy && !error) return null;
   return (
-    <nav aria-label="List pages">
-      <span role="status">
-        {count} shown / {total} total
-      </span>{" "}
-      <button
+    <nav className="list-navigation" aria-label="Browse list" aria-busy={busy}>
+      {cursors.length > 1 && <button
         type="button"
-        disabled={busy || cursors.length < 2}
+        disabled={busy}
         onClick={() => void navigate(cursors.slice(0, -1))}
       >
-        Previous page
-      </button>{" "}
-      <button
+        Previous
+      </button>}
+      {nextCursor && <button
         type="button"
-        disabled={busy || !nextCursor}
+        disabled={busy}
         onClick={() => nextCursor && void navigate([...cursors, nextCursor])}
       >
-        Next page
-      </button>
-      {busy && <span role="status"> Loading...</span>}
+        Next
+      </button>}
+      {busy && <span role="status">Loading...</span>}
       {error && <p role="alert">{error}</p>}
     </nav>
   );

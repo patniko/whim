@@ -21,6 +21,12 @@ afterEach(() => {
 });
 
 describe("bounded list navigation", () => {
+  it("renders no bookkeeping or controls when the whole list fits", () => {
+    const load = vi.fn();
+    act(() => root.render(<PageControls nextCursor={null} scope="spaces" load={load} />));
+    expect(host.innerHTML).toBe("");
+    expect(load).not.toHaveBeenCalled();
+  });
   it("anchors variable-height prepends using stable IDs rather than page indices", async () => {
     const scroll = document.documentElement;
     scroll.scrollTop = 0;
@@ -76,21 +82,43 @@ describe("bounded list navigation", () => {
     );
     act(() =>
       root.render(
-        <PageControls nextCursor="next" total={1000} count={60} scope="spaces" load={load} />,
+        <PageControls nextCursor="next" scope="spaces" load={load} />,
       ),
     );
     expect(load).not.toHaveBeenCalled();
     await act(async () => {
-      host.querySelectorAll("button")[1].click();
-      host.querySelectorAll("button")[1].click();
+      host.querySelector("button")!.click();
+      host.querySelector("button")!.click();
     });
     expect(load).toHaveBeenCalledExactlyOnceWith("next");
     await act(async () => resolve());
     load.mockRejectedValueOnce(new Error("Unavailable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
     await act(async () => host.querySelectorAll("button")[0].click());
-    expect(host.querySelector("[role=alert]")?.textContent).toBe("Unavailable");
-    expect(host.textContent).toContain("1000 total");
+    expect(host.querySelector("[role=alert]")?.textContent).toBe("Couldn't load more items. Please try again.");
+    expect(host.textContent).not.toMatch(/Unavailable|shown|total|page/);
+    expect(log).toHaveBeenCalledWith("[list] navigation failed", expect.any(Error));
     expect(host.querySelectorAll("button")[0].disabled).toBe(false);
+  });
+  it("keeps a way back from the final batch without showing a disabled next control", async () => {
+    const load = vi.fn().mockResolvedValue(undefined);
+    act(() => root.render(<PageControls nextCursor="last" scope="spaces" load={load} />));
+    expect(host.querySelectorAll("button")).toHaveLength(1);
+    await act(async () => host.querySelector("button")!.click());
+    act(() => root.render(<PageControls nextCursor={null} scope="spaces" load={load} />));
+    expect(host.querySelectorAll("button")).toHaveLength(1);
+    expect(host.querySelector("button")?.textContent).toBe("Previous");
+    await act(async () => host.querySelector("button")!.click());
+    expect(load).toHaveBeenLastCalledWith(undefined);
+  });
+  it("drops old navigation errors and pending state when the list scope changes", async () => {
+    let reject!: (error: Error) => void;
+    const load = vi.fn(() => new Promise<void>((_, fail) => { reject = fail; }));
+    act(() => root.render(<PageControls nextCursor="old" scope="old" load={load} />));
+    await act(async () => host.querySelector("button")!.click());
+    act(() => root.render(<PageControls nextCursor={null} scope="new" load={load} />));
+    await act(async () => reject(new Error("Internal stale cursor")));
+    expect(host.innerHTML).toBe("");
   });
   it("uses global row ordinals on later pages", () => {
     act(() =>
