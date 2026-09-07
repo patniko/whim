@@ -17,6 +17,9 @@ const mockSession = {
   getEvents: vi.fn().mockResolvedValue([{ type: 'assistant.message', content: 'hello' }]),
   on: vi.fn(),
   rpc: {
+    eventLog: {
+      read: vi.fn().mockResolvedValue({ events: [], cursor: 'history-tail', hasMore: false }),
+    },
     remote: {
       enable: vi.fn().mockResolvedValue({ remoteSteerable: true, url: 'https://mock-remote.example/initial' }),
       disable: vi.fn().mockResolvedValue(undefined),
@@ -63,18 +66,34 @@ vi.mock('./ai', () => ({
   }),
 }));
 
-vi.mock('./database', () => ({
+vi.mock('./storage', async () => ({
+  appendSpaceActivity: vi.fn(),
+  ...(await import('./workspace')),
+  ...(await import('./services/skill-schedule-store')),
+  ...(await import('./canvas/artifact-store')),
+  documentMatches: (await import('./storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   createCanvasAgent: vi.fn(),
   updateCanvasAgentStatus: vi.fn(),
   createAgentSession: vi.fn(),
   updateAgentSessionStatus: vi.fn(),
+  updateAgentSessionYolo: vi.fn(),
   deleteAgentSession: vi.fn(),
   updateAgentSessionId: vi.fn(),
   getAgentSession: vi.fn(),
   listAgentSessions: vi.fn().mockReturnValue([]),
+  isInitialized: vi.fn().mockReturnValue(true),
   appendAgentChatEvent: vi.fn().mockReturnValue(1),
   listAgentChatEvents: vi.fn().mockReturnValue([]),
   clearAgentChatEvents: vi.fn(),
+  listAgentHistoryPage: vi.fn(),
+  openRuntimeHistory: vi.fn(),
+  appendRuntimeHistory: vi.fn(),
+  queryRuntimeHistory: vi.fn(),
+  assertWorkspaceContext: vi.fn(),
 }));
 
 vi.mock('./workspace', () => ({
@@ -95,6 +114,25 @@ vi.mock('./mcp', () => ({
 
 const mockCliTools = vi.fn().mockReturnValue([]);
 const mockSetConfigValue = vi.fn();
+const scheduledMocks = vi.hoisted(() => ({
+  context: { invocation: { scheduleId: 'schedule-1', runId: 'run-1' } },
+  createContext: vi.fn(),
+  publishTool: { name: 'publish_scheduled_result', handler: vi.fn() },
+  permission: vi.fn(() => ({ kind: 'reject' })),
+  blocked: vi.fn(),
+  finish: vi.fn(() => ({ status: 'ready', summary: '3 messages need a reply' })),
+  complete: vi.fn(),
+}));
+vi.mock('./services/scheduled-result', () => ({
+  createScheduledResultContext: scheduledMocks.createContext,
+  createPublishScheduledResultTool: () => scheduledMocks.publishTool,
+  scheduledPermissionDecision: scheduledMocks.permission,
+  markScheduledInteractionBlocked: scheduledMocks.blocked,
+  finishScheduledResult: scheduledMocks.finish,
+}));
+vi.mock('./services/skill-schedule-store', () => ({
+  completeScheduledRun: scheduledMocks.complete,
+}));
 vi.mock('./config', async () => {
   const { DEFAULT_SANDBOX_POLICY } = await vi.importActual<typeof import('../shared/ipc-contract')>('../shared/ipc-contract');
   return {
@@ -155,6 +193,7 @@ import {
   stopCliExitMonitor,
   setAgentModel,
   getAgentHistory,
+  getAgentHistoryPage,
   setAgentYolo,
   setAppRemote,
   getRemoteState,
@@ -165,7 +204,8 @@ import {
 } from './agent-service';
 import { getCopilotClient, ensureEphemeralCopilotClient } from './ai';
 import { InMemoryFsProvider } from './agents/in-memory-fs-provider';
-import { createCanvasAgent, createAgentSession, updateAgentSessionStatus, updateAgentSessionId, getAgentSession, listAgentSessions, listAgentChatEvents } from './database';
+import { createCanvasAgent, createAgentSession, updateAgentSessionStatus, updateAgentSessionId, getAgentSession, listAgentSessions, listAgentChatEvents } from './storage';
+import { listAgentHistoryPage, openRuntimeHistory, queryRuntimeHistory } from './storage';
 import { getConfig } from './config';
 import { launchSessionInTerminal } from './session';
 import { v4 as uuid } from 'uuid';
@@ -273,7 +313,7 @@ describe('launchAgent', () => {
     mockSession.send.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
     uuidCounter = 0;
-    vi.mocked(uuid).mockImplementation(() => `agent-${++uuidCounter}`);
+    vi.mocked<() => string>(uuid).mockImplementation(() => `agent-${++uuidCounter}`);
   });
 
   it('returns error when Copilot client is null', async () => {
@@ -378,9 +418,9 @@ describe('launchAgent', () => {
 
   it('ignores idle and reports cancellation while the initial prompt is pending', async () => {
     enableMockClient();
-    let idleCb: ((event: unknown) => void) | null = null;
+    let idleCb!: (event: unknown) => void;
     mockSession.on.mockImplementation((event: unknown, callback?: (event: unknown) => void) => {
-      if (event === 'session.idle') idleCb = callback ?? null;
+      if (event === 'session.idle' && callback) idleCb = callback;
       return () => {};
     });
     let resolveSend!: (messageId: string) => void;
@@ -417,7 +457,7 @@ describe('launchQuickAgent', () => {
     mockSession.send.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
     uuidCounter = 0;
-    vi.mocked(uuid).mockImplementation(() => `quick-agent-${++uuidCounter}`);
+    vi.mocked<() => string>(uuid).mockImplementation(() => `quick-agent-${++uuidCounter}`);
   });
 
   it('returns error when Copilot client is null', async () => {
@@ -466,7 +506,7 @@ describe('launchQuickAgent', () => {
     };
     // The cloud session waits for a `session.start` event before resolving
     // session.send.  Fire it on the next tick so the test doesn't time out.
-    let startCb: ((event: any) => void) | null = null;
+    let startCb!: (event: any) => void;
     mockSession.on.mockImplementation((evt: any, cb?: any) => {
       if (typeof evt === 'string' && evt === 'session.start') startCb = cb;
       return () => { /* unsubscribe noop */ };
@@ -528,9 +568,9 @@ describe('launchQuickAgent', () => {
       id: 'cloud-persona', handle: 'cloud', instructions: 'Run in cloud.',
       model: 'gpt-4o', runLocation: 'cloud' as const,
     };
-    let startCb: ((event: unknown) => void) | null = null;
+    let startCb!: (event: unknown) => void;
     mockSession.on.mockImplementation((event: unknown, callback?: (event: unknown) => void) => {
-      if (event === 'session.start') startCb = callback ?? null;
+      if (event === 'session.start' && callback) startCb = callback;
       return () => {};
     });
     setTimeout(() => startCb?.({ data: { producer: 'copilot-agent' } }), 0);
@@ -548,7 +588,7 @@ describe('launchQuickAgent', () => {
     expect(mockSession.disconnect).not.toHaveBeenCalled();
 
     await deleteAgent('quick-agent-1');
-    const { deleteAgentSession } = await import('./database');
+    const { deleteAgentSession } = await import('./storage');
     expect(deleteAgentSession).toHaveBeenCalledWith('quick-agent-1');
   });
 
@@ -676,7 +716,7 @@ describe('launchDocumentAgent', () => {
     vi.clearAllMocks();
     mockSession.send.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
-    vi.mocked(uuid).mockReturnValue('document-agent-1');
+    vi.mocked<() => string>(uuid).mockReturnValue('document-agent-1');
   });
 
   it('returns success only after the document prompt is accepted', async () => {
@@ -714,6 +754,73 @@ describe('launchDocumentAgent', () => {
       'Error: document rejected',
     );
   });
+
+  it('launches scheduled work with only authorized sources and the result writer', async () => {
+    enableMockClient();
+    scheduledMocks.createContext.mockReturnValue(scheduledMocks.context);
+    const { getAllMcpServers } = await import('./mcp');
+    vi.mocked(getAllMcpServers).mockReturnValueOnce({
+      chat: { command: 'chat', tools: ['*'] },
+      unrelated: { command: 'other', tools: ['*'] },
+    });
+    const scheduledRun = {
+      scheduleId: 'schedule-1', runId: 'run-1', scheduledAt: '2026-09-07T16:00:00.000Z',
+      timeZone: 'America/Los_Angeles', readOnlyServers: ['chat'],
+    };
+    await launchDocumentAgent('space-1', '/ws', 'folder', { scheduledRun });
+    const config = mockClient.createSession.mock.calls[0][0];
+    expect(Object.keys(config.mcpServers)).toEqual(['chat']);
+    expect(config.tools).toEqual([scheduledMocks.publishTool]);
+    expect(config.availableTools).toContain('custom:publish_scheduled_result');
+    expect(config.availableTools).not.toContain('builtin:*');
+    expect(config.availableTools).not.toContain('builtin:bash');
+    expect(config.systemMessage.content).toContain('unattended scheduled task');
+    expect(config.systemMessage.content).not.toContain('The user has pressed "Run"');
+
+    const invocation = { sessionId: 'mock-session-id' };
+    expect(await config.onPermissionRequest({ kind: 'shell' }, invocation)).toEqual({ kind: 'reject' });
+    expect(scheduledMocks.permission).toHaveBeenCalledWith(scheduledMocks.context, { kind: 'shell' });
+    const response = await config.onUserInputRequest({ question: 'Which chat?' }, invocation);
+    expect(response.answer).toContain('unavailable');
+    expect(scheduledMocks.blocked).toHaveBeenCalled();
+    expect(await config.onElicitationRequest({ ...invocation, message: 'Sign in' })).toEqual({ action: 'cancel' });
+  });
+
+  it('records the scheduled outcome at completion, not at launch', async () => {
+    enableMockClient();
+    scheduledMocks.createContext.mockReturnValue(scheduledMocks.context);
+    await launchDocumentAgent('space-1', '/ws', 'folder', {
+      scheduledRun: {
+        scheduleId: 'schedule-1', runId: 'run-1', scheduledAt: '2026-09-07T16:00:00.000Z',
+        timeZone: 'UTC', readOnlyServers: [],
+      },
+    });
+    expect(scheduledMocks.finish).not.toHaveBeenCalled();
+    const idle = mockSession.on.mock.calls.find(([name]) => name === 'session.idle')![1];
+    await idle();
+    await idle();
+    expect(scheduledMocks.finish).toHaveBeenCalledTimes(1);
+    expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'document-agent-1', 'completed', '3 messages need a reply',
+    );
+  });
+
+  it('records a scheduled runtime failure and clears unattended privileges', async () => {
+    enableMockClient();
+    scheduledMocks.createContext.mockReturnValue(scheduledMocks.context);
+    await launchDocumentAgent('space-1', '/ws', 'folder', {
+      scheduledRun: {
+        scheduleId: 'schedule-1', runId: 'run-1', scheduledAt: '2026-09-07T16:00:00.000Z',
+        timeZone: 'UTC', readOnlyServers: [],
+      },
+    });
+    const error = mockSession.on.mock.calls.find(([name]) => name === 'session.error')![1];
+    await error({ data: { message: 'Disconnected' } });
+    expect(scheduledMocks.finish).toHaveBeenCalledWith(scheduledMocks.context, 'Disconnected');
+    const idle = mockSession.on.mock.calls.find(([name]) => name === 'session.idle')![1];
+    await idle();
+    expect(scheduledMocks.finish).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('launchCommentAgent', () => {
@@ -724,10 +831,10 @@ describe('launchCommentAgent', () => {
     mockSession.send.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
     uuidCounter = 0;
-    vi.mocked(uuid).mockImplementation(() => `comment-agent-${++uuidCounter}`);
+    vi.mocked<() => string>(uuid).mockImplementation(() => `comment-agent-${++uuidCounter}`);
   });
 
-  const persona = { handle: 'test-bot', instructions: 'Be helpful', model: 'gpt-4' };
+  const persona = { id: 'fixture-persona', runLocation: 'local' as const, handle: 'test-bot', instructions: 'Be helpful', model: 'gpt-4' };
 
   it('returns error when Copilot client is null', async () => {
     disableMockClient();
@@ -795,7 +902,7 @@ describe('launchCommentAgent', () => {
     mockClient.createSession.mockReturnValueOnce(new Promise(resolve => {
       resolveSession = resolve;
     }));
-    const { deleteAgentSession } = await import('./database');
+    const { deleteAgentSession } = await import('./storage');
 
     const launchPromise = launchCommentAgent(
       'space-1',
@@ -832,7 +939,7 @@ describe('launchCommentAgent', () => {
     mockClient.createSession.mockReturnValueOnce(new Promise((_, reject) => {
       rejectSession = reject;
     }));
-    const { deleteAgentSession } = await import('./database');
+    const { deleteAgentSession } = await import('./storage');
 
     const launchPromise = launchCommentAgent(
       'space-1',
@@ -896,9 +1003,9 @@ describe('launchCommentAgent', () => {
   it('keeps a cloud comment worker retryable when prompt cleanup cannot abort it', async () => {
     enableMockClient();
     const cloudPersona = { ...persona, runLocation: 'cloud' as const };
-    let startCb: ((event: unknown) => void) | null = null;
+    let startCb!: (event: unknown) => void;
     mockSession.on.mockImplementation((event: unknown, callback?: (event: unknown) => void) => {
-      if (event === 'session.start') startCb = callback ?? null;
+      if (event === 'session.start' && callback) startCb = callback;
       return () => {};
     });
     setTimeout(() => startCb?.({ data: { producer: 'copilot-agent' } }), 0);
@@ -925,7 +1032,7 @@ describe('launchCommentAgent', () => {
     expect(mockSession.disconnect).not.toHaveBeenCalled();
 
     await deleteAgent('comment-agent-1');
-    const { deleteAgentSession } = await import('./database');
+    const { deleteAgentSession } = await import('./storage');
     expect(deleteAgentSession).toHaveBeenCalledWith('comment-agent-1');
   });
 
@@ -988,7 +1095,7 @@ describe('launchCommentAgent', () => {
     enableMockClient();
     // The cloud session waits for `session.start` before sending — fire it
     // on the next tick so the test doesn't time out.
-    let startCb: ((event: any) => void) | null = null;
+    let startCb!: (event: any) => void;
     mockSession.on.mockImplementation((evt: any, cb?: any) => {
       if (typeof evt === 'string' && evt === 'session.start') startCb = cb;
       return () => { /* unsubscribe noop */ };
@@ -1017,7 +1124,7 @@ describe('launchCommentAgent', () => {
     enableMockClient();
 
     // Capture the session.start callback so the test controls when it fires.
-    let startCb: ((event: any) => void) | null = null;
+    let startCb!: (event: any) => void;
     mockSession.on.mockImplementation((evt: any, cb?: any) => {
       if (typeof evt === 'string' && evt === 'session.start') startCb = cb;
       return () => { /* unsubscribe noop */ };
@@ -1032,7 +1139,7 @@ describe('launchCommentAgent', () => {
     mockSession.send.mockImplementation((...args: any[]) => { sendCalled(...args); return Promise.resolve('msg-id'); });
 
     const launchPromise = launchCommentAgent('space-1', 'hello', 'q', {}, cloudPersona, null, '/ws', 'folder');
-    await vi.waitFor(() => expect(startCb).not.toBeNull());
+    await vi.waitFor(() => expect(startCb).toBeTypeOf('function'));
     // Before session.start, session.send MUST NOT have been called yet —
     // and the launch promise must remain pending.
     await Promise.resolve();
@@ -1083,7 +1190,7 @@ describe('abortAgent', () => {
     mockClient.resumeSession.mockResolvedValue(mockSession);
     mockClient.rpc.sessions.connect.mockResolvedValue(undefined);
     uuidCounter = 0;
-    vi.mocked(uuid).mockImplementation(() => `abort-agent-${++uuidCounter}`);
+    vi.mocked<() => string>(uuid).mockImplementation(() => `abort-agent-${++uuidCounter}`);
   });
 
   it('is a no-op when agent does not exist', async () => {
@@ -1108,16 +1215,16 @@ describe('abortAgent', () => {
       id: 'cloud-persona', handle: 'cloud', instructions: 'Run in cloud.',
       model: 'gpt-4o', runLocation: 'cloud' as const,
     };
-    let startCb: ((event: unknown) => void) | null = null;
+    let startCb!: (event: unknown) => void;
     mockSession.on.mockImplementation((event: unknown, callback?: (event: unknown) => void) => {
-      if (event === 'session.start') startCb = callback ?? null;
+      if (event === 'session.start' && callback) startCb = callback;
       return () => {};
     });
     setTimeout(() => startCb?.({ data: { producer: 'copilot-agent' } }), 0);
     const launched = await launchQuickAgent('cloud task', '/ws', persona as any);
     const agentId = (launched as { agentId: string }).agentId;
     mockSession.abort.mockRejectedValueOnce(new Error('network unavailable'));
-    const { deleteAgentSession } = await import('./database');
+    const { deleteAgentSession } = await import('./storage');
 
     await expect(deleteAgent(agentId)).rejects.toThrow('may still be running');
 
@@ -1132,15 +1239,15 @@ describe('abortAgent', () => {
 
   it('deletes a completed live SDK session without aborting it', async () => {
     enableMockClient();
-    let idleCb: ((event: unknown) => void) | null = null;
+    let idleCb!: (event: unknown) => void;
     mockSession.on.mockImplementation((event: unknown, callback?: (event: unknown) => void) => {
-      if (event === 'session.idle') idleCb = callback ?? null;
+      if (event === 'session.idle' && callback) idleCb = callback;
       return () => {};
     });
     const launched = await launchQuickAgent('finish task', '/ws');
     const agentId = (launched as { agentId: string }).agentId;
     idleCb?.({});
-    const { deleteAgentSession } = await import('./database');
+    const { deleteAgentSession } = await import('./storage');
 
     await deleteAgent(agentId);
 
@@ -1149,7 +1256,7 @@ describe('abortAgent', () => {
   });
 
   it('stops CCA tracking without pretending the remote job was cancelled', async () => {
-    vi.mocked(getAgentSession).mockReturnValueOnce({
+    vi.mocked(getAgentSession).mockResolvedValueOnce({
       id: 'cca-agent', session_id: 'cca-session', space_id: null, prompt: 'p',
       status: 'running', summary: '', working_dir: '/ws', source: 'cca',
       persona_handle: null, quoted_text: null, run_location: 'cloud',
@@ -1170,7 +1277,7 @@ describe('abortAgent', () => {
   });
 
   it('uses explicit stop-tracking semantics for CLI sessions', async () => {
-    vi.mocked(getAgentSession).mockReturnValueOnce({
+    vi.mocked(getAgentSession).mockResolvedValueOnce({
       id: 'cli-agent', session_id: 'cli-session', space_id: null, prompt: 'CLI Session',
       status: 'running', summary: '', working_dir: '/ws', source: 'cli',
       persona_handle: null, quoted_text: null, run_location: 'local',
@@ -1188,7 +1295,7 @@ describe('abortAgent', () => {
 
   it('reconnects and aborts a restored SDK cloud session', async () => {
     enableMockClient();
-    vi.mocked(getAgentSession).mockReturnValue({
+    vi.mocked(getAgentSession).mockResolvedValue({
       id: 'sdk-cloud', session_id: 'cloud-session', space_id: 'space-1', prompt: 'Cloud work',
       status: 'running', summary: '', working_dir: '/ws', source: 'sdk',
       persona_handle: null, quoted_text: null, run_location: 'cloud',
@@ -1209,14 +1316,14 @@ describe('abortAgent', () => {
 
   it('preserves a restored SDK cloud session when reconnecting to abort fails', async () => {
     enableMockClient();
-    vi.mocked(getAgentSession).mockReturnValue({
+    vi.mocked(getAgentSession).mockResolvedValue({
       id: 'sdk-cloud', session_id: 'cloud-session', space_id: 'space-1', prompt: 'Cloud work',
       status: 'running', summary: '', working_dir: '/ws', source: 'sdk',
       persona_handle: null, quoted_text: null, run_location: 'cloud',
       created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
     });
     mockClient.rpc.sessions.connect.mockRejectedValueOnce(new Error('offline'));
-    const { deleteAgentSession } = await import('./database');
+    const { deleteAgentSession } = await import('./storage');
 
     await expect(deleteAgent('sdk-cloud')).rejects.toThrow('may still be running');
 
@@ -1230,14 +1337,14 @@ describe('abortAgent', () => {
 
   it('deletes restored cloud metadata when the SDK confirms the session is gone', async () => {
     enableMockClient();
-    vi.mocked(getAgentSession).mockReturnValue({
+    vi.mocked(getAgentSession).mockResolvedValue({
       id: 'sdk-cloud-missing', session_id: 'cloud-session', space_id: 'space-1', prompt: 'Cloud work',
       status: 'failed', summary: 'Error', working_dir: '/ws', source: 'sdk',
       persona_handle: null, quoted_text: null, run_location: 'cloud',
       created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
     });
     mockClient.rpc.sessions.connect.mockRejectedValueOnce(new Error('Session not found: cloud-session'));
-    const { deleteAgentSession } = await import('./database');
+    const { deleteAgentSession } = await import('./storage');
 
     await deleteAgent('sdk-cloud-missing');
 
@@ -1245,13 +1352,13 @@ describe('abortAgent', () => {
   });
 
   it('deletes a completed SDK cloud session without reconnecting', async () => {
-    vi.mocked(getAgentSession).mockReturnValue({
+    vi.mocked(getAgentSession).mockResolvedValue({
       id: 'sdk-cloud-done', session_id: 'cloud-session', space_id: 'space-1', prompt: 'Cloud work',
       status: 'completed', summary: 'Done', working_dir: '/ws', source: 'sdk',
       persona_handle: null, quoted_text: null, run_location: 'cloud',
       created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
     });
-    const { deleteAgentSession } = await import('./database');
+    const { deleteAgentSession } = await import('./storage');
 
     await deleteAgent('sdk-cloud-done');
 
@@ -1261,7 +1368,7 @@ describe('abortAgent', () => {
 
   it('treats disconnect failure as cleanup after a successful cloud abort', async () => {
     enableMockClient();
-    vi.mocked(getAgentSession).mockReturnValue({
+    vi.mocked(getAgentSession).mockResolvedValue({
       id: 'sdk-cloud', session_id: 'cloud-session', space_id: 'space-1', prompt: 'Cloud work',
       status: 'running', summary: '', working_dir: '/ws', source: 'sdk',
       persona_handle: null, quoted_text: null, run_location: 'cloud',
@@ -1276,13 +1383,13 @@ describe('abortAgent', () => {
   });
 
   it('aborts before deleting a tracked session', async () => {
-    vi.mocked(getAgentSession).mockReturnValueOnce({
+    vi.mocked(getAgentSession).mockResolvedValueOnce({
       id: 'cli-delete', session_id: 'cli-session', space_id: null, prompt: 'CLI Session',
       status: 'running', summary: '', working_dir: '/ws', source: 'cli',
       persona_handle: null, quoted_text: null, run_location: 'local',
       created_at: '2026-07-20T00:00:00Z', updated_at: '2026-07-20T00:00:00Z',
     });
-    const { deleteAgentSession } = await import('./database');
+    const { deleteAgentSession } = await import('./storage');
 
     await deleteAgent('cli-delete');
 
@@ -1303,7 +1410,7 @@ describe('listAgents', () => {
     mockSession.send.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
     uuidCounter = 0;
-    vi.mocked(uuid).mockImplementation(() => `list-agent-${++uuidCounter}`);
+    vi.mocked<() => string>(uuid).mockImplementation(() => `list-agent-${++uuidCounter}`);
   });
 
   it('returns agents filtered by spaceId', async () => {
@@ -1311,22 +1418,22 @@ describe('listAgents', () => {
     await launchAgent('space-A', 'text-a', { quote: '', prefix: '', suffix: '' }, '/ws', 'folder');
     await launchAgent('space-B', 'text-b', { quote: '', prefix: '', suffix: '' }, '/ws', 'folder');
 
-    const agentsA = listAgents('space-A');
+    const agentsA = (await listAgents('space-A'));
     expect(agentsA).toHaveLength(1);
     expect(agentsA[0].agentId).toBe('list-agent-1');
 
-    const agentsB = listAgents('space-B');
+    const agentsB = (await listAgents('space-B'));
     expect(agentsB).toHaveLength(1);
     expect(agentsB[0].agentId).toBe('list-agent-2');
   });
 
-  it('returns empty array for unknown spaceId', () => {
-    const result = listAgents('unknown');
+  it('returns empty array for unknown spaceId', async () => {
+    const result = (await listAgents('unknown'));
     expect(result).toEqual([]);
   });
 
-  it('returns persisted rows for a space before a live session is active', () => {
-    vi.mocked(listAgentSessions).mockReturnValueOnce([
+  it('returns persisted rows for a space before a live session is active', async () => {
+    vi.mocked(listAgentSessions).mockResolvedValueOnce([
       {
         id: 'persisted-agent',
         session_id: 'pending-session',
@@ -1344,7 +1451,7 @@ describe('listAgents', () => {
       },
     ]);
 
-    const agents = listAgents('space-persisted');
+    const agents = (await listAgents('space-persisted'));
 
     expect(agents).toHaveLength(1);
     expect(agents[0]).toMatchObject({
@@ -1366,7 +1473,7 @@ describe('listAllAgents', () => {
     vi.clearAllMocks();
     mockSession.send.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
-    vi.mocked(uuid).mockReturnValue('all-agent-1');
+    vi.mocked<() => string>(uuid).mockReturnValue('all-agent-1');
   });
 
   it('overlays live state on DB records', async () => {
@@ -1376,8 +1483,8 @@ describe('listAllAgents', () => {
     await launchAgent('space-1', 'text', { quote: '', prefix: '', suffix: '' }, '/ws', 'folder');
 
     // Mock DB to return a persisted record that matches the live agent
-    vi.mocked(listAgentSessions).mockReturnValue([
-      {
+    vi.mocked(listAgentSessions).mockResolvedValue([
+      { persona_handle: null, quoted_text: null, run_location: 'local' as const,
         id: 'all-agent-1',
         session_id: 'mock-session-id',
         space_id: 'space-1',
@@ -1391,7 +1498,7 @@ describe('listAllAgents', () => {
       },
     ]);
 
-    const all = listAllAgents();
+    const all = (await listAllAgents());
     // Find our specific agent (other agents from prior tests may exist in-memory)
     const ourAgent = all.find(a => a.agentId === 'all-agent-1');
     expect(ourAgent).toBeDefined();
@@ -1402,10 +1509,10 @@ describe('listAllAgents', () => {
 
   it('includes live agents not in DB', async () => {
     enableMockClient();
-    vi.mocked(listAgentSessions).mockReturnValue([]);
+    vi.mocked(listAgentSessions).mockResolvedValue([]);
 
     // listAllAgents should include live in-memory agents even if DB returns none
-    const all = listAllAgents();
+    const all = (await listAllAgents());
     // There should be at least some agents from prior tests in-memory
     expect(Array.isArray(all)).toBe(true);
     // Every returned agent should have the expected shape
@@ -1423,11 +1530,11 @@ describe('setAgentYolo', () => {
     vi.clearAllMocks();
     mockSession.send.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
-    vi.mocked(uuid).mockReturnValue('yolo-agent-1');
+    vi.mocked<() => string>(uuid).mockReturnValue('yolo-agent-1');
   });
 
-  it('returns error for unknown agent', () => {
-    const result = setAgentYolo('nonexistent', true);
+  it('returns error for unknown agent', async () => {
+    const result = (await setAgentYolo('nonexistent', true));
     expect(result).toEqual({ error: 'Agent not found' });
   });
 
@@ -1435,12 +1542,12 @@ describe('setAgentYolo', () => {
     enableMockClient();
     await launchAgent('space-1', 'task', { quote: '', prefix: '', suffix: '' }, '/ws', 'folder');
 
-    const result = setAgentYolo('yolo-agent-1', true);
+    const result = (await setAgentYolo('yolo-agent-1', true));
     expect(result).toEqual({ ok: true });
 
     // Verify the yoloMode flag is reflected in listAllAgents
-    vi.mocked(listAgentSessions).mockReturnValue([]);
-    const all = listAllAgents();
+    vi.mocked(listAgentSessions).mockResolvedValue([]);
+    const all = (await listAllAgents());
     const agent = all.find(a => a.agentId === 'yolo-agent-1');
     expect(agent).toBeDefined();
     expect(agent!.yoloMode).toBe(true);
@@ -1450,11 +1557,11 @@ describe('setAgentYolo', () => {
     enableMockClient();
     await launchAgent('space-1', 'task', { quote: '', prefix: '', suffix: '' }, '/ws', 'folder');
 
-    setAgentYolo('yolo-agent-1', true);
-    setAgentYolo('yolo-agent-1', false);
+    (await setAgentYolo('yolo-agent-1', true));
+    (await setAgentYolo('yolo-agent-1', false));
 
-    vi.mocked(listAgentSessions).mockReturnValue([]);
-    const all = listAllAgents();
+    vi.mocked(listAgentSessions).mockResolvedValue([]);
+    const all = (await listAllAgents());
     const agent = all.find(a => a.agentId === 'yolo-agent-1');
     expect(agent).toBeDefined();
     expect(agent!.yoloMode).toBe(false);
@@ -1469,8 +1576,8 @@ describe('sendChatMessage', () => {
     mockSession.send.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
     uuidCounter = 0;
-    vi.mocked(uuid).mockImplementation(() => `chat-agent-${++uuidCounter}`);
-    vi.mocked(getAgentSession).mockReturnValue(null);
+    vi.mocked<() => string>(uuid).mockImplementation(() => `chat-agent-${++uuidCounter}`);
+    vi.mocked(getAgentSession).mockResolvedValue(null);
   });
 
   it('returns error when agent not found and cannot resume', async () => {
@@ -1497,8 +1604,8 @@ describe('launchCliSession', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     uuidCounter = 0;
-    vi.mocked(uuid).mockImplementation(() => `cli-${++uuidCounter}`);
-    vi.mocked(launchSessionInTerminal).mockResolvedValue(undefined);
+    vi.mocked<() => string>(uuid).mockImplementation(() => `cli-${++uuidCounter}`);
+    vi.mocked(launchSessionInTerminal).mockResolvedValue({ pid: null });
   });
 
   it('creates agent session in DB with source cli', async () => {
@@ -1543,20 +1650,20 @@ describe('CLI exit monitor', () => {
     vi.useRealTimers();
   });
 
-  it('startCliExitMonitor does not create duplicate intervals', () => {
+  it('startCliExitMonitor does not create duplicate intervals', async () => {
     vi.mocked(fs.readdirSync).mockReturnValue([]);
 
     startCliExitMonitor();
     startCliExitMonitor(); // second call should be no-op
 
-    vi.advanceTimersByTime(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
 
     // readdirSync is called by ensureCliExitDir (existsSync) + the interval tick
     // The key thing: only 1 interval fires, not 2
     const readdirCalls = vi.mocked(fs.readdirSync).mock.calls.length;
 
     vi.mocked(fs.readdirSync).mockClear();
-    vi.advanceTimersByTime(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
 
     // Only one more call — proves there's a single interval
     expect(vi.mocked(fs.readdirSync)).toHaveBeenCalledTimes(1);
@@ -1584,8 +1691,8 @@ describe('setAgentModel', () => {
     mockSession.setModel.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
     uuidCounter = 0;
-    vi.mocked(uuid).mockImplementation(() => `model-agent-${++uuidCounter}`);
-    vi.mocked(getAgentSession).mockReturnValue(null);
+    vi.mocked<() => string>(uuid).mockImplementation(() => `model-agent-${++uuidCounter}`);
+    vi.mocked(getAgentSession).mockResolvedValue(null);
   });
 
   it('calls session.setModel() for active agents', async () => {
@@ -1615,6 +1722,95 @@ describe('setAgentModel', () => {
   });
 });
 
+describe('getAgentHistoryPage routing', () => {
+  const emptyPage = { items: [], total: 0, nextCursor: null, watermark: 0 };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    __resetAppRemoteForTests();
+    enableMockClient();
+    vi.mocked(getConfig).mockReturnValue({ ...getConfig(), workspace: '/ws' });
+    mockClient.createSession.mockResolvedValue(mockSession);
+    mockClient.resumeSession.mockResolvedValue(mockSession);
+    mockSession.send.mockResolvedValue(undefined);
+    mockSession.rpc.eventLog.read.mockResolvedValue({ events: [], cursor: 'history-tail', hasMore: false });
+    vi.mocked(openRuntimeHistory).mockResolvedValue(undefined);
+    vi.mocked(queryRuntimeHistory).mockResolvedValue(emptyPage);
+    vi.mocked(listAgentHistoryPage).mockResolvedValue(emptyPage);
+    vi.mocked(getAgentSession).mockResolvedValue(null);
+  });
+
+  it('uses the durable page without fetching a full SDK history', async () => {
+    const mirrored = { ...emptyPage, watermark: 12 };
+    vi.mocked(listAgentHistoryPage).mockResolvedValue(mirrored);
+    expect(await getAgentHistoryPage('mirrored', { limit: 5 })).toEqual(mirrored);
+    expect(mockSession.rpc.eventLog.read).not.toHaveBeenCalled();
+    expect(mockSession.getEvents).not.toHaveBeenCalled();
+  });
+
+  it.each(['sdk', 'cli'] as const)('resumes an unmirrored %s session into the bounded importer', async source => {
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'unmirrored', session_id: 'retained-session', space_id: 'space-1',
+      prompt: 'Retained conversation', status: 'completed', summary: '', working_dir: '/ws',
+      source, persona_handle: null, quoted_text: null, run_location: 'local',
+      created_at: '2025-01-01', updated_at: '2025-01-01',
+    });
+    expect(await getAgentHistoryPage('unmirrored', { limit: 5 })).toEqual(emptyPage);
+    expect(mockClient.resumeSession).toHaveBeenCalledWith('retained-session', expect.any(Object));
+    expect(openRuntimeHistory).toHaveBeenCalledWith('unmirrored', mockSession.sessionId, false);
+    expect(mockSession.rpc.eventLog.read).toHaveBeenCalledWith({
+      cursor: undefined, max: 32, includeEphemeral: false, waitMs: 0,
+    });
+    expect(mockSession.getEvents).not.toHaveBeenCalled();
+
+    // Once imported, new mirrored events must not hide the older runtime history.
+    vi.mocked(listAgentHistoryPage).mockResolvedValue({ ...emptyPage, watermark: 1 });
+    await getAgentHistoryPage('unmirrored', { limit: 5 });
+    expect(listAgentHistoryPage).toHaveBeenCalledTimes(1);
+    expect(queryRuntimeHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps ephemeral paging out of durable chat storage', async () => {
+    vi.mocked(ensureEphemeralCopilotClient).mockResolvedValue(getCopilotClient());
+    const launched = await launchQuickAgent('private conversation', '/ws', {
+      id: 'private', handle: 'private', instructions: '', model: '',
+      runLocation: 'local', ephemeral: true,
+    });
+    if (!('agentId' in launched)) throw new Error(launched.error);
+    expect(await getAgentHistoryPage(launched.agentId)).toEqual(emptyPage);
+    expect(openRuntimeHistory).toHaveBeenCalledWith(launched.agentId, mockSession.sessionId, true);
+    expect(listAgentHistoryPage).not.toHaveBeenCalled();
+    expect(mockSession.getEvents).not.toHaveBeenCalled();
+  });
+
+  it('surfaces runtime history failures instead of returning an empty success', async () => {
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'unavailable', session_id: 'retained-session', space_id: 'space-1',
+      prompt: '', status: 'completed', summary: '', working_dir: '/ws',
+      source: 'sdk', persona_handle: null, quoted_text: null, run_location: 'local',
+      created_at: '2025-01-01', updated_at: '2025-01-01',
+    });
+    mockSession.rpc.eventLog.read.mockRejectedValueOnce(new Error('runtime disconnected'));
+    await expect(getAgentHistoryPage('unavailable')).rejects.toThrow('runtime disconnected');
+    expect(queryRuntimeHistory).not.toHaveBeenCalled();
+    expect(mockSession.getEvents).not.toHaveBeenCalled();
+  });
+
+  it('does not create or persist a replacement session merely to read unavailable history', async () => {
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'expired-history', session_id: 'retained-session', space_id: 'space-1',
+      prompt: '', status: 'completed', summary: '', working_dir: '/ws',
+      source: 'sdk', persona_handle: null, quoted_text: null, run_location: 'local',
+      created_at: '2025-01-01', updated_at: '2025-01-01',
+    });
+    mockClient.resumeSession.mockRejectedValueOnce(new Error('session unavailable'));
+    await expect(getAgentHistoryPage('expired-history')).rejects.toThrow('session unavailable');
+    expect(mockClient.createSession).not.toHaveBeenCalled();
+    expect(updateAgentSessionId).not.toHaveBeenCalled();
+    expect(queryRuntimeHistory).not.toHaveBeenCalled();
+  });
+});
+
 describe('getAgentHistory', () => {
   let uuidCounter: number;
 
@@ -1625,8 +1821,8 @@ describe('getAgentHistory', () => {
     mockClient.createSession.mockResolvedValue(mockSession);
     mockClient.resumeSession.mockResolvedValue(mockSession);
     uuidCounter = 0;
-    vi.mocked(uuid).mockImplementation(() => `history-agent-${++uuidCounter}`);
-    vi.mocked(getAgentSession).mockReturnValue(null);
+    vi.mocked<() => string>(uuid).mockImplementation(() => `history-agent-${++uuidCounter}`);
+    vi.mocked(getAgentSession).mockResolvedValue(null);
   });
 
   it('returns events from session.getEvents()', async () => {
@@ -1641,7 +1837,7 @@ describe('getAgentHistory', () => {
 
   it('returns error when agent not found in DB', async () => {
     disableMockClient();
-    vi.mocked(getAgentSession).mockReturnValue(null);
+    vi.mocked(getAgentSession).mockResolvedValue(null);
     const result = await getAgentHistory('nonexistent');
     expect(result).toEqual({ error: 'Agent session not found in database' });
   });
@@ -1649,7 +1845,7 @@ describe('getAgentHistory', () => {
   it('resumes historical SDK session via client.resumeSession()', async () => {
     enableMockClient();
     vi.mocked(getConfig).mockReturnValue({ workspace: '/ws' } as any);
-    const persistedSession = {
+    const persistedSession = { persona_handle: null, quoted_text: null, run_location: 'local' as const,
       id: 'old-agent-id',
       session_id: 'old-session-id',
       space_id: 'space-1',
@@ -1661,7 +1857,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     const result = await getAgentHistory('old-agent-id');
 
@@ -1676,7 +1872,7 @@ describe('getAgentHistory', () => {
   it('restores persisted status on resume (not hardcoded completed)', async () => {
     enableMockClient();
     vi.mocked(getConfig).mockReturnValue({ workspace: '/ws' } as any);
-    const persistedSession = {
+    const persistedSession = { persona_handle: null, quoted_text: null, run_location: 'local' as const,
       id: 'failed-agent',
       session_id: 'failed-session-id',
       space_id: 'space-1',
@@ -1688,7 +1884,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     await getAgentHistory('failed-agent');
 
@@ -1699,7 +1895,7 @@ describe('getAgentHistory', () => {
   it('resumes CLI sessions via same resumeSession path', async () => {
     enableMockClient();
     vi.mocked(getConfig).mockReturnValue({ workspace: '/ws' } as any);
-    const persistedSession = {
+    const persistedSession = { persona_handle: null, quoted_text: null, run_location: 'local' as const,
       id: 'cli-agent-id',
       session_id: 'cli-session-id',
       space_id: null,
@@ -1711,7 +1907,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     const result = await getAgentHistory('cli-agent-id');
 
@@ -1723,7 +1919,7 @@ describe('getAgentHistory', () => {
     enableMockClient();
     vi.mocked(getConfig).mockReturnValue({ workspace: '/ws' } as any);
     mockClient.resumeSession.mockRejectedValueOnce(new Error('session expired'));
-    const persistedSession = {
+    const persistedSession = { persona_handle: null, quoted_text: null, run_location: 'local' as const,
       id: 'cli-fail-agent',
       session_id: 'cli-fail-session-id',
       space_id: null,
@@ -1735,7 +1931,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     const result = await getAgentHistory('cli-fail-agent');
     expect(result).toEqual({
@@ -1747,7 +1943,7 @@ describe('getAgentHistory', () => {
     enableMockClient();
     vi.mocked(getConfig).mockReturnValue({ workspace: '/ws' } as any);
     mockClient.resumeSession.mockRejectedValueOnce(new Error('session expired'));
-    const persistedSession = {
+    const persistedSession = { persona_handle: null, quoted_text: null, run_location: 'local' as const,
       id: 'sdk-fail-agent',
       session_id: 'sdk-fail-session-id',
       space_id: 'space-1',
@@ -1759,7 +1955,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     const result = await getAgentHistory('sdk-fail-agent');
 
@@ -1777,7 +1973,7 @@ describe('getAgentHistory', () => {
     vi.mocked(getConfig).mockReturnValue({ workspace: '/ws' } as any);
     mockClient.resumeSession.mockRejectedValueOnce(new Error('session expired'));
     mockClient.createSession.mockRejectedValueOnce(new Error('auth failed'));
-    const persistedSession = {
+    const persistedSession = { persona_handle: null, quoted_text: null, run_location: 'local' as const,
       id: 'sdk-both-fail-agent',
       session_id: 'sdk-both-fail-session-id',
       space_id: 'space-1',
@@ -1789,7 +1985,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     const result = await getAgentHistory('sdk-both-fail-agent');
     expect(result).toEqual({
@@ -1801,7 +1997,7 @@ describe('getAgentHistory', () => {
     enableMockClient();
     vi.mocked(getConfig).mockReturnValue({ workspace: '/ws' } as any);
     mockClient.resumeSession.mockRejectedValueOnce(new Error('session expired'));
-    const persistedSession = {
+    const persistedSession = { persona_handle: null, quoted_text: null, run_location: 'local' as const,
       id: 'canvas-restart-agent',
       session_id: 'canvas-restart-session-id',
       space_id: 'space-1',
@@ -1813,7 +2009,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     await getAgentHistory('canvas-restart-agent');
 
@@ -1827,7 +2023,7 @@ describe('getAgentHistory', () => {
     enableMockClient();
     vi.mocked(getConfig).mockReturnValue({ workspace: '/ws' } as any);
     mockClient.resumeSession.mockRejectedValueOnce(new Error('session expired'));
-    const persistedSession = {
+    const persistedSession = { persona_handle: null, quoted_text: null, run_location: 'local' as const,
       id: 'cli-no-fallback-agent',
       session_id: 'cli-no-fallback-session-id',
       space_id: null,
@@ -1839,7 +2035,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     const result = await getAgentHistory('cli-no-fallback-agent');
     expect(result).toEqual({
@@ -1852,7 +2048,7 @@ describe('getAgentHistory', () => {
   it('does not pass systemMessage on resume (avoids duplicating prompts)', async () => {
     enableMockClient();
     vi.mocked(getConfig).mockReturnValue({ workspace: '/ws' } as any);
-    const persistedSession = {
+    const persistedSession = { persona_handle: null, quoted_text: null, run_location: 'local' as const,
       id: 'sysmsg-agent-id',
       session_id: 'sysmsg-session-id',
       space_id: 'space-1',
@@ -1864,7 +2060,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     await getAgentHistory('sysmsg-agent-id');
 
@@ -1904,7 +2100,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     const result = await getAgentHistory('cloud-agent-id');
 
@@ -1939,7 +2135,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     await getAgentHistory('local-agent-id');
 
@@ -1974,7 +2170,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     const result = await getAgentHistory('cloud-gone');
 
@@ -2005,7 +2201,7 @@ describe('getAgentHistory', () => {
     mockClient.resumeSession.mockRejectedValueOnce(new Error('session expired'));
 
     const now = '2025-01-01T00:00:00Z';
-    vi.mocked(listAgentChatEvents).mockReturnValue([
+    vi.mocked(listAgentChatEvents).mockResolvedValue([
       { seq: 1, event_id: null, type: 'user.message', timestamp: now,
         payload: JSON.stringify({ content: 'Please refactor the auth module.' }) },
       { seq: 2, event_id: null, type: 'assistant.message', timestamp: now,
@@ -2029,7 +2225,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     await getAgentHistory('transcript-restart-agent');
 
@@ -2055,7 +2251,7 @@ describe('getAgentHistory', () => {
     mockClient.createSession.mockRejectedValueOnce(new Error('auth failed'));
 
     const now = '2025-01-01T00:00:00Z';
-    vi.mocked(listAgentChatEvents).mockReturnValue([
+    vi.mocked(listAgentChatEvents).mockResolvedValue([
       { seq: 1, event_id: null, type: 'user.message', timestamp: now,
         payload: JSON.stringify({ content: 'hello' }) },
       { seq: 2, event_id: null, type: 'assistant.message', timestamp: now,
@@ -2077,7 +2273,7 @@ describe('getAgentHistory', () => {
       created_at: '2025-01-01',
       updated_at: '2025-01-01',
     };
-    vi.mocked(getAgentSession).mockReturnValue(persistedSession);
+    vi.mocked(getAgentSession).mockResolvedValue(persistedSession);
 
     const result = await getAgentHistory('unrecoverable-agent');
 
@@ -2104,7 +2300,7 @@ describe('setAppRemote', () => {
     ({ registry: testRegistry } = __resetAppRemoteForTests());
 
     uuidCounter = 0;
-    vi.mocked(uuid).mockImplementation(() => `app-remote-agent-${++uuidCounter}`);
+    vi.mocked<() => string>(uuid).mockImplementation(() => `app-remote-agent-${++uuidCounter}`);
 
     mockSession.send.mockResolvedValue(undefined);
     mockClient.createSession.mockResolvedValue(mockSession);
@@ -2189,8 +2385,8 @@ describe('setAppRemote', () => {
 
   it('coalesces concurrent setAppRemote(true) calls into a single launch', async () => {
     const [resultA, resultB] = await Promise.all([
-      setAppRemote(true),
-      setAppRemote(true),
+      (await setAppRemote(true)),
+      (await setAppRemote(true)),
     ]);
 
     // Both calls should share the same in-flight promise and observe the
@@ -2326,7 +2522,7 @@ describe('resetRemoteControl', () => {
 
     // Verify exactly ONE agent:remote-changed event was emitted (the final one).
     // This is the anti-flicker invariant — overlays must not see an intermediate disabled state.
-    const remoteEvents = notifySpy.mock.calls.filter(c => c[0] === 'agent:remote-changed');
+    const remoteEvents = notifySpy.mock.calls.filter((c: unknown[]) => c[0] === 'agent:remote-changed');
     expect(remoteEvents).toHaveLength(1);
     expect(remoteEvents[0][1]).toMatchObject({
       agentId: 'agent-rotate',
@@ -2382,7 +2578,7 @@ describe('resetRemoteControl', () => {
 
     // And a single disabled event must have been emitted so the renderer
     // doesn't keep showing an outdated URL.
-    const remoteEvents = notifySpy.mock.calls.filter(c => c[0] === 'agent:remote-changed');
+    const remoteEvents = notifySpy.mock.calls.filter((c: unknown[]) => c[0] === 'agent:remote-changed');
     expect(remoteEvents).toHaveLength(1);
     expect(remoteEvents[0][1]).toMatchObject({
       agentId: 'agent-enable-fails',
@@ -2401,7 +2597,7 @@ describe('resetRemoteControl', () => {
 
     // No events emitted — original URL is still presumably valid from the
     // SDK's perspective.  Registry state is unchanged.
-    const remoteEvents = notifySpy.mock.calls.filter(c => c[0] === 'agent:remote-changed');
+    const remoteEvents = notifySpy.mock.calls.filter((c: unknown[]) => c[0] === 'agent:remote-changed');
     expect(remoteEvents).toHaveLength(0);
     const record = testRegistry.get('agent-disable-fails');
     expect(record?.remote?.url).toBe('https://before.example/url-Q');
@@ -2413,9 +2609,9 @@ describe('reconcileStaleAgents', () => {
     vi.clearAllMocks();
   });
 
-  it('marks running SDK sessions whose in-memory record is gone as failed', () => {
+  it('marks running SDK sessions whose in-memory record is gone as failed', async () => {
     const now = new Date().toISOString();
-    vi.mocked(listAgentSessions).mockReturnValue([
+    vi.mocked(listAgentSessions).mockResolvedValue([
       {
         id: 'lost-local',
         session_id: 'lost-local-sid',
@@ -2433,7 +2629,7 @@ describe('reconcileStaleAgents', () => {
       },
     ]);
 
-    reconcileStaleAgents();
+    (await reconcileStaleAgents());
 
     expect(updateAgentSessionStatus).toHaveBeenCalledWith(
       'lost-local',
@@ -2442,9 +2638,9 @@ describe('reconcileStaleAgents', () => {
     );
   });
 
-  it('preserves cloud sessions across restart (no status change)', () => {
+  it('preserves cloud sessions across restart (no status change)', async () => {
     const now = new Date().toISOString();
-    vi.mocked(listAgentSessions).mockReturnValue([
+    vi.mocked(listAgentSessions).mockResolvedValue([
       {
         id: 'cloud-session',
         session_id: 'cloud-session-sid',
@@ -2462,7 +2658,7 @@ describe('reconcileStaleAgents', () => {
       },
     ]);
 
-    reconcileStaleAgents();
+    (await reconcileStaleAgents());
 
     // The cloud session should be left untouched — its remote worker is
     // still running and the user can resume it on click.  Specifically,
@@ -2471,7 +2667,7 @@ describe('reconcileStaleAgents', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('preserves an external CLI session across restart until its exit signal completes it', () => {
+  it('preserves an external CLI session across restart until its exit signal completes it', async () => {
     vi.useFakeTimers();
     stopCliExitMonitor();
     const now = new Date().toISOString();
@@ -2490,10 +2686,10 @@ describe('reconcileStaleAgents', () => {
       created_at: now,
       updated_at: now,
     };
-    vi.mocked(listAgentSessions).mockReturnValue([cliSession]);
-    vi.mocked(getAgentSession).mockReturnValue(cliSession);
+    vi.mocked(listAgentSessions).mockResolvedValue([cliSession]);
+    vi.mocked(getAgentSession).mockResolvedValue(cliSession);
 
-    reconcileStaleAgents();
+    (await reconcileStaleAgents());
     expect(updateAgentSessionStatus).not.toHaveBeenCalledWith(
       'cli-live',
       'failed',
@@ -2502,7 +2698,7 @@ describe('reconcileStaleAgents', () => {
 
     vi.mocked(fs.readdirSync).mockReturnValue(['cli-live'] as any);
     startCliExitMonitor();
-    vi.advanceTimersByTime(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
 
     expect(updateAgentSessionStatus).toHaveBeenCalledWith(
       'cli-live',
@@ -2513,9 +2709,9 @@ describe('reconcileStaleAgents', () => {
     vi.useRealTimers();
   });
 
-  it('reconciles only local sessions when both kinds are present', () => {
+  it('reconciles only local sessions when both kinds are present', async () => {
     const now = new Date().toISOString();
-    vi.mocked(listAgentSessions).mockReturnValue([
+    vi.mocked(listAgentSessions).mockResolvedValue([
       {
         id: 'local-stale',
         session_id: 'sid-l',
@@ -2548,7 +2744,7 @@ describe('reconcileStaleAgents', () => {
       },
     ]);
 
-    reconcileStaleAgents();
+    (await reconcileStaleAgents());
 
     const updateCalls = vi.mocked(updateAgentSessionStatus).mock.calls;
     const targetIds = updateCalls.map(c => c[0]);
@@ -2556,9 +2752,9 @@ describe('reconcileStaleAgents', () => {
     expect(targetIds).not.toContain('cloud-alive');
   });
 
-  it('does not touch sessions already in completed/failed state', () => {
+  it('does not touch sessions already in completed/failed state', async () => {
     const now = new Date().toISOString();
-    vi.mocked(listAgentSessions).mockReturnValue([
+    vi.mocked(listAgentSessions).mockResolvedValue([
       {
         id: 'already-done',
         session_id: 'sid',
@@ -2576,7 +2772,7 @@ describe('reconcileStaleAgents', () => {
       },
     ]);
 
-    reconcileStaleAgents();
+    (await reconcileStaleAgents());
 
     const calls = vi.mocked(updateAgentSessionStatus).mock.calls.filter(c => c[0] === 'already-done');
     expect(calls).toHaveLength(0);
@@ -2597,49 +2793,49 @@ describe('getCanvasAgentState', () => {
     };
   }
 
-  it('maps a cloud agent that survived a restart to active', () => {
-    vi.mocked(listAgentSessions).mockReturnValue([
+  it('maps a cloud agent that survived a restart to active', async () => {
+    vi.mocked(listAgentSessions).mockResolvedValue([
       session({ id: 'a-cloud', comment_thread_id: 'c-cloud', run_location: 'cloud', status: 'running' }),
     ]);
-    const state = getCanvasAgentState(SPACE);
+    const state = (await getCanvasAgentState(SPACE));
     expect(state).toHaveLength(1);
     expect(state[0]).toMatchObject({ agentId: 'a-cloud', threadId: 'c-cloud', status: 'active', personaHandle: 'reviewer' });
     expect(state[0].pendingInteractions).toEqual([]);
   });
 
-  it('maps a local agent lost to a restart to failed (needs redeploy)', () => {
+  it('maps a local agent lost to a restart to failed (needs redeploy)', async () => {
     // After reconcile a lost local agent is "failed" in the DB; even if it were
     // still "running", a local agent with no live process maps to failed.
-    vi.mocked(listAgentSessions).mockReturnValue([
+    vi.mocked(listAgentSessions).mockResolvedValue([
       session({ id: 'a-local', comment_thread_id: 'c-local', run_location: 'local', status: 'failed' }),
     ]);
-    const state = getCanvasAgentState(SPACE);
+    const state = (await getCanvasAgentState(SPACE));
     expect(state).toHaveLength(1);
     expect(state[0]).toMatchObject({ agentId: 'a-local', threadId: 'c-local', status: 'failed' });
   });
 
-  it('omits completed agents (their reply is already persisted in the thread)', () => {
-    vi.mocked(listAgentSessions).mockReturnValue([
+  it('omits completed agents (their reply is already persisted in the thread)', async () => {
+    vi.mocked(listAgentSessions).mockResolvedValue([
       session({ id: 'a-done', comment_thread_id: 'c-done', status: 'completed' }),
     ]);
-    expect(getCanvasAgentState(SPACE)).toEqual([]);
+    expect((await getCanvasAgentState(SPACE))).toEqual([]);
   });
 
-  it('ignores sessions without a comment thread or in another space', () => {
-    vi.mocked(listAgentSessions).mockReturnValue([
+  it('ignores sessions without a comment thread or in another space', async () => {
+    vi.mocked(listAgentSessions).mockResolvedValue([
       session({ id: 'a-nothread', comment_thread_id: null }),
       session({ id: 'a-otherspace', space_id: 'different-space', comment_thread_id: 'c-other' }),
     ]);
-    expect(getCanvasAgentState(SPACE)).toEqual([]);
+    expect((await getCanvasAgentState(SPACE))).toEqual([]);
   });
 
-  it('returns one representative (newest) agent per thread', () => {
+  it('returns one representative (newest) agent per thread', async () => {
     // listSessions() is newest-first; the first row for a thread wins.
-    vi.mocked(listAgentSessions).mockReturnValue([
+    vi.mocked(listAgentSessions).mockResolvedValue([
       session({ id: 'a-new', comment_thread_id: 'c-retry', run_location: 'cloud', status: 'running', created_at: '2026-02-01T00:00:00Z' }),
       session({ id: 'a-old', comment_thread_id: 'c-retry', status: 'failed', created_at: '2026-01-01T00:00:00Z' }),
     ]);
-    const state = getCanvasAgentState(SPACE);
+    const state = (await getCanvasAgentState(SPACE));
     expect(state).toHaveLength(1);
     expect(state[0].agentId).toBe('a-new');
     expect(state[0].status).toBe('active');

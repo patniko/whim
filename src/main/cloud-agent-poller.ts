@@ -14,8 +14,9 @@ import {
   listAgentSessions,
   updateAgentSessionCcaResult,
   updateAgentSessionStatus,
-} from './database';
+} from './storage';
 import { mirrorRendererEvent } from './web/event-hub';
+import { observeProducer } from './producer-tasks';
 
 const POLL_INTERVAL_MS = 10_000;
 const MAX_POLL_BACKOFF_MS = 5 * 60_000;
@@ -85,8 +86,8 @@ function mapAgentStatus(status: CloudJobStatus): { status: 'running' | 'complete
 
 function scheduleNextPoll(state: PollState, delayMs = POLL_INTERVAL_MS): void {
   if (state.stopped || activePollers.get(state.agentId) !== state) return;
-  state.timer = setTimeout(() => {
-    void pollCloudJob(state);
+  state.timer = setTimeout(async () => {
+    await observeProducer(pollCloudJob(state));
   }, delayMs);
   state.timer.unref?.();
 }
@@ -140,9 +141,9 @@ async function pollCloudJob(state: PollState): Promise<void> {
     state.lastStatus = result;
     if (result.pullRequest?.url) state.url = result.pullRequest.url;
 
-    updateAgentSessionCcaResult(state.agentId, JSON.stringify({ ...result, url: state.url }));
+    (await updateAgentSessionCcaResult(state.agentId, JSON.stringify({ ...result, url: state.url })));
     const mapped = mapAgentStatus(result);
-    updateAgentSessionStatus(state.agentId, mapped.status, mapped.summary);
+    (await updateAgentSessionStatus(state.agentId, mapped.status, mapped.summary));
     notifyAllWindows('agent:status-changed', {
       agentId: state.agentId,
       status: mapped.status,
@@ -162,13 +163,13 @@ async function pollCloudJob(state: PollState): Promise<void> {
   }
 }
 
-export function startCloudJobPoller(
+export async function startCloudJobPoller(
   agentId: string,
   owner: string,
   repo: string,
   jobId: string,
   token: string,
-): void {
+): Promise<void> {
   if (activePollers.has(agentId)) return;
 
   const state: PollState = {
@@ -184,7 +185,7 @@ export function startCloudJobPoller(
     url: `https://github.com/${owner}/${repo}`,
   };
   activePollers.set(agentId, state);
-  void pollCloudJob(state);
+  await observeProducer(pollCloudJob(state));
 }
 
 export function stopCloudJobPoller(agentId: string): boolean {
@@ -234,7 +235,7 @@ export async function launchTrackedCloudAgent(
     ? `Cloud job ${result.jobId} on fork ${effective.owner}/${effective.repo} (upstream ${repoInfo.owner}/${repoInfo.repo} blocked by SSO)`
     : `Cloud job ${result.jobId}`;
 
-  createAgentSession({
+  (await createAgentSession({
     id: agentId,
     session_id: result.sessionId,
     space_id: options.spaceId,
@@ -254,9 +255,9 @@ export async function launchTrackedCloudAgent(
     cca_result_json: JSON.stringify(result),
     created_at: now,
     updated_at: now,
-  });
+  }));
 
-  startCloudJobPoller(agentId, effective.owner, effective.repo, result.jobId, token);
+  (await startCloudJobPoller(agentId, effective.owner, effective.repo, result.jobId, token));
   notifyAllWindows('agent:status-changed', {
     agentId,
     status: 'running',
@@ -274,7 +275,7 @@ export async function restoreActiveCloudPollers(): Promise<void> {
     restoreRetryTimer = null;
   }
   if (!isInitialized()) return;
-  const active = listAgentSessions().filter(
+  const active = (await listAgentSessions()).filter(
     (session) => session.source === 'cca' && (session.status === 'running' || session.status === 'waiting-approval'),
   );
   if (active.length === 0) return;
@@ -290,11 +291,11 @@ export async function restoreActiveCloudPollers(): Promise<void> {
     const repository = parseRepository(session.cca_effective_repository ?? session.cca_repository);
     if (!session.cca_job_id || !repository) {
       const summary = 'Cloud tracking is unavailable for this pre-upgrade session; the remote task may still be running. Check GitHub or relaunch it from Whim.';
-      updateAgentSessionStatus(
+      (await updateAgentSessionStatus(
         session.id,
         session.status,
         summary,
-      );
+      ));
       notifyAllWindows('agent:status-changed', {
         agentId: session.id,
         status: session.status,
@@ -312,11 +313,11 @@ export async function restoreActiveCloudPollers(): Promise<void> {
       });
       continue;
     }
-    startCloudJobPoller(session.id, repository.owner, repository.repo, session.cca_job_id, token);
+    (await startCloudJobPoller(session.id, repository.owner, repository.repo, session.cca_job_id, token));
   }
 
   if (!token && active.some((session) => session.cca_job_id && parseRepository(session.cca_effective_repository ?? session.cca_repository))) {
-    restoreRetryTimer = setTimeout(() => {
+    restoreRetryTimer = setTimeout(async () => {
       restoreRetryTimer = null;
       void restoreActiveCloudPollers().catch((error) => {
         console.warn('[cloud-poller] Deferred recovery failed:', error);

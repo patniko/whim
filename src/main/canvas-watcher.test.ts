@@ -121,11 +121,38 @@ describe('canvas-watcher', () => {
     expect(isWatching('space2')).toBe(false);
   });
 
-  it('handles non-existent file gracefully', () => {
+  it('restores watchers and reconciles changes made during cancelled shutdown', async () => {
+    const onChange = vi.fn();
+    startWatching('space1', canvasPath, onChange);
+    const restore = stopAllWatchers();
+    fs.writeFileSync(canvasPath, '# Changed while suspended\n');
+    expect(onChange).not.toHaveBeenCalled();
+    await restore();
+    expect(isWatching('space1')).toBe(true);
+    expect(onChange).toHaveBeenCalledExactlyOnceWith('# Changed while suspended\n');
+  });
+
+  it('watches the directory even before a document is created', () => {
     const onChange = vi.fn();
     const fakePath = path.join(tmpDir, 'nonexistent.md');
     // Should not throw
     startWatching('space-fake', fakePath, onChange);
-    expect(isWatching('space-fake')).toBe(false);
+    expect(isWatching('space-fake')).toBe(true);
+  });
+
+  it('continues observing replacements after an atomic self-save', async () => {
+    const changed = vi.fn();
+    startWatching('space1', canvasPath, changed);
+    const replacement = path.join(tmpDir, 'replacement');
+    markSelfWrite('space1', '# Saved\n');
+    fs.writeFileSync(replacement, '# Saved\n');
+    fs.renameSync(replacement, canvasPath);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    expect(changed).not.toHaveBeenCalled();
+    fs.writeFileSync(replacement, '# External replacement\n');
+    fs.renameSync(replacement, canvasPath);
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledWith('# External replacement\n'), { timeout: 2000 });
+    fs.writeFileSync(canvasPath, '# Later external edit\n');
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledWith('# Later external edit\n'), { timeout: 2000 });
   });
 });

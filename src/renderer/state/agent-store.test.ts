@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { AgentListAllItem } from '../../shared/ipc-contract';
-import { agentStore } from './agent-store';
+import { agentStore, WORKER_PREVIEW_STEPS } from './agent-store';
 import type { AgentApproval, AgentStep, AgentPresence, AgentSandboxBlock } from './agent-store';
 
 function makeAgent(overrides: Partial<AgentListAllItem> & { agentId: string; spaceId: string }): AgentListAllItem {
@@ -19,11 +19,25 @@ function makeAgent(overrides: Partial<AgentListAllItem> & { agentId: string; spa
     source: 'sdk',
     personaHandle: null,
     yoloMode: false,
+    sandboxed: false,
+    runLocation: 'local',
     ...overrides,
   };
 }
 
 describe('AgentStore', () => {
+  it('bounds row previews and releases off-page steps without dropping pending approvals', () => {
+    for (let n = 0; n < 100; n++) agentStore.addStep('old', { toolCallId: String(n), label: 'Preview', status: 'running' });
+    expect(agentStore.getState().steps.get('old')).toHaveLength(WORKER_PREVIEW_STEPS);
+    agentStore.setApproval('old', { agentId: 'old', requestId: 'pending', permissionKind: 'write' });
+    agentStore.setPage({
+      items: [makeAgent({ agentId: 'new', spaceId: 'space' })], total: 1000, nextCursor: null,
+      counts: { running: 1000, waiting: 0, completed: 0, failed: 0 },
+    });
+    expect(agentStore.getState().steps.has('old')).toBe(false);
+    expect(agentStore.getState().approvals.get('old')?.requestId).toBe('pending');
+    agentStore.reset();
+  });
   beforeEach(() => {
     // Reset singleton state between tests
     agentStore.setAgents([]);

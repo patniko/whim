@@ -5,14 +5,14 @@
  * database and remains directly unit testable.
  */
 import { getConfigValue } from '../config';
-import { getSpace } from '../database';
+import { getSpace } from '../storage';
 import type { SpaceLocation } from './artifact-protocol';
 
-export function resolveSpaceLocation(spaceId: string): SpaceLocation | null {
+export async function resolveSpaceLocation(spaceId: string): Promise<SpaceLocation | null> {
   const workspaceRoot = getConfigValue('workspace');
   if (!workspaceRoot) return null;
 
-  const space = getSpace(spaceId);
+  const space = (await getSpace(spaceId));
   if (!space?.folder) return null;
 
   return { workspaceRoot, folder: space.folder };

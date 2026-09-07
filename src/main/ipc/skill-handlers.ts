@@ -2,18 +2,22 @@ import { registerIpcHandler } from './registry';
 import { shell } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
-import { isInitialized, listSkills, getSkill, upsertSkill, removeSkill, updateSkillSchedule } from '../database';
+import { isInitialized, listSkills, getSkill, upsertSkill, removeSkill, updateSkillSchedule } from '../storage';
+import { readDocument, writeDocument, createSkillDocument, deleteSkillDirectory, getSkillCanvasSettings } from '../storage';
+import { rememberCanvasEditorContent, writeEditorFileWithMergeAsync } from '../services/canvas-editor-state';
 import { getConfigValue } from '../config';
 import { parseFrontmatter, serializeFrontmatter } from '../frontmatter';
-import { getSkillsDir, syncAllSkills } from '../skill-watcher';
+import { getSkillsDir } from '../skill-watcher';
 import { pickEmoji } from '../emoji-picker';
-import { computeNextRunAt } from '../services/scheduler';
+import { projectSkillSchedule } from '../services/scheduler';
+import { localTimeZone, validateScheduleOptions } from '../services/skill-schedule-store';
+import { clearSkillSchedule, getSkillSchedule, listScheduledRuns, migrateLegacySkillSchedule, saveSkillSchedule } from '../storage';
+import { getAllMcpServers } from '../mcp';
+import { notifyAllWindows } from '../notify';
 import { invokeSkill } from '../skill-invocation';
 import { WHIM_REPORT_CANVAS_ID } from '../canvas/sdk-canvas-provider';
-import { loadSkillCanvasDefinition } from '../canvas/skill-canvas-template';
 import type { SkillFrontmatter, Skill, SkillInvocationInput, SkillScheduleFrequency } from '../../shared/types';
-
-const SKILL_FILE = 'SKILL.md';
+import type { ScheduleOptions } from '../../shared/skill-schedule';
 
 /**
  * Resolve the report settings a skill declares on disk.
@@ -23,55 +27,46 @@ const SKILL_FILE = 'SKILL.md';
  * never seen the file. Reading them at list time keeps the UI showing what the
  * run will actually do, including edits made in an editor outside whim.
  */
-function readCanvasSettings(skill: Skill): Pick<Skill, 'canvas' | 'space_mode' | 'canvas_template'> {
-  let frontmatter: SkillFrontmatter | null = null;
-  try {
-    frontmatter = parseFrontmatter<SkillFrontmatter>(fs.readFileSync(skill.filePath, 'utf-8')).frontmatter;
-  } catch {
-    frontmatter = null;
-  }
-
-  const raw = frontmatter?.canvas;
-  let canvas: string | null = null;
-  if (raw === true || raw === 'true') canvas = WHIM_REPORT_CANVAS_ID;
-  else if (typeof raw === 'string' && raw.trim() && raw.trim() !== 'false') canvas = raw.trim();
-
-  const modeRaw = frontmatter?.space_mode;
-  const space_mode = modeRaw === 'new' || modeRaw === 'reuse' ? modeRaw : null;
-
+async function withCanvasSettings(skill: Skill): Promise<Skill> {
   const workspace = getConfigValue('workspace');
-  let canvas_template: Skill['canvas_template'] = null;
-  if (workspace) {
-    try {
-      const definition = loadSkillCanvasDefinition(workspace, skill.id);
-      if (definition) canvas_template = { id: definition.templateId, displayName: definition.displayName };
-    } catch {
-      canvas_template = null;
-    }
-  }
-
-  return { canvas, space_mode, canvas_template };
-}
-
-function withCanvasSettings(skill: Skill): Skill {
-  return { ...skill, ...readCanvasSettings(skill) };
+  const settings = workspace ? await getSkillCanvasSettings(workspace, skill, WHIM_REPORT_CANVAS_ID) : {};
+  const schedule = workspace ? (await migrateLegacySkillSchedule(workspace, skill)) : null;
+  if (!schedule) return { ...skill, ...settings };
+  (await projectSkillSchedule(schedule));
+  return {
+    ...skill, ...settings, schedule_details: schedule,
+    ...(schedule.output === 'canvas' && workspace
+      ? { schedule_runs: (await listScheduledRuns(workspace, schedule.id)).slice(-100) }
+      : {}),
+    schedule: schedule.enabled ? schedule.frequency : null,
+    schedule_time: schedule.enabled ? schedule.time : null,
+    schedule_day: schedule.enabled ? schedule.day : null,
+    next_run_at: schedule.enabled ? schedule.nextRunAt : null,
+    last_run_at: schedule.lastRun?.startedAt ?? null,
+  };
 }
 
 export function registerSkillHandlers(): void {
-  registerIpcHandler('skill:list', () => {
+  registerIpcHandler('skill:list', async () => {
     if (!isInitialized()) return [];
-    return listSkills().map(withCanvasSettings);
+    const skills = await listSkills();
+    const result: Skill[] = [];
+    for (let offset = 0; offset < skills.length; offset += 16) {
+      result.push(...await Promise.all(skills.slice(offset, offset + 16).map(withCanvasSettings)));
+    }
+    return result;
   });
 
-  registerIpcHandler('skill:read', (_event, skillId: string) => {
+  registerIpcHandler('skill:read', async (_event, skillId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
-    const skill = getSkill(skillId);
+    const skill = (await getSkill(skillId));
     if (!skill) return { error: 'not_found' };
 
     try {
-      const content = fs.readFileSync(skill.filePath, 'utf-8');
+      const content = await readDocument(skill.filePath, workspace);
+      rememberCanvasEditorContent(`__skill__${skillId}`, content);
       const { frontmatter, body } = parseFrontmatter<SkillFrontmatter>(content);
       return { frontmatter, body };
     } catch {
@@ -79,24 +74,24 @@ export function registerSkillHandlers(): void {
     }
   });
 
-  registerIpcHandler('skill:write', (_event, skillId: string, frontmatter: Record<string, unknown>, body: string) => {
+  registerIpcHandler('skill:write', async (_event, skillId: string, frontmatter: Record<string, unknown>, body: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
-    const skill = getSkill(skillId);
+    const skill = (await getSkill(skillId));
     if (!skill) return { error: 'not_found' };
 
     try {
       const content = serializeFrontmatter(frontmatter as SkillFrontmatter, body);
-      fs.writeFileSync(skill.filePath, content, 'utf-8');
-      // The file watcher will pick up the change and re-index
-      return { success: true };
+      return await writeEditorFileWithMergeAsync(`__skill__${skillId}`, skill.filePath, content, async (merged, expected) => {
+        await writeDocument({ filePath: skill.filePath, root: workspace, content: merged, expected });
+      });
     } catch {
       return { error: 'write_failed' };
     }
   });
 
-  registerIpcHandler('skill:create', (_event, name: string) => {
+  registerIpcHandler('skill:create', async (_event, name: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -114,14 +109,11 @@ export function registerSkillHandlers(): void {
       return { error: 'already_exists' };
     }
 
-    fs.mkdirSync(folderPath, { recursive: true });
-
-    const filePath = path.join(folderPath, SKILL_FILE);
     const content = serializeFrontmatter(
       { name, description: '' } as SkillFrontmatter,
       '\n'
     );
-    fs.writeFileSync(filePath, content, 'utf-8');
+    const filePath = await createSkillDocument(workspace, slug, content);
 
     // The watcher will pick it up, but we can also index immediately
     const now = new Date().toISOString();
@@ -140,32 +132,34 @@ export function registerSkillHandlers(): void {
       created_at: now,
       updated_at: now,
     };
-    upsertSkill(skill);
+    (await upsertSkill(skill));
     return skill;
   });
 
-  registerIpcHandler('skill:delete', (_event, skillId: string) => {
+  registerIpcHandler('skill:delete', async (_event, skillId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return false;
 
-    const skill = getSkill(skillId);
+    const skill = (await getSkill(skillId));
     if (!skill) return false;
 
-    const folderPath = path.join(workspace, skill.folder);
     try {
-      fs.rmSync(folderPath, { recursive: true, force: true });
-      removeSkill(skillId);
+      (await clearSkillSchedule(workspace, skillId));
+      await deleteSkillDirectory(workspace, skill.folder);
+      (await removeSkill(skillId));
+      notifyAllWindows('skills:changed');
       return true;
-    } catch {
+    } catch (error) {
+      console.error('[skills] Failed to delete skill:', error);
       return false;
     }
   });
 
-  registerIpcHandler('skill:open-folder', (_event, skillId: string) => {
+  registerIpcHandler('skill:open-folder', async (_event, skillId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return;
 
-    const skill = getSkill(skillId);
+    const skill = (await getSkill(skillId));
     if (!skill) return;
 
     shell.openPath(path.join(workspace, skill.folder));
@@ -179,7 +173,7 @@ export function registerSkillHandlers(): void {
     const skillsDir = getSkillsDir(workspace);
 
     // List existing skill slugs so the agent avoids collisions
-    const existingSlugs = listSkills().map(s => s.id);
+    const existingSlugs = (await listSkills()).map(s => s.id);
     const existingNote = existingSlugs.length > 0
       ? `\nExisting skill folders (DO NOT overwrite these): ${existingSlugs.join(', ')}`
       : '';
@@ -231,20 +225,38 @@ export function registerSkillHandlers(): void {
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
     const result = await invokeSkill({ skillId, run: true, source: 'skill-editor' });
+    if (result.error) return { error: result.error };
     return 'space' in result ? result.space : result;
   });
 
   registerIpcHandler('skill:invoke', async (_event, input: SkillInvocationInput) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
-    return invokeSkill(input);
+    if (!input || typeof input !== 'object' || typeof input.skillId !== 'string' || !input.skillId ||
+        (input.intent !== undefined && typeof input.intent !== 'string') ||
+        (input.run !== undefined && typeof input.run !== 'boolean') ||
+        (input.preferredAgent !== undefined && input.preferredAgent !== null && typeof input.preferredAgent !== 'string')) {
+      return { error: 'invalid_invocation' };
+    }
+    if (input.source !== undefined && !['side-panel', 'skill-card', 'skill-editor', 'api'].includes(input.source)) {
+      return { error: 'invalid_source' };
+    }
+    // Scheduled context is main-process authority, never a renderer/API payload.
+    return invokeSkill({
+      skillId: input.skillId, intent: input.intent, run: input.run,
+      preferredAgent: input.preferredAgent, source: input.source,
+    });
   });
 
-  registerIpcHandler('skill:set-schedule', (_event, skillId: string, frequency: SkillScheduleFrequency, time: string, day: number | null) => {
+  registerIpcHandler('skill:schedule-sources', () => {
+    return Object.keys(getAllMcpServers()).map(name => ({ name }));
+  });
+
+  registerIpcHandler('skill:set-schedule', async (_event, skillId: string, frequency: SkillScheduleFrequency, time: string, day: number | null, options?: ScheduleOptions) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
-    const skill = getSkill(skillId);
+    const skill = (await getSkill(skillId));
     if (!skill) return { error: 'not_found' };
 
     // Validate inputs to protect main process from arbitrary IPC payloads.
@@ -261,34 +273,37 @@ export function registerSkillHandlers(): void {
     // weekly/biweekly require a day; daily/weekdays/monthly ignore it.
     const normalizedDay = (frequency === 'weekly' || frequency === 'biweekly') ? day : null;
 
-    const nextRunAt = computeNextRunAt(frequency, time, normalizedDay);
-    updateSkillSchedule(skillId, frequency, time, normalizedDay, nextRunAt);
-
-    // Also update the SKILL.md frontmatter so schedule is persisted to disk
+    const existing = (await getSkillSchedule(workspace, skillId));
+    const activeSchedule = existing?.enabled ? existing : null;
+    const effectiveOptions = options ?? {
+      timeZone: activeSchedule?.timeZone ?? localTimeZone(),
+      intent: activeSchedule?.intent ?? '',
+      readOnlyServers: activeSchedule?.readOnlyServers ?? [],
+    };
     try {
-      const content = fs.readFileSync(skill.filePath, 'utf-8');
-      const { frontmatter, body } = parseFrontmatter<SkillFrontmatter>(content);
-      frontmatter.schedule = frequency;
-      frontmatter.schedule_time = time;
-      if (normalizedDay !== null) {
-        frontmatter.schedule_day = normalizedDay;
-      } else {
-        delete frontmatter.schedule_day;
-      }
-      const updated = serializeFrontmatter(frontmatter, body);
-      fs.writeFileSync(skill.filePath, updated, 'utf-8');
-    } catch {
-      // DB is updated even if frontmatter write fails
+      validateScheduleOptions(effectiveOptions);
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : 'invalid_schedule_options' };
     }
+    const configured = new Set(Object.keys(getAllMcpServers()));
+    const retained = new Set(activeSchedule?.readOnlyServers ?? []);
+    if (effectiveOptions.readOnlyServers.some(name => !configured.has(name) && !retained.has(name))) {
+      return { error: 'invalid_read_only_servers' };
+    }
+    // Migration precedes timing edits so a legacy report never silently turns
+    // into a read-only canvas digest, even before the scheduler's first tick.
+    (await migrateLegacySkillSchedule(workspace, skill));
+    const schedule = (await saveSkillSchedule(workspace, skillId, frequency, time, normalizedDay, effectiveOptions));
+    (await projectSkillSchedule(schedule));
 
-    return withCanvasSettings(getSkill(skillId)!);
+    return (await withCanvasSettings((await getSkill(skillId))!));
   });
 
-  registerIpcHandler('skill:set-canvas', (_event, skillId: string, canvas: string | null, spaceMode: 'new' | 'reuse' | null) => {
+  registerIpcHandler('skill:set-canvas', async (_event, skillId: string, canvas: string | null, spaceMode: 'new' | 'reuse' | null) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
-    const skill = getSkill(skillId);
+    const skill = (await getSkill(skillId));
     if (!skill) return { error: 'not_found' };
 
     // The canvas id lands in SKILL.md, which is read back at launch to decide
@@ -301,7 +316,7 @@ export function registerSkillHandlers(): void {
     }
 
     try {
-      const content = fs.readFileSync(skill.filePath, 'utf-8');
+      const content = await readDocument(skill.filePath, workspace);
       const { frontmatter, body } = parseFrontmatter<SkillFrontmatter>(content);
 
       if (canvas === null) {
@@ -316,35 +331,24 @@ export function registerSkillHandlers(): void {
         else delete frontmatter.space_mode;
       }
 
-      fs.writeFileSync(skill.filePath, serializeFrontmatter(frontmatter, body), 'utf-8');
+      await writeDocument({ filePath: skill.filePath, root: workspace, content: serializeFrontmatter(frontmatter, body), expected: content });
     } catch {
       return { error: 'write_failed' };
     }
 
-    return withCanvasSettings(getSkill(skillId)!);
+    return (await withCanvasSettings((await getSkill(skillId))!));
   });
 
-  registerIpcHandler('skill:clear-schedule', (_event, skillId: string) => {
+  registerIpcHandler('skill:clear-schedule', async (_event, skillId: string) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
-    const skill = getSkill(skillId);
+    const skill = (await getSkill(skillId));
     if (!skill) return { error: 'not_found' };
 
-    updateSkillSchedule(skillId, null, null, null, null);
-
-    // Also remove schedule from SKILL.md frontmatter
-    try {
-      const content = fs.readFileSync(skill.filePath, 'utf-8');
-      const { frontmatter, body } = parseFrontmatter<SkillFrontmatter>(content);
-      delete frontmatter.schedule;
-      delete frontmatter.schedule_time;
-      delete frontmatter.schedule_day;
-      const updated = serializeFrontmatter(frontmatter, body);
-      fs.writeFileSync(skill.filePath, updated, 'utf-8');
-    } catch {
-      // DB is updated even if frontmatter write fails
-    }
+    (await migrateLegacySkillSchedule(workspace, skill));
+    (await clearSkillSchedule(workspace, skillId));
+    (await updateSkillSchedule(skillId, null, null, null, null));
 
     return { success: true };
   });

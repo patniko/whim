@@ -21,6 +21,8 @@ import {
   createSpace,
   listSpaces,
   updateSpace,
+  getDatabase,
+  isInitialized,
 } from './database';
 import {
   fingerprintPathFor,
@@ -50,6 +52,103 @@ afterEach(() => {
 });
 
 describe('initDatabase fingerprint fast path', () => {
+  it('retains a complete final JSON event without LF before admitting another durable save', () => {
+    initDatabase(dbPath, logRoot);
+    createSpace({ body: 'Before restart' });
+    closeDatabase();
+    const file = listLogFiles(logRoot).slice(-1)[0]!;
+    const ts = new Date().toISOString();
+    fs.appendFileSync(file, JSON.stringify({
+      ts, op: 'space.create', data: { id: 'unterminated', description: 'Retained complete JSON', created_at: ts, updated_at: ts },
+    }));
+    initDatabase(dbPath, logRoot);
+    expect(listSpaces().some(space => space.id === 'unterminated')).toBe(true);
+    createSpace({ body: 'After repaired boundary' });
+    closeDatabase();
+    fs.unlinkSync(fingerprintPathFor(dbPath));
+    initDatabase(dbPath, logRoot);
+    expect(listSpaces()).toHaveLength(3);
+  });
+  it('does not label a remote append as applied when the live database closes', () => {
+    initDatabase(dbPath, logRoot);
+    createSpace({ body: 'Local' });
+    closeDatabase();
+    initDatabase(dbPath, logRoot);
+    const before = readFingerprint(fingerprintPathFor(dbPath))!;
+    const file = listLogFiles(logRoot).slice(-1)[0]!;
+    const ts = new Date().toISOString();
+    fs.appendFileSync(file, JSON.stringify({
+      ts, op: 'space.create', data: { id: 'remote', description: 'Remote', created_at: ts, updated_at: ts },
+    }) + '\n');
+    expect(listSpaces().some(space => space.id === 'remote')).toBe(false);
+    createSpace({ body: 'Local write after remote append' });
+    closeDatabase();
+    expect(readFingerprint(fingerprintPathFor(dbPath))!.logFiles).toEqual(before.logFiles);
+    initDatabase(dbPath, logRoot);
+    expect(listSpaces().some(space => space.id === 'remote')).toBe(true);
+  });
+
+  it('preserves the last usable cache and fingerprint when a rebuild fails', () => {
+    initDatabase(dbPath, logRoot);
+    createSpace({ body: 'Saved' });
+    closeDatabase();
+    initDatabase(dbPath, logRoot);
+    closeDatabase();
+    const originalDb = fs.readFileSync(dbPath);
+    const sidecar = fingerprintPathFor(dbPath);
+    const originalFingerprint = fs.readFileSync(sidecar);
+    const file = listLogFiles(logRoot).slice(-1)[0]!;
+    fs.appendFileSync(file, JSON.stringify({
+      ts: new Date().toISOString(), op: 'future.durable_change', data: {},
+    }) + '\n');
+    expect(() => initDatabase(dbPath, logRoot)).toThrow('Unsupported durable event');
+    expect(isInitialized()).toBe(false);
+    closeDatabase();
+    expect(fs.readFileSync(dbPath)).toEqual(originalDb);
+    expect(fs.readFileSync(sidecar)).toEqual(originalFingerprint);
+    expect(fs.readdirSync(testDir).filter(file => file.includes('.rebuild-'))).toEqual([]);
+  });
+
+  it('never fingerprints a failed local apply as successfully materialized', () => {
+    initDatabase(dbPath, logRoot);
+    getDatabase().exec(`CREATE TRIGGER reject_space BEFORE INSERT ON spaces BEGIN SELECT RAISE(ABORT, 'Injected SQL failure'); END`);
+    expect(() => createSpace({ body: 'Durably logged before failed apply' })).toThrow('Injected SQL failure');
+    closeDatabase();
+    initDatabase(dbPath, logRoot);
+    expect(listSpaces()).toHaveLength(1);
+    expect(listSpaces()[0].description).toBe('Durably logged before failed apply');
+  });
+
+  it('quarantines torn bytes before acknowledging new appends and checkpointing', () => {
+    initDatabase(dbPath, logRoot);
+    createSpace({ body: 'Saved before torn append' });
+    closeDatabase();
+    const file = listLogFiles(logRoot).slice(-1)[0]!;
+    fs.appendFileSync(file, '{"ts":');
+    initDatabase(dbPath, logRoot);
+    expect(listSpaces()).toHaveLength(1);
+    const quarantine = fs.readdirSync(path.dirname(file)).find(name => name.includes('.torn-'))!;
+    expect(fs.readFileSync(path.join(path.dirname(file), quarantine), 'utf8')).toBe('{"ts":');
+    expect(fs.readFileSync(file, 'utf8').endsWith('\n')).toBe(true);
+    createSpace({ body: 'Acknowledged after recovery' });
+    closeDatabase();
+    expect(readFingerprint(fingerprintPathFor(dbPath))).not.toBeNull();
+    fs.unlinkSync(fingerprintPathFor(dbPath));
+    initDatabase(dbPath, logRoot);
+    expect(listSpaces()).toHaveLength(2);
+  });
+
+  it('cannot acknowledge past a failed SQL apply when later local writes succeed', () => {
+    initDatabase(dbPath, logRoot);
+    getDatabase().exec(`CREATE TRIGGER reject_space BEFORE INSERT ON spaces BEGIN SELECT RAISE(ABORT, 'Injected SQL failure'); END`);
+    expect(() => createSpace({ body: 'First logged event' })).toThrow('Injected SQL failure');
+    getDatabase().exec('DROP TRIGGER reject_space');
+    createSpace({ body: 'Later successfully applied event' });
+    closeDatabase();
+    initDatabase(dbPath, logRoot);
+    expect(listSpaces()).toHaveLength(2);
+  });
+
   it('writes a sidecar after a fresh build', () => {
     initDatabase(dbPath, logRoot);
     createSpace({ body: 'Hello' });
@@ -72,7 +171,6 @@ describe('initDatabase fingerprint fast path', () => {
     initDatabase(dbPath, logRoot);
     const space = createSpace({ body: 'Persistent' });
     closeDatabase();
-
     // Spy on replayLog to prove the fast path skipped it.
     const eventlog = await import('./eventlog');
     const replaySpy = vi.spyOn(eventlog, 'replayLog');

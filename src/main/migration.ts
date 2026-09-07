@@ -1,19 +1,20 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { app } from 'electron';
 import Database from 'better-sqlite3';
 import { appendEvent } from './eventlog';
 import { getLogRoot } from './workspace';
 import { listLogFiles } from './log-store';
-import { setConfigValue, loadConfig } from './config';
-
-const OLD_DB_PATH = path.join(app.getPath('userData'), 'spaces.db');
+export interface MigratedSettings {
+  theme?: 'light' | 'dark';
+  model?: string;
+  sessions: Record<string, string>;
+}
 
 /**
  * Migrate data from the old userData DB to the new workspace event log.
  * Idempotent: skips if the event log already has content.
  */
-export function migrateOldDatabase(workspaceRoot: string): void {
+export function migrateOldDatabase(workspaceRoot: string, OLD_DB_PATH: string): MigratedSettings | undefined {
   if (!fs.existsSync(OLD_DB_PATH)) return;
 
   const logRoot = getLogRoot(workspaceRoot);
@@ -34,6 +35,7 @@ export function migrateOldDatabase(workspaceRoot: string): void {
   console.log('[migration] Migrating old database to workspace event log...');
 
   let oldDb: InstanceType<typeof Database>;
+  const migrated: MigratedSettings = { sessions: {} };
   try {
     oldDb = new Database(OLD_DB_PATH, { readonly: true });
   } catch (err) {
@@ -63,8 +65,8 @@ export function migrateOldDatabase(workspaceRoot: string): void {
     try {
       const settings = oldDb.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
       for (const s of settings) {
-        if (s.key === 'theme') setConfigValue('theme', s.value as 'light' | 'dark');
-        if (s.key === 'model') setConfigValue('model', s.value);
+        if (s.key === 'theme' && (s.value === 'light' || s.value === 'dark')) migrated.theme = s.value;
+        if (s.key === 'model') migrated.model = s.value;
         // workspace_root is already set (user just selected the workspace)
       }
 
@@ -73,13 +75,9 @@ export function migrateOldDatabase(workspaceRoot: string): void {
         `SELECT id, session_id FROM intents WHERE session_id IS NOT NULL`
       ).all() as { id: string; session_id: string }[];
 
-      const config = loadConfig();
       for (const i of intentsWithSessions) {
-        if (!config.sessions[i.id]) {
-          config.sessions[i.id] = i.session_id;
-        }
+        migrated.sessions[i.id] = i.session_id;
       }
-      setConfigValue('sessions', config.sessions);
     } catch {
       // settings table might not exist
     }
@@ -104,6 +102,7 @@ export function migrateOldDatabase(workspaceRoot: string): void {
 
     // Only rename old DB after successful log write
     if (migrationSucceeded) {
+      oldDb.close();
       const backupPath = OLD_DB_PATH + '.migrated';
       fs.renameSync(OLD_DB_PATH, backupPath);
       for (const suffix of ['-journal', '-wal', '-shm']) {
@@ -112,9 +111,10 @@ export function migrateOldDatabase(workspaceRoot: string): void {
       }
       console.log(`[migration] Old database backed up to ${backupPath}`);
     }
+    return migrated;
   } catch (err) {
     console.error('[migration] Migration failed:', err);
   } finally {
-    oldDb.close();
+    if (oldDb.open) oldDb.close();
   }
 }

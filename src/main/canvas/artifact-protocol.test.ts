@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+vi.mock('../storage', async () => await import('./artifact-store'));
 
 vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] },
@@ -34,14 +35,14 @@ const resolveSpace: SpaceResolver = spaceId =>
 
 async function publish(html = '<h1>Report</h1>') {
   fs.writeFileSync(path.join(spaceDir(), 'report.html'), html, 'utf-8');
-  return publishArtifact({
+  return (await publishArtifact({
     workspaceRoot: workspace,
     folder: FOLDER,
     spaceId: SPACE_ID,
     artifactId: ARTIFACT_ID,
     title: 'Open questions',
     sourceRelativePath: 'report.html',
-  });
+  }));
 }
 
 beforeEach(() => {
@@ -101,7 +102,7 @@ describe('parseArtifactUrl', () => {
 describe('resolveArtifactRequest', () => {
   it('serves a published artifact with hardened headers', async () => {
     await publish();
-    const result = resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID), resolveSpace);
+    const result = (await resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID), resolveSpace));
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -121,12 +122,12 @@ describe('resolveArtifactRequest', () => {
 
   it('404s for an unknown space or artifact', async () => {
     await publish();
-    expect(resolveArtifactRequest(buildArtifactUrl('nope', ARTIFACT_ID), resolveSpace)).toMatchObject({
+    expect((await resolveArtifactRequest(buildArtifactUrl('nope', ARTIFACT_ID), resolveSpace))).toMatchObject({
       ok: false,
       status: 404,
       reason: 'unknown_space',
     });
-    expect(resolveArtifactRequest(buildArtifactUrl(SPACE_ID, 'missing'), resolveSpace)).toMatchObject({
+    expect((await resolveArtifactRequest(buildArtifactUrl(SPACE_ID, 'missing'), resolveSpace))).toMatchObject({
       ok: false,
       status: 404,
       reason: 'unknown_artifact',
@@ -142,14 +143,14 @@ describe('resolveArtifactRequest', () => {
       title: 'Open questions',
     });
 
-    expect(resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID), resolveSpace)).toMatchObject({
+    expect((await resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID), resolveSpace))).toMatchObject({
       ok: false,
       status: 404,
     });
   });
 
-  it('400s on a malformed url', () => {
-    expect(resolveArtifactRequest('garbage', resolveSpace)).toMatchObject({ ok: false, status: 400 });
+  it('400s on a malformed url', async () => {
+    expect((await resolveArtifactRequest('garbage', resolveSpace))).toMatchObject({ ok: false, status: 400 });
   });
 
   it('refuses to serve a symlink that escapes the artifact directory', async () => {
@@ -158,7 +159,7 @@ describe('resolveArtifactRequest', () => {
     fs.writeFileSync(secretPath, 'secret', 'utf-8');
     fs.symlinkSync(secretPath, path.join(artifact.dir, 'leak.txt'));
 
-    expect(resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID, 'leak.txt'), resolveSpace)).toMatchObject({
+    expect((await resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID, 'leak.txt'), resolveSpace))).toMatchObject({
       ok: false,
       status: 403,
       reason: 'escape',
@@ -169,7 +170,7 @@ describe('resolveArtifactRequest', () => {
     await publish();
     // ../ inside the file segment is rejected before it reaches the filesystem.
     expect(
-      resolveArtifactRequest(`${ARTIFACT_SCHEME}://space/${SPACE_ID}/${ARTIFACT_ID}/../other/index.html`, resolveSpace),
+      (await resolveArtifactRequest(`${ARTIFACT_SCHEME}://space/${SPACE_ID}/${ARTIFACT_ID}/../other/index.html`, resolveSpace)),
     ).toMatchObject({ ok: false });
   });
 
@@ -177,7 +178,7 @@ describe('resolveArtifactRequest', () => {
     const { artifact } = await publish();
     fs.writeFileSync(path.join(artifact.dir, 'payload.js'), 'alert(1)', 'utf-8');
 
-    expect(resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID, 'payload.js'), resolveSpace)).toMatchObject({
+    expect((await resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID, 'payload.js'), resolveSpace))).toMatchObject({
       ok: false,
       status: 415,
     });
@@ -188,7 +189,7 @@ describe('resolveArtifactRequest', () => {
     fs.mkdirSync(path.join(artifact.dir, 'assets'), { recursive: true });
     fs.writeFileSync(path.join(artifact.dir, 'assets', 'style.css'), 'body{}', 'utf-8');
 
-    const result = resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID, 'assets/style.css'), resolveSpace);
+    const result = (await resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID, 'assets/style.css'), resolveSpace));
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.mimeType).toBe('text/css; charset=utf-8');
   });
@@ -197,7 +198,7 @@ describe('resolveArtifactRequest', () => {
     const { artifact } = await publish();
     fs.mkdirSync(path.join(artifact.dir, 'assets'), { recursive: true });
 
-    expect(resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID, 'assets'), resolveSpace)).toMatchObject({
+    expect((await resolveArtifactRequest(buildArtifactUrl(SPACE_ID, ARTIFACT_ID, 'assets'), resolveSpace))).toMatchObject({
       ok: false,
       status: 404,
     });

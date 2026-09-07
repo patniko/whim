@@ -1,15 +1,20 @@
-import type { Space } from '../../shared/types';
+import type { SpaceSummary as Space, SpacePage } from '../../shared/paging';
+import { toSpaceSummary } from '../../shared/paging';
 import type { RecallMatch } from '../../shared/types';
+import { reconcileByKey } from './reconcile';
 
 export type SpaceFilter = 'open' | 'agents' | 'skills' | 'closed';
 
 export interface SpaceState {
   spaces: Space[];
+  page: SpacePage | null;
+  hydrated: boolean;
   filter: SpaceFilter;
   searchResults: Space[] | null;
   searchMode: boolean;
   activeSearchQuery: string;
   focusedSpaceId: string | null;
+  focusedSummary: Space | null;
   canvasSpaceId: string | null;
   /** Index of the keyboard-selected row in the currently displayed list (-1 = none). */
   selectedIndex: number;
@@ -22,11 +27,14 @@ type Listener = () => void;
 class SpaceStore {
   private state: SpaceState = {
     spaces: [],
+    page: null,
+    hydrated: false,
     filter: 'open',
     searchResults: null,
     searchMode: false,
     activeSearchQuery: '',
     focusedSpaceId: null,
+    focusedSummary: null,
     canvasSpaceId: null,
     selectedIndex: -1,
     recallHints: new Map(),
@@ -41,7 +49,21 @@ class SpaceStore {
   }
 
   setSpaces(spaces: Space[]): void {
-    this.state = { ...this.state, spaces };
+    spaces = reconcileByKey(this.state.spaces, spaces, space => space.id);
+    if (spaces === this.state.spaces && this.state.hydrated) return;
+    this.state = { ...this.state, spaces, hydrated: true };
+    this.notify();
+  }
+
+  setPage(page: SpacePage): void {
+    const spaces = reconcileByKey(this.state.spaces, page.items, space => space.id);
+    const selectedId = this.state.spaces[this.state.selectedIndex]?.id;
+    this.state = {
+      ...this.state, spaces, page: { ...page, items: spaces }, hydrated: true,
+      searchResults: this.state.searchMode && this.state.activeSearchQuery ? spaces : null,
+      focusedSummary: spaces.find(space => space.id === this.state.focusedSpaceId) ?? this.state.focusedSummary,
+      selectedIndex: selectedId ? spaces.findIndex(space => space.id === selectedId) : -1,
+    };
     this.notify();
   }
 
@@ -51,6 +73,8 @@ class SpaceStore {
    * creation so the new row renders without a full list reload.
    */
   upsertSpace(space: Space): void {
+    space = toSpaceSummary(space);
+    this.nextRequestId();
     const existingIdx = this.state.spaces.findIndex(s => s.id === space.id);
     let spaces: Space[];
     if (existingIdx >= 0) {
@@ -59,11 +83,14 @@ class SpaceStore {
     } else {
       spaces = [space, ...this.state.spaces];
     }
+    spaces = reconcileByKey(this.state.spaces, spaces, item => item.id);
+    if (spaces === this.state.spaces) return;
     this.state = { ...this.state, spaces };
     this.notify();
   }
 
   updateSpaceTitle(id: string, title: string): void {
+    this.nextRequestId();
     let changed = false;
     const spaces = this.state.spaces.map((space) => {
       if (space.id !== id || space.description === title) return space;
@@ -76,11 +103,17 @@ class SpaceStore {
   }
 
   setFilter(filter: SpaceFilter): void {
+    if (filter === this.state.filter) return;
+    this.nextRequestId();
     this.state = { ...this.state, filter };
     this.notify();
   }
 
   setSearchResults(results: Space[] | null): void {
+    if (results && this.state.searchResults) {
+      results = reconcileByKey(this.state.searchResults, results, space => space.id);
+    }
+    if (results === this.state.searchResults) return;
     this.state = { ...this.state, searchResults: results };
     this.notify();
   }
@@ -91,12 +124,19 @@ class SpaceStore {
   }
 
   setActiveSearchQuery(query: string): void {
+    this.nextRequestId();
     this.state = { ...this.state, activeSearchQuery: query };
     this.notify();
   }
 
   setFocusedSpace(id: string | null): void {
-    this.state = { ...this.state, focusedSpaceId: id };
+    this.state = { ...this.state, focusedSpaceId: id, focusedSummary: id ? this.getSpace(id) ?? null : null };
+    this.notify();
+  }
+
+  setFocusedSummary(space: Space | null): void {
+    if (space && space.id !== this.state.focusedSpaceId) return;
+    this.state = { ...this.state, focusedSummary: space ? toSpaceSummary(space) : null };
     this.notify();
   }
 
@@ -106,6 +146,7 @@ class SpaceStore {
   }
 
   setSelectedIndex(index: number): void {
+    if (index === this.state.selectedIndex) return;
     this.state = { ...this.state, selectedIndex: index };
     this.notify();
   }
@@ -132,6 +173,16 @@ class SpaceStore {
   /** True if the given id is still the latest reserved id. */
   isCurrentRequest(id: number): boolean {
     return id === this.latestRequestId;
+  }
+
+  reset(): void {
+    this.nextRequestId();
+    this.state = {
+      ...this.state, spaces: [], page: null, hydrated: false, searchResults: null, searchMode: false,
+      activeSearchQuery: '', focusedSpaceId: null, focusedSummary: null, canvasSpaceId: null,
+      selectedIndex: -1, recallHints: new Map(),
+    };
+    this.notify();
   }
 
   /** Subscribe to state changes. Returns an unsubscribe function (useSyncExternalStore-compatible). */
@@ -163,7 +214,7 @@ class SpaceStore {
   }
 
   getSpace(id: string): Space | undefined {
-    return this.state.spaces.find(i => i.id === id);
+    return this.state.spaces.find(i => i.id === id) ?? (this.state.focusedSummary?.id === id ? this.state.focusedSummary : undefined);
   }
 
   private notify(): void {

@@ -13,6 +13,7 @@ vi.mock('electron', () => ({
 vi.mock('./eventlog', () => ({
   appendEvent: vi.fn(),
   replayLog: vi.fn(),
+  recoverLogTails: vi.fn(),
 }));
 
 // Mock workspace

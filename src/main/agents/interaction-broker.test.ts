@@ -52,11 +52,23 @@ describe('InteractionBroker', () => {
   });
 
   describe('approveAgent', () => {
+    it('rejects the waiting permission call when persisting an approval fails', async () => {
+      const record = makeRecord();
+      vi.mocked(persistence.updateStatus).mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('durable status failed'));
+      const handler = broker.createPermissionHandler(() => record);
+      const waiting = handler({ kind: 'write', toolCallId: 'failing', intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false }, { sessionId: 'session-1' });
+      await Promise.resolve();
+      await Promise.resolve();
+      broker.approveAgent('agent-1', 'failing', true);
+      await expect(waiting).rejects.toThrow('durable status failed');
+    });
     it('resolves pending approval callback with true', async () => {
       const record = makeRecord();
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler({ kind: 'file_edit', toolCallId: 'req-1' }, { sessionId: 'session-1' });
+      const promise = (handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-1' }, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       // Approve the request
       broker.approveAgent('agent-1', 'req-1', true);
@@ -69,7 +81,7 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const result = await handler({ kind: 'read', toolCallId: 'req-r1' }, { sessionId: 'session-1' });
+      const result = await handler({ intention: 'Read fixture', path: '/tmp/fixture', kind: 'read', toolCallId: 'req-r1' }, { sessionId: 'session-1' });
       expect(result).toEqual({ kind: 'approve-once' });
       // Should not trigger any renderer notifications (no interactive prompt)
       expect(notifier.notifyRenderer).not.toHaveBeenCalled();
@@ -81,9 +93,11 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler({ kind: 'file_edit', toolCallId: 'req-2' }, { sessionId: 'session-1' });
+      const promise = (handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-2' }, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
       expect(logSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Permission requested: kind=file_edit requestId=req-2')
+        expect.stringContaining('Permission requested: kind=write requestId=req-2')
       );
 
       broker.approveAgent('agent-1', 'req-2', true);
@@ -98,7 +112,9 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler({ kind: 'file_edit', toolCallId: 'req-1' }, { sessionId: 'session-1' });
+      const promise = (handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-1' }, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       broker.approveAgent('agent-1', 'req-1', false);
 
@@ -140,7 +156,9 @@ describe('InteractionBroker', () => {
       });
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler({ kind: 'file_edit', toolCallId: 'req-thread' }, { sessionId: 'session-1' });
+      const promise = (handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-thread' }, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       expect(notifier.notifyRenderer).toHaveBeenCalledWith('agent:approval-needed', expect.objectContaining({
         agentId: 'agent-1',
@@ -167,7 +185,7 @@ describe('InteractionBroker', () => {
       const record = makeRecord({ yoloMode: true });
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const result = await handler({ kind: 'write', toolCallId: 'req-y1' } as any, { sessionId: 'session-1' });
+      const result = await handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-y1' } as any, { sessionId: 'session-1' });
       expect(result).toEqual({ kind: 'approve-once' });
       // Should not trigger any renderer notifications (yolo auto-approved)
       expect(notifier.notifyRenderer).not.toHaveBeenCalled();
@@ -178,7 +196,7 @@ describe('InteractionBroker', () => {
       const record = makeRecord({ yoloMode: true });
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const result = await handler({ kind: 'shell', toolCallId: 'req-y2' } as any, { sessionId: 'session-1' });
+      const result = await handler({ intention: 'Run fixture', fullCommandText: 'true', canOfferSessionApproval: false, commands: [], hasWriteFileRedirection: false, possiblePaths: [], possibleUrls: [], kind: 'shell', toolCallId: 'req-y2' } as any, { sessionId: 'session-1' });
       expect(result).toEqual({ kind: 'approve-once' });
       expect(notifier.notifyRenderer).not.toHaveBeenCalled();
     });
@@ -187,7 +205,9 @@ describe('InteractionBroker', () => {
       const record = makeRecord({ yoloMode: false });
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler({ kind: 'write', toolCallId: 'req-y3' } as any, { sessionId: 'session-1' });
+      const promise = (handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-y3' } as any, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
       // Should trigger renderer notification (interactive prompt)
       expect(notifier.notifyRenderer).toHaveBeenCalled();
 
@@ -201,7 +221,7 @@ describe('InteractionBroker', () => {
       const record = makeRecord({ yoloMode: true });
       const handler = broker.createSandboxedPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const result = await handler({ kind: 'write', toolCallId: 'req-y4' } as any, { sessionId: 'session-1' });
+      const result = await handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-y4' } as any, { sessionId: 'session-1' });
       expect(result).toEqual({ kind: 'approve-once' });
     });
 
@@ -210,7 +230,7 @@ describe('InteractionBroker', () => {
       const record = makeRecord({ yoloMode: true });
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      await handler({ kind: 'write', toolCallId: 'req-y5' } as any, { sessionId: 'session-1' });
+      await handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-y5' } as any, { sessionId: 'session-1' });
       expect(logSpy).toHaveBeenCalledWith(
         expect.stringContaining('yolo-mode auto-approve')
       );
@@ -234,10 +254,12 @@ describe('InteractionBroker', () => {
       });
       const handler = broker.createUserInputHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler(
+      const promise = (handler(
         { question: 'Pick a color', choices: ['red', 'blue'] },
         { sessionId: 'session-1' },
-      );
+      ));
+      await Promise.resolve();
+      await Promise.resolve();
 
       // We need to find the requestId. The handler uses crypto.randomUUID() so we
       // spy on notifier to capture the requestId from the notification.
@@ -300,13 +322,15 @@ describe('InteractionBroker', () => {
       });
       const handler = broker.createElicitationHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler({
+      const promise = (handler({
         sessionId: 'session-1',
         message: 'Enter details',
         requestedSchema: {},
         mode: 'inline',
         elicitationSource: 'tool',
-      } as any);
+      } as any));
+      await Promise.resolve();
+      await Promise.resolve();
 
       const call = vi.mocked(notifier.notifyRenderer).mock.calls.find(
         c => typeof c[1] === 'object' && (c[1] as any).type === 'elicitation.requested'
@@ -338,13 +362,15 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       const handler = broker.createElicitationHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler({
+      const promise = (handler({
         sessionId: 'session-1',
         message: 'Enter details',
         requestedSchema: {},
         mode: 'inline',
         elicitationSource: 'tool',
-      } as any);
+      } as any));
+      await Promise.resolve();
+      await Promise.resolve();
 
       const call = vi.mocked(notifier.notifyRenderer).mock.calls.find(
         c => typeof c[1] === 'object' && (c[1] as any).type === 'elicitation.requested'
@@ -374,7 +400,9 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler({ kind: 'file_edit', toolCallId: 'req-1' }, { sessionId: 'session-1' });
+      const promise = (handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-1' }, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       broker.clearPendingInteractions(record);
 
@@ -386,7 +414,9 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       const handler = broker.createUserInputHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler({ question: 'test?' }, { sessionId: 'session-1' });
+      const promise = (handler({ question: 'test?' }, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       broker.clearPendingInteractions(record);
 
@@ -398,13 +428,15 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       const handler = broker.createElicitationHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      const promise = handler({
+      const promise = (handler({
         sessionId: 'session-1',
         message: 'test',
         requestedSchema: {},
         mode: 'inline',
         elicitationSource: 'tool',
-      } as any);
+      } as any));
+      await Promise.resolve();
+      await Promise.resolve();
 
       broker.clearPendingInteractions(record);
 
@@ -414,9 +446,9 @@ describe('InteractionBroker', () => {
 
     it('clears record pending approval state', () => {
       const record = makeRecord();
-      record.pendingApprovals.set('req-1', { permissionKind: 'file_edit' });
+      record.pendingApprovals.set('req-1', { permissionKind: 'write' });
       record.pendingApprovalId = 'req-1';
-      record.pendingPermissionKind = 'file_edit';
+      record.pendingPermissionKind = 'write';
 
       broker.clearPendingInteractions(record);
 
@@ -429,7 +461,7 @@ describe('InteractionBroker', () => {
   describe('createPermissionHandler', () => {
     it('returns denied when record is not found', async () => {
       const handler = broker.createPermissionHandler(() => undefined);
-      const result = await handler({ kind: 'file_edit' }, { sessionId: 'unknown' });
+      const result = await handler({ kind: 'write', intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false }, { sessionId: 'unknown' });
       expect(result).toEqual({ kind: 'reject' });
     });
 
@@ -438,11 +470,13 @@ describe('InteractionBroker', () => {
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
       // Don't await — the promise won't resolve until approved
-      handler({ kind: 'file_edit', toolCallId: 'req-1' }, { sessionId: 'session-1' });
+      (handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-1' }, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       expect(record.status).toBe('waiting-approval');
       expect(record.pendingApprovalId).toBe('req-1');
-      expect(record.pendingPermissionKind).toBe('file_edit');
+      expect(record.pendingPermissionKind).toBe('write');
 
       // Clean up
       broker.approveAgent('agent-1', 'req-1', false);
@@ -452,17 +486,19 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      handler({ kind: 'file_edit', toolCallId: 'req-1' }, { sessionId: 'session-1' });
+      (handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-1' }, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       expect(notifier.showApprovalNotification).toHaveBeenCalledWith(expect.objectContaining({
         agentId: 'agent-1',
         requestId: 'req-1',
-        permissionKind: 'file_edit',
+        permissionKind: 'write',
       }));
       expect(notifier.notifyRenderer).toHaveBeenCalledWith('agent:approval-needed', expect.objectContaining({
         agentId: 'agent-1',
         requestId: 'req-1',
-        permissionKind: 'file_edit',
+        permissionKind: 'write',
       }));
 
       broker.approveAgent('agent-1', 'req-1', false);
@@ -487,7 +523,9 @@ describe('InteractionBroker', () => {
       const record = makeRecord({ autoApproveCanvasTools: true });
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      handler({ kind: 'shell', toolCallId: 'req-2' } as any, { sessionId: 'session-1' });
+      (handler({ intention: 'Run fixture', fullCommandText: 'true', canOfferSessionApproval: false, commands: [], hasWriteFileRedirection: false, possiblePaths: [], possibleUrls: [], kind: 'shell', toolCallId: 'req-2' } as any, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       expect(record.status).toBe('waiting-approval');
       broker.approveAgent('agent-1', 'req-2', false);
@@ -497,10 +535,12 @@ describe('InteractionBroker', () => {
       const record = makeRecord({ autoApproveCanvasTools: true });
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      handler(
+      (handler(
         { kind: 'custom-tool', toolName: 'delete_canvas_files', toolCallId: 'req-3' } as any,
         { sessionId: 'session-1' },
-      );
+      ));
+      await Promise.resolve();
+      await Promise.resolve();
 
       expect(record.status).toBe('waiting-approval');
       broker.approveAgent('agent-1', 'req-3', false);
@@ -510,7 +550,9 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       const handler = broker.createPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
 
-      handler(canvasCall, { sessionId: 'session-1' });
+      (handler(canvasCall, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       expect(record.status).toBe('waiting-approval');
       broker.approveAgent('agent-1', 'req-1', false);
@@ -547,7 +589,7 @@ describe('InteractionBroker', () => {
       );
 
       const result = await handler(
-        { kind: 'read', toolCallId: 'req-r1' },
+        { intention: 'Read fixture', path: '/tmp/fixture', kind: 'read', toolCallId: 'req-r1' },
         { sessionId: 'session-1' },
       );
       expect(result).toEqual({ kind: 'approve-once' });
@@ -560,7 +602,7 @@ describe('InteractionBroker', () => {
       );
 
       const result = await handler(
-        { kind: 'write', toolCallId: 'req-w1' },
+        { intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'req-w1' },
         { sessionId: 'session-1' },
       );
       expect(result).toEqual({ kind: 'reject' });
@@ -573,10 +615,12 @@ describe('InteractionBroker', () => {
       );
 
       // shell/mcp/url etc. should trigger the normal interactive flow
-      const promise = handler(
-        { kind: 'shell', toolCallId: 'req-s1' },
+      const promise = (handler(
+        { intention: 'Run fixture', fullCommandText: 'true', canOfferSessionApproval: false, commands: [], hasWriteFileRedirection: false, possiblePaths: [], possibleUrls: [], kind: 'shell', toolCallId: 'req-s1' },
         { sessionId: 'session-1' },
-      );
+      ));
+      await Promise.resolve();
+      await Promise.resolve();
 
       // Approve via the normal flow
       broker.approveAgent('agent-1', 'req-s1', true);
@@ -588,11 +632,13 @@ describe('InteractionBroker', () => {
   describe('emitSandboxBlock + resolveSandboxBlock', () => {
     it('resolves with the chosen decision', async () => {
       const record = makeRecord();
-      const promise = broker.emitSandboxBlock(record, {
+      const promise = (broker.emitSandboxBlock(record, {
         source: 'permission',
         kind: 'write',
         target: 'C:\\foo\\bar.txt',
-      });
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
       const callArgs = (notifier.notifyRenderer as any).mock.calls.find((c: any[]) => c[0] === 'agent:sandbox-blocked');
       expect(callArgs).toBeDefined();
       const requestId = callArgs[1].requestId;
@@ -604,11 +650,13 @@ describe('InteractionBroker', () => {
 
     it('clears all pending sandbox-block callbacks on clearPendingInteractions', async () => {
       const record = makeRecord();
-      const promise = broker.emitSandboxBlock(record, {
+      const promise = (broker.emitSandboxBlock(record, {
         source: 'permission',
         kind: 'read',
         target: 'C:\\secret.txt',
-      });
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       broker.clearPendingInteractions(record);
 
@@ -620,12 +668,14 @@ describe('InteractionBroker', () => {
     it('emits both agent:sandbox-blocked and a chat:event:* with type sandbox.blocked', async () => {
       const record = makeRecord();
       // Fire-and-forget: we don't need the resolution.
-      broker.emitSandboxBlock(record, {
+      (broker.emitSandboxBlock(record, {
         source: 'pre-tool',
         kind: 'write',
         toolName: 'edit',
         target: 'C:\\foo\\bar.txt',
-      });
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
 
       const channels = (notifier.notifyRenderer as any).mock.calls.map((c: any[]) => c[0]);
       expect(channels).toContain('agent:sandbox-blocked');
@@ -637,12 +687,14 @@ describe('InteractionBroker', () => {
       // know which persona to open. If it's missing, the button silently
       // becomes a no-op.
       const record = makeRecord({ personaHandle: 'sandbox' });
-      broker.emitSandboxBlock(record, {
+      (broker.emitSandboxBlock(record, {
         source: 'post-tool-shell',
         kind: 'shell',
         toolName: 'bash',
         target: 'echo hi > ~/whim-sandbox-denied.txt',
-      });
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
       const blockedCall = (notifier.notifyRenderer as any).mock.calls.find(
         (c: any[]) => c[0] === 'agent:sandbox-blocked',
       );
@@ -666,11 +718,13 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       expect(record.personaHandle).toBeUndefined();
 
-      broker.emitSandboxBlock(record, {
+      (broker.emitSandboxBlock(record, {
         source: 'permission',
         kind: 'write',
         target: 'C:\\foo\\bar.txt',
-      });
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
       const blockedCall = (notifier.notifyRenderer as any).mock.calls.find(
         (c: any[]) => c[0] === 'agent:sandbox-blocked',
       );
@@ -685,12 +739,14 @@ describe('InteractionBroker', () => {
       // notify the other so its UI clears. We assert the dedicated channel
       // is broadcast with the agentId / requestId / decision.
       const record = makeRecord();
-      const promise = broker.emitSandboxBlock(record, {
+      const promise = (broker.emitSandboxBlock(record, {
         source: 'pre-tool',
         kind: 'write',
         toolName: 'edit',
         target: 'C:\\foo\\bar.txt',
-      });
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
       const blockedCall = (notifier.notifyRenderer as any).mock.calls.find(
         (c: any[]) => c[0] === 'agent:sandbox-blocked',
       );
@@ -744,7 +800,9 @@ describe('InteractionBroker', () => {
       const record = makeSandboxedRecord();
       record.sandbox!.state = 'off';
       const handler = broker.createPathAwareSandboxPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
-      const promise = handler({ kind: 'read', toolCallId: 'tc' } as any, { sessionId: 'session-1' });
+      const promise = (handler({ intention: 'Read fixture', path: '/tmp/fixture', kind: 'read', toolCallId: 'tc' } as any, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
       // Read should auto-approve in the fallback handler regardless.
       const result = await promise;
       expect(result).toEqual({ kind: 'approve-once' });
@@ -753,7 +811,7 @@ describe('InteractionBroker', () => {
     it('approves a read inside the space folder', async () => {
       const record = makeSandboxedRecord();
       const handler = broker.createPathAwareSandboxPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
-      const r = await handler({
+      const r = await handler({ intention: 'Read fixture',
         kind: 'read',
         toolCallId: 'tc',
         path: path.join(spaceFolder, 'canvas.md'),
@@ -764,11 +822,13 @@ describe('InteractionBroker', () => {
     it('emits a sandbox block for a read outside the space folder', async () => {
       const record = makeSandboxedRecord();
       const handler = broker.createPathAwareSandboxPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
-      const promise = handler({
+      const promise = (handler({ intention: 'Read fixture',
         kind: 'read',
         toolCallId: 'tc',
         path: path.join(siblingFolder, 'secret.txt'),
-      } as any, { sessionId: 'session-1' });
+      } as any, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
       // Find the requestId from the emitted block, then resolve it.
       const call = (notifier.notifyRenderer as any).mock.calls.find((c: any[]) => c[0] === 'agent:sandbox-blocked');
       expect(call).toBeDefined();
@@ -780,12 +840,14 @@ describe('InteractionBroker', () => {
     it('grows the host allow-list on allow-for-session', async () => {
       const record = makeSandboxedRecord();
       const handler = broker.createPathAwareSandboxPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
-      const promise = handler({
+      const promise = (handler({ diff: '', canOfferSessionApproval: false,
         kind: 'write',
         toolCallId: 'tc',
         fileName: path.join(siblingFolder, 'out.txt'),
         intention: 'write log',
-      } as any, { sessionId: 'session-1' });
+      } as any, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
       const call = (notifier.notifyRenderer as any).mock.calls.find((c: any[]) => c[0] === 'agent:sandbox-blocked');
       broker.resolveSandboxBlock('agent-1', call[1].requestId, 'allow-for-session');
       await promise;
@@ -815,7 +877,7 @@ describe('InteractionBroker', () => {
 
     it('rejects when no record is found for the session', async () => {
       const handler = broker.createMxcOnlyPermissionHandler(() => undefined);
-      const r = await handler({ kind: 'write', toolCallId: 'tc' } as any, { sessionId: 'unknown' });
+      const r = await handler({ intention: 'Write fixture', fileName: '/tmp/fixture', diff: '', canOfferSessionApproval: false, kind: 'write', toolCallId: 'tc' } as any, { sessionId: 'unknown' });
       expect(r).toEqual({ kind: 'reject' });
     });
 
@@ -823,7 +885,7 @@ describe('InteractionBroker', () => {
       const record = makeSandboxedRecord();
       const handler = broker.createMxcOnlyPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const r = await handler({
+      const r = await handler({ intention: 'Write fixture', diff: '', canOfferSessionApproval: false,
         kind: 'write',
         toolCallId: 'tc',
         fileName: 'C:\\workspace\\my-space\\out.txt',
@@ -861,16 +923,18 @@ describe('InteractionBroker', () => {
 
       // Read should still auto-approve via the fallback handler (and not log
       // the auto-approve breadcrumb, since the mxc-only path was abandoned).
-      const r = await handler({ kind: 'read', toolCallId: 'tc' } as any, { sessionId: 'session-1' });
+      const r = await handler({ intention: 'Read fixture', path: '/tmp/fixture', kind: 'read', toolCallId: 'tc' } as any, { sessionId: 'session-1' });
       expect(r).toEqual({ kind: 'approve-once' });
 
       // Write should bubble up via the fallback handler — verify by checking
       // the renderer was notified (we don't need to resolve the promise).
-      void handler({
+      void (handler({ intention: 'Write fixture', diff: '', canOfferSessionApproval: false,
         kind: 'write',
         toolCallId: 'tc-w',
         fileName: 'C:\\workspace\\my-space\\out.txt',
-      } as any, { sessionId: 'session-1' });
+      } as any, { sessionId: 'session-1' }));
+      await Promise.resolve();
+      await Promise.resolve();
       // Allow microtasks to flush the synchronous notify in createPermissionHandler.
       await Promise.resolve();
       expect(notifier.notifyRenderer).toHaveBeenCalledWith(
@@ -883,7 +947,7 @@ describe('InteractionBroker', () => {
       const record = makeRecord();
       // record.sandbox is undefined.
       const handler = broker.createMxcOnlyPermissionHandler((sid) => sid === 'session-1' ? record : undefined);
-      const r = await handler({ kind: 'read', toolCallId: 'tc' } as any, { sessionId: 'session-1' });
+      const r = await handler({ intention: 'Read fixture', path: '/tmp/fixture', kind: 'read', toolCallId: 'tc' } as any, { sessionId: 'session-1' });
       expect(r).toEqual({ kind: 'approve-once' });
     });
   });

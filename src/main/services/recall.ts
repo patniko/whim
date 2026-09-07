@@ -1,10 +1,10 @@
-import { listSpaces } from '../database';
+import { listSpaces } from '../storage';
 import { findSimilarSpace } from '../ai';
 import { notifyAllWindows } from '../notify';
 
 export async function searchForRecall(spaceId: string, description: string): Promise<void> {
   try {
-    const allSpaces = listSpaces();
+    const allSpaces = (await listSpaces());
     // Exclude the space itself, get recent ones (last 30)
     const candidates = allSpaces
       .filter(i => i.id !== spaceId)

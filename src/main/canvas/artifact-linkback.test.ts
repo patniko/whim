@@ -9,7 +9,21 @@ vi.mock('../notify', () => ({
 }));
 
 const titleUpdates: any[] = [];
-vi.mock('../database', () => ({
+vi.mock('../storage', async () => ({
+  ...(await import('../workspace')),
+  ...(await import('../services/skill-schedule-store')),
+  ...(await import('./artifact-store')),
+  documentMatches: (await import('../storage-documents')).documentMatches,
+  readDocument: (await import('../storage-documents')).readDocument,
+  writeDocument: async (input: import('../storage-documents').DocumentWrite) => {
+    (await import('../storage-documents')).writeDocument({ ...input, spaceId: undefined });
+    titleUpdates.push({ spaceId: input.spaceId, content: input.content });
+    return { titleChanged: false, title: '' };
+  },
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   updateCanvasContent: (spaceId: string, content: string) => {
     titleUpdates.push({ spaceId, content });
     return { titleChanged: false, title: '' };
@@ -116,52 +130,52 @@ describe('linkArtifactIntoDocument', () => {
     return dir;
   }
 
-  it('writes the link into the space document', () => {
+  it('writes the link into the space document', async () => {
     const dir = makeSpace('space-w');
 
-    const wrote = linkArtifactIntoDocument({ workspaceRoot, spaceId: 'space-w', folder: 'space-w', link });
+    const wrote = (await linkArtifactIntoDocument({ workspaceRoot, spaceId: 'space-w', folder: 'space-w', link }));
 
     expect(wrote).toBe(true);
     expect(fs.readFileSync(path.join(dir, 'canvas.md'), 'utf-8')).toContain('whim://artifact/space-1/comment-7');
   });
 
-  it('does not rewrite the document when the link is already there', () => {
+  it('does not rewrite the document when the link is already there', async () => {
     makeSpace('space-x');
-    linkArtifactIntoDocument({ workspaceRoot, spaceId: 'space-x', folder: 'space-x', link });
+    (await linkArtifactIntoDocument({ workspaceRoot, spaceId: 'space-x', folder: 'space-x', link }));
     titleUpdates.length = 0;
 
-    expect(linkArtifactIntoDocument({ workspaceRoot, spaceId: 'space-x', folder: 'space-x', link })).toBe(false);
+    expect((await linkArtifactIntoDocument({ workspaceRoot, spaceId: 'space-x', folder: 'space-x', link }))).toBe(false);
     expect(titleUpdates).toHaveLength(0);
   });
 
-  it('keeps writing the user did while the agent was working', () => {
+  it('keeps writing the user did while the agent was working', async () => {
     const dir = makeSpace('space-y', '# Notes\n');
-    linkArtifactIntoDocument({ workspaceRoot, spaceId: 'space-y', folder: 'space-y', link });
+    (await linkArtifactIntoDocument({ workspaceRoot, spaceId: 'space-y', folder: 'space-y', link }));
     fs.appendFileSync(path.join(dir, 'canvas.md'), '\nA thought I had meanwhile.\n');
 
-    linkArtifactIntoDocument({
+    (await linkArtifactIntoDocument({
       workspaceRoot,
       spaceId: 'space-y',
       folder: 'space-y',
       link: { ...link, artifactId: 'comment-8', title: 'Pricing' },
-    });
+    }));
 
     const content = fs.readFileSync(path.join(dir, 'canvas.md'), 'utf-8');
     expect(content).toContain('A thought I had meanwhile.');
     expect(content).toContain('comment-8');
   });
 
-  it('links into the child page the comment was left on, and tells the open editor', () => {
+  it('links into the child page the comment was left on, and tells the open editor', async () => {
     const dir = makeSpace('space-z');
     fs.writeFileSync(path.join(dir, 'research.md'), '# Research\n');
 
-    const wrote = linkArtifactIntoDocument({
+    const wrote = (await linkArtifactIntoDocument({
       workspaceRoot,
       spaceId: 'space-z',
       folder: 'space-z',
       pageName: 'research',
       link,
-    });
+    }));
 
     expect(wrote).toBe(true);
     expect(fs.readFileSync(path.join(dir, 'research.md'), 'utf-8')).toContain('comment-7');
@@ -170,15 +184,13 @@ describe('linkArtifactIntoDocument', () => {
     expect(notified.some(n => n.channel === 'canvas:content-updated')).toBe(true);
   });
 
-  it('reports failure rather than throwing when the space folder is gone', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(linkArtifactIntoDocument({
+  it('rejects publication when the originating page cannot be linked', async () => {
+    await expect(linkArtifactIntoDocument({
       workspaceRoot,
       spaceId: 'missing',
       folder: 'missing',
       pageName: 'nope',
       link,
-    })).toBe(false);
-    warn.mockRestore();
+    })).rejects.toThrow();
   });
 });

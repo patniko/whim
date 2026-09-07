@@ -5,9 +5,13 @@ import { PromptBar } from './PromptBar';
 import { SubagentDetailOverlay } from './SubagentDetailOverlay';
 import { WorkingIndicator } from './tiles/WorkingIndicator';
 import QRCode from 'qrcode';
+import { applyStreamEvent, createEventBatch, finalizeMessages } from './event-batch';
+import { hasPendingInteraction, type ChatHistorySource } from './transcript-layout';
+import { useHistoryPaging } from './use-history-paging';
+import { acknowledgeUserMessage, mergeHistoryWithLocal } from '../../shared/chat-identity';
 
 declare const whimAPI: {
-  sendChatMessage: (agentId: string, prompt: string, attachments?: any[]) => Promise<{ error?: string }>;
+  sendChatMessage: (agentId: string, prompt: string, attachments?: any[]) => Promise<{ error?: string; messageId?: string }>;
   onChatEvent: (agentId: string, callback: (event: ChatEvent) => void) => () => void;
   approveAgent: (agentId: string, requestId: string, approved: boolean) => Promise<void>;
   respondToUserInput: (agentId: string, requestId: string, answer: string, wasFreeform: boolean) => Promise<void>;
@@ -19,6 +23,8 @@ declare const whimAPI: {
   setChatModel: (agentId: string, model: string) => Promise<{ error?: string }>;
   quickLaunchAgent: (prompt: string, personaHandle?: string) => Promise<{ agentId: string; sessionId: string } | { error: string }>;
   getAgentHistory: (agentId: string) => Promise<{ events?: any[]; error?: string; restarted?: boolean }>;
+  getAgentHistoryPage: (agentId: string, request?: import('../../shared/paging').PageRequest) => Promise<import('../../shared/paging').ChatHistoryPage>;
+  getAgent: (agentId: string) => Promise<{ status: string } | null>;
   selectWorkspace: () => Promise<{ selected: boolean; path: string | null }>;
   onWorkspaceChanged: (callback: (path: string | null) => void) => void;
   setAgentYolo: (agentId: string, enabled: boolean) => Promise<{ ok?: boolean; error?: string }>;
@@ -51,6 +57,7 @@ interface ChatViewProps {
   onClose: () => void;
   onOpenCli: (agentId: string) => void;
   onOpenCanvas?: (spaceId: string) => void;
+  historySource?: ChatHistorySource;
 }
 
 let nextMsgId = 1;
@@ -59,7 +66,7 @@ function genId(): string {
 }
 
 /** Transform SDK SessionEvent[] into ChatMessage[] for display. */
-function parseHistoryEvents(events: any[]): ChatMessage[] {
+export function parseHistoryEvents(events: any[]): ChatMessage[] {
   const messages: ChatMessage[] = [];
   // Track tool calls by ID so we can update them with completion data
   const toolMsgMap = new Map<string, number>();
@@ -70,29 +77,32 @@ function parseHistoryEvents(events: any[]): ChatMessage[] {
     const type = event.type || event.kind;
     const data = event.data || event;
     const ts = event.timestamp || new Date().toISOString();
+    const id = typeof event.id === 'string' ? `history:${event.id}` : genId();
 
     if (type === 'user.message' || type === 'user_message') {
       const content = data.content || data.prompt || data.message || '';
       if (content) {
-        messages.push({ id: genId(), type: 'user', content, timestamp: ts });
+        messages.push({ id: data.messageId ? `user:${data.messageId}` : event.id ? `user:${event.id}` : id,
+          type: 'user', content, timestamp: ts });
       }
     } else if (type === 'assistant.message' || type === 'assistant_message') {
       const content = data.content || data.message || '';
       if (content) {
-        messages.push({ id: genId(), type: 'assistant', content, isStreaming: false, timestamp: ts } as AssistantMsgType);
+        messages.push({ id: data.messageId ? `assistant:${data.messageId}` : id,
+          type: 'assistant', content, isStreaming: false, timestamp: ts } as AssistantMsgType);
       }
     } else if (type === 'assistant.reasoning' || type === 'assistant_reasoning') {
       const content = data.content || '';
       if (content) {
         messages.push({
-          id: genId(), type: 'reasoning',
+          id: data.reasoningId ? `reasoning:${data.reasoningId}` : id, type: 'reasoning',
           reasoningId: data.reasoningId || '', content, isStreaming: false, timestamp: ts,
         } as ReasoningMessage);
       }
     } else if (type === 'tool.execution_start' || type === 'tool_execution_start') {
       const toolCallId = data.toolCallId || '';
       const msg: ToolCallMessage = {
-        id: genId(), type: 'tool_call', toolCallId,
+        id, type: 'tool_call', toolCallId,
         toolName: data.toolName || 'tool', args: data.arguments || data.toolArgs || {},
         completed: false, timestamp: ts,
       };
@@ -113,12 +123,12 @@ function parseHistoryEvents(events: any[]): ChatMessage[] {
       }
     } else if (type === 'session.error' || type === 'session_error') {
       messages.push({
-        id: genId(), type: 'session_event', eventType: 'error',
+        id, type: 'session_event', eventType: 'error',
         message: data.message || 'Unknown error', timestamp: ts,
       } as SessionEventMessage);
     } else if (type === 'elicitation.requested') {
       messages.push({
-        id: genId(), type: 'elicitation',
+        id, type: 'elicitation',
         requestId: data.requestId || '',
         agentId: data.agentId || '',
         message: data.message || '',
@@ -144,7 +154,7 @@ function parseHistoryEvents(events: any[]): ChatMessage[] {
       const pr = data.permissionRequest || data;
       const reqId = pr.toolCallId || data.requestId || '';
       const approvalMsg: ApprovalMessage = {
-        id: genId(), type: 'approval',
+        id, type: 'approval',
         requestId: reqId,
         agentId: '',
         permissionKind: pr.kind || 'permission',
@@ -223,11 +233,11 @@ function applyCompletionEvent(msgs: ChatMessage[], event: ChatEvent): ChatMessag
 
 /**
  * Replay buffered events that arrived during history loading.
- * Uses ID-based dedup to avoid duplicating messages already present from history.
- * Skips assistant deltas (unsafe to dedup) and tool.progress (not idempotent).
+ * Request/tool IDs and identified text are deduplicated. Legacy text without
+ * identity is retained rather than guessed by equal content.
  */
-function replayBufferedEvents(msgs: ChatMessage[], events: ChatEvent[]): ChatMessage[] {
-  let result = [...msgs];
+export function replayBufferedEvents(msgs: ChatMessage[], events: ChatEvent[], localTermination?: SessionEventMessage): ChatMessage[] {
+  let result = localTermination ? msgs.filter(message => message.id !== localTermination.id) : [...msgs];
 
   // Build dedup sets from existing messages
   const existingToolCallIds = new Set<string>();
@@ -245,7 +255,35 @@ function replayBufferedEvents(msgs: ChatMessage[], events: ChatEvent[]): ChatMes
   }
 
   for (const event of events) {
+    if (localTermination && event.type === 'session.idle') continue;
     switch (event.type) {
+      case 'assistant.message_delta':
+      case 'assistant.message':
+      case 'assistant.reasoning_delta':
+      case 'assistant.reasoning':
+      case 'tool.progress':
+        result = applyStreamEvent(result, event, genId(), new Date().toISOString());
+        break;
+      case 'session.idle':
+        result = finalizeMessages(result);
+        if (!result.some((m, i) => i === result.length - 1 && m.type === 'session_event' &&
+          (m.eventType === 'completed' || m.eventType === 'error'))) {
+          result.push({ id: genId(), type: 'session_event', eventType: 'completed',
+            message: 'Completed', timestamp: new Date().toISOString() });
+        }
+        break;
+      case 'session.restarted':
+        result = finalizeMessages(result);
+        result.push({ id: genId(), type: 'session_event', eventType: 'info',
+          message: event.message || 'Previous session expired — started a fresh session with context.',
+          timestamp: new Date().toISOString() });
+        break;
+      case 'sandbox.disabled':
+        result = result.map(m => m.type === 'sandbox_block' && !m.responded
+          ? { ...m, responded: true, decision: 'disable' } : m);
+        result.push({ id: genId(), type: 'session_event', eventType: 'info',
+          message: event.message || 'Sandbox disabled for this session.', timestamp: new Date().toISOString() });
+        break;
       // Completion events — idempotent
       case 'tool.complete':
       case 'approval.resolved':
@@ -326,6 +364,7 @@ function replayBufferedEvents(msgs: ChatMessage[], events: ChatEvent[]): ChatMes
         break;
 
       case 'session.error':
+        result = finalizeMessages(result);
         result.push({
           id: genId(), type: 'session_event', eventType: 'error',
           message: event.message, timestamp: new Date().toISOString(),
@@ -333,7 +372,15 @@ function replayBufferedEvents(msgs: ChatMessage[], events: ChatEvent[]): ChatMes
         break;
 
       case 'subagent.started':
-        if (!existingToolCallIds.has(event.toolCallId)) {
+        if (existingToolCallIds.has(event.toolCallId)) {
+          result = result.map(m => m.type === 'tool_call' && m.toolCallId === event.toolCallId
+            ? { ...m, toolName: '__subagent__', args: {
+                ...m.args, name: event.name, displayName: event.displayName,
+                description: event.description, agentType: event.name,
+                agentId: event.agentId ?? m.args.agentId,
+              } }
+            : m);
+        } else {
           result.push({
             id: genId(), type: 'tool_call',
             toolCallId: event.toolCallId, toolName: '__subagent__',
@@ -364,17 +411,17 @@ function replayBufferedEvents(msgs: ChatMessage[], events: ChatEvent[]): ChatMes
         );
         break;
 
-      // Skip: assistant.message_delta, assistant.message, assistant.reasoning_delta,
-      // assistant.reasoning, tool.progress, session.idle
-      // Deltas are unsafe to dedup; progress is not idempotent;
-      // session.idle is handled by the live handler after loading.
     }
   }
 
-  return result;
+  return localTermination ? [...finalizeMessages(result), localTermination] : result;
 }
 
-export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: initialStatus, agentSource, spaceId, sandboxed: initialSandboxed, yolo: initialYolo, pendingApprovalId, pendingPermissionKind, onClose, onOpenCli, onOpenCanvas }: ChatViewProps) {
+export function ChatView(props: ChatViewProps) {
+  return <ChatSession key={props.agentId || 'new'} {...props} />;
+}
+
+function ChatSession({ agentId: initialAgentId, agentPrompt, agentStatus: initialStatus, agentSource, spaceId, sandboxed: initialSandboxed, yolo: initialYolo, pendingApprovalId, pendingPermissionKind, onClose, onOpenCli, onOpenCanvas, historySource }: ChatViewProps) {
   const [currentAgentId, setCurrentAgentId] = useState<string | null>(initialAgentId || null);
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     // For CLI sessions or sessions with history, don't seed — history will load
@@ -407,7 +454,18 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
   const [status, setStatus] = useState(initialAgentId ? initialStatus : 'new');
   const [isWaitingForInput, setIsWaitingForInput] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(!!initialAgentId);
-  const [historyLoaded, setHistoryLoaded] = useState(!initialAgentId);
+  const pageCursor = useRef<string | null>(null);
+  const snapshotWatermark = useRef(0);
+  const [hasOlder, setHasOlder] = useState(false);
+  const loadOlder = useCallback(async () => {
+    if (!currentAgentId || !pageCursor.current) return [];
+    const page = await whimAPI.getAgentHistoryPage(currentAgentId, { cursor: pageCursor.current });
+    pageCursor.current = page.nextCursor;
+    setHasOlder(!!page.nextCursor);
+    return page.items;
+  }, [currentAgentId]);
+  const backendHistory = useMemo<ChatHistorySource>(() => ({ hasOlder, loadOlder }), [hasOlder, loadOlder]);
+  const historyPaging = useHistoryPaging(isLoadingHistory ? undefined : historySource ?? backendHistory, setMessages);
   const [models, setModels] = useState<{ id: string; name?: string }[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
@@ -455,14 +513,17 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
     };
   }, [spaceId, onOpenCanvas]);
 
-  // Track the current streaming assistant message ID
-  const currentAssistantId = useRef<string | null>(null);
-  // Track the current reasoning message ID
-  const currentReasoningId = useRef<string | null>(null);
+  const eventBatchRef = useRef<ReturnType<typeof createEventBatch> | null>(null);
+  const eventRevision = useRef(0);
+  const liveStatusObserved = useRef(false);
   // Track whether history has been applied so buffered events can be merged
   const historyLoadedRef = useRef(!initialAgentId);
   // Buffer ALL events that arrive before history loads for replay with dedup
   const pendingEvents = useRef<ChatEvent[]>([]);
+  const historyTermination = useRef<SessionEventMessage | undefined>(undefined);
+  useEffect(() => {
+    setIsWaitingForInput(messages.some(hasPendingInteraction));
+  }, [messages]);
 
   // Load available models
   useEffect(() => {
@@ -566,12 +627,34 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
 
   // Load conversation history for existing agents (especially CLI sessions)
   useEffect(() => {
-    if (!initialAgentId) return;
+    if (!currentAgentId) return;
+    historyLoadedRef.current = false;
+    setIsLoadingHistory(true);
+    const baselineIds = new Set(messages.map(message => message.id));
+    let cancelled = false;
+    let liveRevision = 0;
+    const observedRevision = () => eventRevision.current;
     (async () => {
       try {
-        const result = await whimAPI.getAgentHistory(initialAgentId);
-        if (result.events && result.events.length > 0) {
-          const historyMessages = parseHistoryEvents(result.events);
+        const page = typeof whimAPI.getAgentHistoryPage === 'function'
+          ? await whimAPI.getAgentHistoryPage(currentAgentId) : undefined;
+        if (cancelled) return;
+        const result = !page || page.legacySession
+          ? await whimAPI.getAgentHistory(currentAgentId) : {};
+        if (cancelled) return;
+        pageCursor.current = page?.nextCursor ?? null;
+        snapshotWatermark.current = page?.watermark ?? 0;
+        setHasOlder(!!page?.nextCursor);
+        eventBatchRef.current?.flush();
+        const buffered = pendingEvents.current.filter(event =>
+          event.sequence === undefined || !page || event.sequence > page.watermark);
+        const localTermination = historyTermination.current;
+        pendingEvents.current = [];
+        historyLoadedRef.current = true;
+        liveRevision = observedRevision();
+        if (buffered.some(event => event.type === 'sandbox.disabled')) setSandboxActive(false);
+        if (page?.items.length || (result.events && result.events.length > 0)) {
+          const historyMessages = page?.items.length ? page.items : parseHistoryEvents(result.events!);
           if (historyMessages.length > 0) {
             setMessages(prev => {
               // Preserve seeded pending approval only if not already in history
@@ -582,17 +665,15 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
               )) {
                 msgs = [...msgs, pendingApproval];
               }
-
-              // Replay ALL buffered events with dedup against history
-              const merged = replayBufferedEvents(msgs, pendingEvents.current);
-              pendingEvents.current = [];
+              // Do not erase locally queued follow-ups while the snapshot is in flight.
+              const localIds = new Set(prev.filter(message => !baselineIds.has(message.id)).map(message => message.id));
+              const merged = replayBufferedEvents(mergeHistoryWithLocal(msgs, prev, localIds), buffered, localTermination);
               return merged;
             });
           } else {
             // History returned events but none were parseable — still replay buffered events
             setMessages(prev => {
-              const merged = replayBufferedEvents(prev, pendingEvents.current);
-              pendingEvents.current = [];
+              const merged = replayBufferedEvents(prev, buffered, localTermination);
               return merged;
             });
           }
@@ -606,8 +687,7 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
               message: result.error as string,
               timestamp: new Date().toISOString(),
             };
-            const merged = replayBufferedEvents([...prev, errorMsg], pendingEvents.current);
-            pendingEvents.current = [];
+            const merged = replayBufferedEvents([...prev, errorMsg], buffered, localTermination);
             return merged;
           });
         } else if (result.restarted) {
@@ -620,20 +700,25 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
               message: 'Previous session expired — started a fresh session with context from the original conversation.',
               timestamp: new Date().toISOString(),
             };
-            const merged = replayBufferedEvents([...prev, restartMsg], pendingEvents.current);
-            pendingEvents.current = [];
+            const merged = replayBufferedEvents([...prev, restartMsg], buffered, localTermination);
             return merged;
           });
         } else {
           // No history events — replay buffered events against seeded messages
           setMessages(prev => {
-            const merged = replayBufferedEvents(prev, pendingEvents.current);
-            pendingEvents.current = [];
+            const merged = replayBufferedEvents(prev, buffered, localTermination);
             return merged;
           });
         }
       } catch (err) {
+        if (cancelled) return;
         console.error('[ChatView] Failed to load history:', err);
+        eventBatchRef.current?.flush();
+        const buffered = pendingEvents.current;
+        const localTermination = historyTermination.current;
+        pendingEvents.current = [];
+        historyLoadedRef.current = true;
+        liveRevision = observedRevision();
         // Show error and replay any buffered events so they aren't lost
         setMessages(prev => {
           const errorMsg: ChatMessage = {
@@ -643,45 +728,56 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
             message: `Failed to load conversation history: ${err instanceof Error ? err.message : 'Unknown error'}`,
             timestamp: new Date().toISOString(),
           };
-          const merged = replayBufferedEvents([...prev, errorMsg], pendingEvents.current);
-          pendingEvents.current = [];
+          const merged = replayBufferedEvents([...prev, errorMsg], buffered, localTermination);
           return merged;
         });
-      } finally {
-        historyLoadedRef.current = true;
-        setIsLoadingHistory(false);
-        setHistoryLoaded(true);
+      }
+      if (cancelled) return;
+      historyLoadedRef.current = true;
+      setIsLoadingHistory(false);
 
-        // Reconcile status with backend truth — fixes stale "running" when
-        // session.idle was missed (e.g. agent completed before chat opened,
-        // or session.idle arrived during history load and was skipped by replay)
-        try {
-          const allAgents = await whimAPI.listAllAgents();
-          const match = allAgents.find((a: any) => a.agentId === initialAgentId);
-          if (match) {
-            const backendStatus = match.status;
-            if (backendStatus === 'completed' || backendStatus === 'failed') {
-              setIsBusy(false);
-              setStatus(backendStatus);
-            } else if (backendStatus === 'waiting-approval') {
-              setIsWaitingForInput(true);
-              setStatus('waiting-approval');
-            } else if (backendStatus === 'running') {
-              setIsBusy(true);
-              setStatus('running');
-            }
+      // A status snapshot must not overwrite newer live activity.
+      try {
+        const match = typeof whimAPI.getAgent === 'function'
+          ? await whimAPI.getAgent(currentAgentId)
+          : (await whimAPI.listAllAgents()).find((a: any) => a.agentId === currentAgentId);
+        if (cancelled || observedRevision() !== liveRevision || liveStatusObserved.current) return;
+        if (match) {
+          const backendStatus = match.status;
+          if (backendStatus === 'completed' || backendStatus === 'failed') {
+            setIsBusy(false);
+            setStatus(backendStatus);
+          } else if (backendStatus === 'waiting-approval') {
+            setIsWaitingForInput(true);
+            setStatus('waiting-approval');
+          } else if (backendStatus === 'running') {
+            setIsBusy(true);
+            setStatus('running');
           }
-        } catch {
-          // Non-fatal — keep whatever status we have
         }
+      } catch (error) {
+        if (!cancelled) console.warn('[ChatView] Failed to reconcile agent status:', error);
       }
     })();
-  }, [initialAgentId]);
+    return () => { cancelled = true; };
+  }, [currentAgentId]);
 
   // Subscribe to chat events immediately — buffer all events until history loads
   useEffect(() => {
     if (!currentAgentId) return;
-    const unsubscribe = whimAPI.onChatEvent(currentAgentId, (event: ChatEvent) => {
+    let active = true;
+    const batch = createEventBatch((event: ChatEvent) => {
+      if (!active) return;
+      if (event.type === 'session.idle' || event.type === 'session.error') {
+        liveStatusObserved.current = true;
+        setIsBusy(false);
+        setStatus(event.type === 'session.idle' ? 'completed' : 'failed');
+      } else if (event.type === 'assistant.message_delta' || event.type === 'assistant.reasoning_delta' ||
+        event.type === 'tool.start') {
+        liveStatusObserved.current = true;
+        setIsBusy(true);
+        setStatus('running');
+      }
       // Buffer ALL events that arrive before history loads for deduped replay
       if (!historyLoadedRef.current) {
         pendingEvents.current.push(event);
@@ -690,83 +786,35 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
 
       switch (event.type) {
         case 'assistant.message_delta': {
-          setMessages(prev => {
-            if (!currentAssistantId.current) {
-              const id = genId();
-              currentAssistantId.current = id;
-              return [...prev, {
-                id,
-                type: 'assistant',
-                content: event.delta,
-                isStreaming: true,
-                timestamp: new Date().toISOString(),
-              } as AssistantMsgType];
-            }
-            return prev.map(m =>
-              m.id === currentAssistantId.current && m.type === 'assistant'
-                ? { ...m, content: m.content + event.delta }
-                : m
-            );
-          });
+          const id = genId();
+          const timestamp = new Date().toISOString();
+          setMessages(prev => applyStreamEvent(prev, event, id, timestamp));
           break;
         }
 
         case 'assistant.message': {
-          if (currentAssistantId.current) {
-            setMessages(prev => prev.map(m =>
-              m.id === currentAssistantId.current && m.type === 'assistant'
-                ? { ...m, isStreaming: false, content: event.content || m.content }
-                : m
-            ));
-          } else {
-            // Got full message without deltas
-            setMessages(prev => [...prev, {
-              id: genId(),
-              type: 'assistant',
-              content: event.content,
-              isStreaming: false,
-              timestamp: new Date().toISOString(),
-            } as AssistantMsgType]);
-          }
-          currentAssistantId.current = null;
+          const id = genId();
+          const timestamp = new Date().toISOString();
+          setMessages(prev => applyStreamEvent(prev, event, id, timestamp));
           break;
         }
 
         case 'assistant.reasoning_delta': {
-          setMessages(prev => {
-            if (!currentReasoningId.current || currentReasoningId.current !== event.reasoningId) {
-              const id = genId();
-              currentReasoningId.current = event.reasoningId;
-              return [...prev, {
-                id,
-                type: 'reasoning',
-                reasoningId: event.reasoningId,
-                content: event.delta,
-                isStreaming: true,
-                timestamp: new Date().toISOString(),
-              } as ReasoningMessage];
-            }
-            return prev.map(m =>
-              m.type === 'reasoning' && m.reasoningId === event.reasoningId
-                ? { ...m, content: m.content + event.delta }
-                : m
-            );
-          });
+          const id = genId();
+          const timestamp = new Date().toISOString();
+          setMessages(prev => applyStreamEvent(prev, event, id, timestamp));
           break;
         }
 
         case 'assistant.reasoning': {
-          setMessages(prev => prev.map(m =>
-            m.type === 'reasoning' && m.reasoningId === event.reasoningId
-              ? { ...m, isStreaming: false }
-              : m
-          ));
-          currentReasoningId.current = null;
+          const id = genId();
+          const timestamp = new Date().toISOString();
+          setMessages(prev => applyStreamEvent(prev, event, id, timestamp));
           break;
         }
 
         case 'tool.start': {
-          setMessages(prev => [...prev, {
+          setMessages(prev => prev.some(m => m.type === 'tool_call' && m.toolCallId === event.toolCallId) ? prev : [...prev, {
             id: genId(),
             type: 'tool_call',
             toolCallId: event.toolCallId,
@@ -779,11 +827,9 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
         }
 
         case 'tool.progress': {
-          setMessages(prev => prev.map(m =>
-            m.type === 'tool_call' && m.toolCallId === event.toolCallId
-              ? { ...m, result: (m.result || '') + event.message }
-              : m
-          ));
+          const id = genId();
+          const timestamp = new Date().toISOString();
+          setMessages(prev => applyStreamEvent(prev, event, id, timestamp));
           break;
         }
 
@@ -840,6 +886,7 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
         }
 
         case 'session.restarted': {
+          finalizeStreamingMessages();
           setMessages(prev => [...prev, {
             id: genId(),
             type: 'session_event',
@@ -876,7 +923,6 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
           // `agent:sandbox-blocked` event (handled in app.ts) which keeps the
           // agentStore in sync — both paths render so cross-window dismissal
           // continues to work via `sandbox.resolved`.
-          setIsWaitingForInput(true);
           setMessages(prev => {
             // Guard against duplicate emission (e.g. replay race).
             if (prev.some(m => m.type === 'sandbox_block' && m.requestId === event.requestId)) {
@@ -913,8 +959,7 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
         }
 
         case 'approval.needed': {
-          setIsWaitingForInput(true);
-          setMessages(prev => [...prev, {
+          setMessages(prev => prev.some(m => m.type === 'approval' && m.requestId === event.requestId) ? prev : [...prev, {
             id: genId(),
             type: 'approval',
             requestId: event.requestId,
@@ -939,8 +984,7 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
         }
 
         case 'user_input.requested': {
-          setIsWaitingForInput(true);
-          setMessages(prev => [...prev, {
+          setMessages(prev => prev.some(m => m.type === 'user_input' && m.requestId === event.requestId) ? prev : [...prev, {
             id: genId(),
             type: 'user_input',
             requestId: event.requestId,
@@ -965,8 +1009,7 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
         }
 
         case 'elicitation.requested': {
-          setIsWaitingForInput(true);
-          setMessages(prev => [...prev, {
+          setMessages(prev => prev.some(m => m.type === 'elicitation' && m.requestId === event.requestId) ? prev : [...prev, {
             id: genId(),
             type: 'elicitation',
             requestId: event.requestId,
@@ -992,22 +1035,7 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
         }
 
         case 'subagent.started': {
-          setMessages(prev => [...prev, {
-            id: genId(),
-            type: 'tool_call',
-            toolCallId: event.toolCallId,
-            toolName: '__subagent__',
-            args: {
-              name: event.name,
-              displayName: event.displayName,
-              description: event.description,
-              agentType: event.name,
-              agentId: event.agentId,
-              completed: false,
-            },
-            completed: false,
-            timestamp: new Date().toISOString(),
-          } as ToolCallMessage]);
+          setMessages(prev => replayBufferedEvents(prev, [event]));
           break;
         }
 
@@ -1056,7 +1084,25 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
       }
     });
 
-    return () => unsubscribe();
+    eventBatchRef.current = batch;
+    const seen = new Set<string>();
+    const unsubscribe = whimAPI.onChatEvent(currentAgentId, event => {
+      if (!active) return;
+      if (event.sequence !== undefined && event.sequence <= snapshotWatermark.current) return;
+      if (event.eventId) {
+        if (seen.has(event.eventId)) return;
+        seen.add(event.eventId);
+        if (seen.size > 4096) seen.delete(seen.values().next().value!);
+      }
+      eventRevision.current++;
+      batch.push(event);
+    });
+    return () => {
+      active = false;
+      batch.dispose();
+      eventBatchRef.current = null;
+      unsubscribe();
+    };
   }, [currentAgentId]);
 
   const handleSend = useCallback(async (message: string, attachments?: Array<{ type: 'file'; name: string; path: string }>) => {
@@ -1067,8 +1113,9 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
     }));
 
     // Add user message to state
+    const localId = genId();
     setMessages(prev => [...prev, {
-      id: genId(),
+      id: localId,
       type: 'user',
       content: message,
       attachments: chatAttachments,
@@ -1116,6 +1163,7 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
     }
 
     const result = await whimAPI.sendChatMessage(currentAgentId, message, chatAttachments);
+    if (result.messageId) setMessages(current => acknowledgeUserMessage(current, localId, result.messageId!));
     if (result.error) {
       setMessages(prev => [...prev, {
         id: genId(),
@@ -1282,17 +1330,13 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
   }, [currentAgentId, showRemoteError, showRemoteHint]);
 
   const finalizeStreamingMessages = useCallback(() => {
-    currentAssistantId.current = null;
-    currentReasoningId.current = null;
-    setMessages(prev => prev.map(m => {
-      if (m.type === 'assistant' && m.isStreaming) return { ...m, isStreaming: false };
-      if (m.type === 'reasoning' && m.isStreaming) return { ...m, isStreaming: false };
-      return m;
-    }));
+    eventBatchRef.current?.flush();
+    setMessages(finalizeMessages);
   }, []);
 
   const handleAbort = useCallback(async () => {
     if (!currentAgentId) return;
+    eventBatchRef.current?.flush();
     // Optimistic UI update — stop showing working state immediately
     setIsBusy(false);
     setStatus('failed');
@@ -1301,13 +1345,15 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
     // Surface an inline timeline entry so the abort is visible alongside
     // other session events (mirrors the new 'completed' entry emitted on
     // session.idle below).
-    setMessages(prev => [...prev, {
+    const stoppedMessage: SessionEventMessage = {
       id: genId(),
       type: 'session_event',
       eventType: 'error',
       message: 'Stopped by user',
       timestamp: new Date().toISOString(),
-    } as SessionEventMessage]);
+    };
+    if (!historyLoadedRef.current) historyTermination.current = stoppedMessage;
+    setMessages(prev => [...prev, stoppedMessage]);
     // Fire backend abort (errors are non-fatal)
     void whimAPI.abortAgent(currentAgentId).catch(() => {});
   }, [currentAgentId, finalizeStreamingMessages]);
@@ -1538,6 +1584,7 @@ export function ChatView({ agentId: initialAgentId, agentPrompt, agentStatus: in
 
       <MessageList
         messages={messages}
+        historyPaging={historyPaging}
         onApprovalRespond={handleApprovalRespond}
         onUserInputRespond={handleUserInputRespond}
         onElicitationRespond={handleElicitationRespond}

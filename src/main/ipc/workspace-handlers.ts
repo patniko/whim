@@ -1,7 +1,7 @@
 import { registerIpcHandler } from './registry';
 import { BrowserWindow, shell } from 'electron';
 import * as fs from 'fs';
-import { isInitialized, closeDatabase } from '../database';
+import { isInitialized, closeDatabase } from '../storage';
 import { launchSession, getActiveSessionIntentIds } from '../session';
 import { transcribeAudio } from '../voice';
 import {
@@ -9,19 +9,30 @@ import {
   getProfiles, getActiveProfileId, getProfileById, getNextProfile,
   upsertProfileForPath, setActiveProfile, updateProfile, removeProfileById,
 } from '../config';
-import { initWorkspace, getDbPath, getLogRoot, getGitSyncStatus, gitFetchOrigin, gitPush, gitPull, getDefaultProfileName, invalidateProfileNameCache } from '../workspace';
-import { initDatabase, mergeSessionIds, syncCanvasContent } from '../database';
-import { compactOldSegments } from '../compaction';
+import { getDbPath, getLogRoot, getGitSyncStatus, gitFetchOrigin, gitPush, gitPull, getDefaultProfileName, invalidateProfileNameCache, cancelGitPolling, drainGitOperations } from '../workspace';
+import { initWorkspace, initDatabase, mergeSessionIds, syncCanvasContent, withWorkspaceContext } from '../storage';
 import { startSkillWatcher, stopSkillWatcher } from '../skill-watcher';
 import { destroySettingsWindow, destroyCanvasWindow } from '../window-manager';
 import { mirrorRendererEvent } from '../web/event-hub';
 import type { GitSyncStatus, ProfilesState } from '../../shared/ipc-contract';
 import { showOpenDialog } from './dialog-utils';
+import { flushEditors } from '../lifecycle';
+import { stopScheduler, startScheduler } from '../services/scheduler';
+import { stopAllWatchers } from '../canvas-watcher';
+import { pauseWorkspaceCommands, drainProducers } from '../producer-tasks';
+import { shutdownCopilot, initCopilot } from '../ai';
+import { stopAllCloudPollers, restoreActiveCloudPollers } from '../cloud-agent-poller';
+import { stopCliExitMonitor, startCliExitMonitor, stopWorkspaceAgents, clearWorkspaceAgentState } from '../agent-service';
+import { startStorageMaintenance, stopStorageMaintenance } from '../storage-maintenance';
+import { notifyAllWindows } from '../notify';
 
 // ── Git sync polling ────────────────────────────────────
 const GIT_SYNC_POLL_MS = 60_000;
 let syncPollTimer: ReturnType<typeof setInterval> | null = null;
 let lastSyncStatus: GitSyncStatus | null = null;
+let pollGeneration = 0;
+let polling = false;
+let failures = 0;
 
 function broadcastSyncStatus(status: GitSyncStatus): void {
   for (const w of BrowserWindow.getAllWindows()) {
@@ -32,16 +43,23 @@ function broadcastSyncStatus(status: GitSyncStatus): void {
 
 async function pollGitSync(): Promise<void> {
   const workspace = getConfigValue('workspace');
-  if (!workspace) return;
+  if (!workspace || polling) return;
+  polling = true;
+  const current = pollGeneration;
 
   try {
-    await gitFetchOrigin(workspace);
+  try {
+    await gitFetchOrigin(workspace, true);
+    failures = 0;
   } catch {
-    // Network may be unavailable — still check local status
+    failures = Math.min(failures + 1, 6);
+    if (process.env.WHIM_PERF === '1') console.info('[perf:git-poll]', { failures });
   }
+  if (current !== pollGeneration || workspace !== getConfigValue('workspace')) return;
 
   try {
     const status = await getGitSyncStatus(workspace);
+    if (current !== pollGeneration) return;
     // Broadcast only when status actually changes
     if (!lastSyncStatus
       || lastSyncStatus.ahead !== status.ahead
@@ -52,24 +70,32 @@ async function pollGitSync(): Promise<void> {
       lastSyncStatus = status;
       broadcastSyncStatus(status);
     }
-  } catch {
-    // Silently skip
+  } catch (error) {
+    console.warn('[workspace] Git status failed:', error);
+  }
+  } finally {
+    polling = false;
+    if (current === pollGeneration) {
+      syncPollTimer = setTimeout(() => { void pollGitSync(); }, GIT_SYNC_POLL_MS * 2 ** failures);
+    }
   }
 }
 
 function startSyncPolling(): void {
   stopSyncPolling();
   // Initial poll after a short delay to let workspace init finish
-  setTimeout(() => pollGitSync(), 2000);
-  syncPollTimer = setInterval(() => pollGitSync(), GIT_SYNC_POLL_MS);
+  syncPollTimer = setTimeout(() => { void pollGitSync(); }, 2000);
 }
 
-function stopSyncPolling(): void {
+export function stopSyncPolling(): void {
+  pollGeneration++;
+  cancelGitPolling();
   if (syncPollTimer) {
-    clearInterval(syncPollTimer);
+    clearTimeout(syncPollTimer);
     syncPollTimer = null;
   }
   lastSyncStatus = null;
+  failures = 0;
 }
 
 // ── Workspace open / profile helpers ────────────────────
@@ -80,26 +106,32 @@ function stopSyncPolling(): void {
  * pre-warmed popouts, broadcast `workspace:changed`, and (re)start git polling.
  * Mirrors `dir` into `config.workspace`.
  */
-function openWorkspace(dir: string): void {
-  // Close previous workspace cleanly
+async function openWorkspace(dir: string | null, profileId: string | null = null): Promise<void> {
+  const release = await flushEditors('workspace');
+  const previousDir = getConfigValue('workspace');
+  const previousProfile = getActiveProfileId();
+  let resume: (() => void) | undefined;
+  let closed = false;
+  try {
+  resume = pauseWorkspaceCommands();
+  stopStorageMaintenance();
+  stopAllCloudPollers();
+  stopCliExitMonitor();
   stopSkillWatcher();
-  closeDatabase();
-
+  stopSyncPolling();
+  stopScheduler();
+  stopAllWatchers();
+  await stopWorkspaceAgents();
+  await shutdownCopilot();
+  await drainProducers();
+  clearWorkspaceAgentState();
+  await drainGitOperations();
+  await closeDatabase();
+  closed = true;
+  await initializeWorkspace(dir);
+  setActiveProfile(profileId);
   setConfigValue('workspace', dir);
-
-  // Initialize workspace structure and DB
-  initWorkspace(dir);
-  initDatabase(getDbPath(dir), getLogRoot(dir));
-  mergeSessionIds(getConfig().sessions);
-  syncCanvasContent(dir);
-  startSkillWatcher(dir);
-
-  // Opportunistic compaction for the newly-opened workspace — deferred to idle
-  // so the switch UX feels instant. Cheap when nothing is cold.
-  setTimeout(() => {
-    try { compactOldSegments(getLogRoot(dir)); }
-    catch (err) { console.warn('[workspace] Compaction failed:', err); }
-  }, 5000).unref();
+  await restartWorkspaceServices(dir);
 
   // Destroy any pre-warmed settings + canvas windows so their next opens
   // cold-start fresh renderers with up-to-date workspace data.
@@ -107,25 +139,56 @@ function openWorkspace(dir: string): void {
   destroyCanvasWindow();
 
   // Notify all windows to reload data
-  for (const w of BrowserWindow.getAllWindows()) {
-    w.webContents.send('workspace:changed', dir);
-  }
+  withWorkspaceContext(() => notifyAllWindows('workspace:changed', dir));
 
-  // Start git sync polling for the new workspace
-  startSyncPolling();
+  } catch (error) {
+    if (resume) {
+      try {
+        if (closed) {
+          await withWorkspaceContext(() => closeDatabase());
+          await initializeWorkspace(previousDir);
+        }
+        setActiveProfile(previousProfile);
+        setConfigValue('workspace', previousDir);
+        await restartWorkspaceServices(previousDir);
+      } catch (recoveryError) {
+        console.error('[workspace] Switch failed:', error);
+        console.error('[workspace] Restoration failed:', recoveryError);
+        throw new Error('Workspace switch and restoration failed; drafts retained. Restart before saving.');
+      }
+    }
+    throw error;
+  } finally { resume?.(); release(); }
 }
 
-function enterFreshStartWorkspaceState(): void {
-  stopSkillWatcher();
-  stopSyncPolling();
-  closeDatabase();
-  setConfigValue('workspace', null);
-  setActiveProfile(null);
-  destroySettingsWindow();
-  destroyCanvasWindow();
-  for (const w of BrowserWindow.getAllWindows()) {
-    w.webContents.send('workspace:changed', null);
-  }
+async function initializeWorkspace(dir: string | null): Promise<void> {
+  if (!dir) return;
+  await withWorkspaceContext(async () => {
+    await initWorkspace(dir);
+    await initDatabase(getDbPath(dir), getLogRoot(dir));
+  });
+  await withWorkspaceContext(async () => {
+    await mergeSessionIds(getConfig().sessions);
+    await syncCanvasContent(dir);
+  });
+}
+
+export async function restartWorkspaceServices(dir: string | null): Promise<void> {
+  await withWorkspaceContext(async () => {
+    if (dir) {
+      await startSkillWatcher(dir);
+      await startScheduler();
+      startStorageMaintenance(dir);
+      startSyncPolling();
+      await restoreActiveCloudPollers();
+    }
+    startCliExitMonitor();
+    await initCopilot();
+  });
+}
+
+async function enterFreshStartWorkspaceState(): Promise<void> {
+  await openWorkspace(null);
 }
 
 /** Resolve the renderer-facing profile list (with computed display names). */
@@ -206,9 +269,7 @@ export function registerWorkspaceHandlers(): void {
 
     // Record (or reuse) a profile for this directory and make it active.
     const profile = upsertProfileForPath(dir);
-    setActiveProfile(profile.id);
-
-    openWorkspace(dir);
+    await openWorkspace(dir, profile.id);
     await broadcastProfilesChanged();
 
     return { selected: true, path: dir };
@@ -234,7 +295,7 @@ export function registerWorkspaceHandlers(): void {
     if (!isInitialized()) {
       return { success: false, error: 'no_workspace' };
     }
-    return launchSession(spaceId, workspace);
+    return (await launchSession(spaceId, workspace));
   });
 
   // Query which intents have active running terminal processes
@@ -243,14 +304,13 @@ export function registerWorkspaceHandlers(): void {
   });
 
   registerIpcHandler('voice:transcribe', async (_event, audioData: number[]) => {
-    const float32 = new Float32Array(audioData);
-    return transcribeAudio(float32);
+    return transcribeAudio(audioData);
   });
 
   // Clear workspace — returns app to a persistent fresh-start state while
   // keeping saved profiles available for later activation.
   registerIpcHandler('workspace:clear', async () => {
-    enterFreshStartWorkspaceState();
+    (await enterFreshStartWorkspaceState());
     await broadcastProfilesChanged();
 
     return { ok: true };
@@ -268,8 +328,7 @@ export function registerWorkspaceHandlers(): void {
     if (!dir) return { added: false, profileId: null };
 
     const profile = upsertProfileForPath(dir);
-    setActiveProfile(profile.id);
-    openWorkspace(dir);
+    await openWorkspace(dir, profile.id);
     await broadcastProfilesChanged();
     return { added: true, profileId: profile.id };
   });
@@ -281,8 +340,7 @@ export function registerWorkspaceHandlers(): void {
     if (!fs.existsSync(profile.path)) return { ok: false, error: 'missing_path' };
     if (getActiveProfileId() === id) return { ok: true };
 
-    setActiveProfile(id);
-    openWorkspace(profile.path);
+    await openWorkspace(profile.path, id);
     await broadcastProfilesChanged();
     return { ok: true };
   });
@@ -293,8 +351,7 @@ export function registerWorkspaceHandlers(): void {
     if (!next) return { ok: false };
     if (!fs.existsSync(next.path)) return { ok: false };
 
-    setActiveProfile(next.id);
-    openWorkspace(next.path);
+    await openWorkspace(next.path, next.id);
     await broadcastProfilesChanged();
     return { ok: true, profileId: next.id };
   });
@@ -311,17 +368,15 @@ export function registerWorkspaceHandlers(): void {
   // Remove a profile. If it was active, switch to another or go fresh-start.
   registerIpcHandler('profiles:remove', async (_event, id: string) => {
     const wasActive = getActiveProfileId() === id;
-    removeProfileById(id);
-
     if (wasActive) {
-      const remaining = getProfiles();
+      const remaining = getProfiles().filter(profile => profile.id !== id);
       const fallback = remaining.find(profile => fs.existsSync(profile.path));
       if (fallback) {
-        setActiveProfile(fallback.id);
-        openWorkspace(fallback.path);
+        await openWorkspace(fallback.path, fallback.id);
       } else {
-        enterFreshStartWorkspaceState();
+        (await enterFreshStartWorkspaceState());
       }
+      removeProfileById(id);
     }
 
     await broadcastProfilesChanged();

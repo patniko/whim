@@ -1,4 +1,5 @@
 import type { AgentListAllItem } from '../../shared/ipc-contract';
+import { equalPayload, reconcileByKey } from './reconcile';
 
 export interface AgentApproval {
   agentId: string;
@@ -41,6 +42,7 @@ export interface AgentSandboxBlock {
 
 export interface AgentState {
   agents: AgentListAllItem[];
+  page: import('../../shared/paging').AgentPage | null;
   processingSpaces: Set<string>;
   activeSessionSpaces: Set<string>;
   approvals: Map<string, AgentApproval>;
@@ -57,10 +59,12 @@ export interface AgentState {
 }
 
 type Listener = () => void;
+export const WORKER_PREVIEW_STEPS = 6;
 
 function createInitialAgentState(): AgentState {
   return {
     agents: [],
+    page: null,
     processingSpaces: new Set(),
     activeSessionSpaces: new Set(),
     approvals: new Map(),
@@ -83,21 +87,50 @@ class AgentStore {
     return this.state;
   }
 
-  setAgents(agents: AgentListAllItem[]): void {
-    this.state = { ...this.state, agents };
+  setPage(page: import('../../shared/paging').AgentPage): void {
+    const visible = new Set(page.items.map(agent => agent.agentId));
+    const steps = new Map([...this.state.steps].filter(([id]) => visible.has(id)));
+    this.state = { ...this.state, page, steps };
+    this.setAgents(page.items, true);
+    this.notify();
+  }
+
+  setAgents(agents: AgentListAllItem[], hydrateDetails = false): void {
+    agents = reconcileByKey(this.state.agents, agents, agent => agent.agentId);
+    let approvals = this.state.approvals;
+    let yoloMode = this.state.yoloMode;
+    if (hydrateDetails) {
+      const nextApprovals = new Map(approvals);
+      const nextYolo = new Map<string, boolean>();
+      for (const agent of agents) {
+        // A pending live request is newer than any snapshot fallback.
+        if (agent.status === 'waiting-approval' && agent.pendingApprovalId && !nextApprovals.has(agent.agentId)) {
+          nextApprovals.set(agent.agentId, {
+            agentId: agent.agentId, requestId: agent.pendingApprovalId,
+            permissionKind: agent.pendingPermissionKind || 'permission',
+            intention: agent.pendingIntention ?? undefined, path: agent.pendingPath ?? undefined,
+          });
+        }
+        if (agent.yoloMode) nextYolo.set(agent.agentId, true);
+      }
+      if (nextApprovals.size !== approvals.size) approvals = nextApprovals;
+      if (nextYolo.size !== yoloMode.size || [...nextYolo.keys()].some(id => !yoloMode.has(id))) yoloMode = nextYolo;
+    }
+    if (agents === this.state.agents && approvals === this.state.approvals && yoloMode === this.state.yoloMode) return;
+    this.state = { ...this.state, agents, approvals, yoloMode };
     this.notify();
   }
 
   reset(): void {
     this.state = createInitialAgentState();
-    this.requestCounter = 0;
-    this.latestRequestId = 0;
+    this.nextRequestId();
     this.notify();
   }
 
   // -- Processing spaces ----------------------------------------------------
 
   addProcessingIntent(spaceId: string): void {
+    if (this.state.processingSpaces.has(spaceId)) return;
     const next = new Set(this.state.processingSpaces);
     next.add(spaceId);
     this.state = { ...this.state, processingSpaces: next };
@@ -105,6 +138,7 @@ class AgentStore {
   }
 
   removeProcessingIntent(spaceId: string): void {
+    if (!this.state.processingSpaces.has(spaceId)) return;
     const next = new Set(this.state.processingSpaces);
     next.delete(spaceId);
     this.state = { ...this.state, processingSpaces: next };
@@ -114,6 +148,8 @@ class AgentStore {
   // -- Active sessions -------------------------------------------------------
 
   setActiveSessionIntents(spaceIds: Set<string>): void {
+    if (spaceIds.size === this.state.activeSessionSpaces.size
+      && [...spaceIds].every(id => this.state.activeSessionSpaces.has(id))) return;
     this.state = { ...this.state, activeSessionSpaces: new Set(spaceIds) };
     this.notify();
   }
@@ -121,6 +157,8 @@ class AgentStore {
   // -- Approvals -------------------------------------------------------------
 
   setApproval(agentId: string, approval: AgentApproval): void {
+    if (equalPayload(this.state.approvals.get(agentId), approval)) return;
+    this.nextRequestId();
     const next = new Map(this.state.approvals);
     next.set(agentId, approval);
     this.state = { ...this.state, approvals: next };
@@ -128,6 +166,8 @@ class AgentStore {
   }
 
   clearApproval(agentId: string): void {
+    if (!this.state.approvals.has(agentId)) return;
+    this.nextRequestId();
     const next = new Map(this.state.approvals);
     next.delete(agentId);
     this.state = { ...this.state, approvals: next };
@@ -170,14 +210,14 @@ class AgentStore {
   addStep(agentId: string, step: AgentStep): void {
     const next = new Map(this.state.steps);
     const existing = next.get(agentId) ?? [];
-    next.set(agentId, [...existing, step]);
+    next.set(agentId, [...existing, step].slice(-WORKER_PREVIEW_STEPS));
     this.state = { ...this.state, steps: next };
     this.notify();
   }
 
   setSteps(agentId: string, steps: AgentStep[]): void {
     const next = new Map(this.state.steps);
-    next.set(agentId, steps);
+    next.set(agentId, steps.slice(-WORKER_PREVIEW_STEPS));
     this.state = { ...this.state, steps: next };
     this.notify();
   }
@@ -185,6 +225,7 @@ class AgentStore {
   // -- Presence --------------------------------------------------------------
 
   setPresence(agentId: string, presence: AgentPresence): void {
+    if (equalPayload(this.state.presence.get(agentId), presence)) return;
     const next = new Map(this.state.presence);
     next.set(agentId, presence);
     this.state = { ...this.state, presence: next };
@@ -192,6 +233,7 @@ class AgentStore {
   }
 
   clearPresence(agentId: string): void {
+    if (!this.state.presence.has(agentId)) return;
     const next = new Map(this.state.presence);
     next.delete(agentId);
     this.state = { ...this.state, presence: next };
@@ -201,6 +243,7 @@ class AgentStore {
   // -- Yolo mode -------------------------------------------------------------
 
   setYoloMode(agentId: string, enabled: boolean): void {
+    if (this.state.yoloMode.has(agentId) === enabled) return;
     const next = new Map(this.state.yoloMode);
     if (enabled) {
       next.set(agentId, true);
@@ -214,6 +257,7 @@ class AgentStore {
   // -- Remote control --------------------------------------------------------
 
   setRemoteState(agentId: string, info: AgentRemoteInfo | null): void {
+    if (info?.enabled ? equalPayload(this.state.remoteState.get(agentId), info) : !this.state.remoteState.has(agentId)) return;
     const next = new Map(this.state.remoteState);
     if (info && info.enabled) {
       next.set(agentId, info);
@@ -236,6 +280,20 @@ class AgentStore {
   /** True if the given id is still the latest reserved id. */
   isCurrentRequest(id: number): boolean {
     return id === this.latestRequestId;
+  }
+
+  updateAgent(agentId: string, updates: Partial<AgentListAllItem>): void {
+    this.nextRequestId();
+    const index = this.state.agents.findIndex(agent => agent.agentId === agentId);
+    // A new agent may not be in the initial snapshot yet; the bridge schedules
+    // hydration rather than inventing the rest of its metadata.
+    if (index < 0) return;
+    const agent = { ...this.state.agents[index], ...updates };
+    if (equalPayload(agent, this.state.agents[index])) return;
+    const agents = this.state.agents.slice();
+    agents[index] = agent;
+    this.state = { ...this.state, agents };
+    this.notify();
   }
 
   /** Subscribe to state changes. Returns an unsubscribe function (useSyncExternalStore-compatible). */

@@ -6,7 +6,15 @@ import * as fs from 'fs';
 // Mock heavy / native dependencies so we can unit-test the pure render logic.
 vi.mock('electron', () => ({ BrowserWindow: class {} }));
 vi.mock('html-to-docx', () => ({ default: vi.fn(async () => Buffer.from('docx')) }));
-vi.mock('./database', () => ({
+vi.mock('./storage', async () => ({
+  ...(await import('./workspace')),
+  ...(await import('./services/skill-schedule-store')),
+  ...(await import('./canvas/artifact-store')),
+  documentMatches: (await import('./storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   isInitialized: vi.fn(() => true),
   getSpace: vi.fn(),
 }));
@@ -27,7 +35,7 @@ import {
   EXPORT_FORMATS,
   EXPORT_EXTENSIONS,
 } from './export';
-import { isInitialized, getSpace } from './database';
+import { isInitialized, getSpace } from './storage';
 import { readCanvas } from './workspace';
 import { getConfigValue } from './config';
 
@@ -108,16 +116,16 @@ describe('export engine', () => {
   });
 
   describe('loadCanvasForExport', () => {
-    it('returns an error when no workspace is configured', () => {
+    it('returns an error when no workspace is configured', async () => {
       vi.mocked(getConfigValue).mockReturnValue(null as never);
-      expect(loadCanvasForExport('space-1')).toEqual({ error: 'no_workspace' });
+      expect((await loadCanvasForExport('space-1'))).toEqual({ error: 'no_workspace' });
     });
 
-    it('strips frontmatter and derives the title from the space description', () => {
-      vi.mocked(getSpace).mockReturnValue({ folder: 'my-space', description: 'My Title' } as never);
+    it('strips frontmatter and derives the title from the space description', async () => {
+      vi.mocked(getSpace).mockResolvedValue({ folder: 'my-space', description: 'My Title' } as never);
       vi.mocked(readCanvas).mockReturnValue('---\nskills: [a]\n---\n# Body content');
 
-      const result = loadCanvasForExport('space-1');
+      const result = (await loadCanvasForExport('space-1'));
       expect(result).toEqual({
         title: 'My Title',
         body: '# Body content',
@@ -125,18 +133,18 @@ describe('export engine', () => {
       });
     });
 
-    it('returns not_found when the space has no folder', () => {
-      vi.mocked(getSpace).mockReturnValue({ folder: null, description: 'x' } as never);
-      expect(loadCanvasForExport('space-1')).toEqual({ error: 'not_found' });
+    it('returns not_found when the space has no folder', async () => {
+      vi.mocked(getSpace).mockResolvedValue({ folder: null, description: 'x' } as never);
+      expect((await loadCanvasForExport('space-1'))).toEqual({ error: 'not_found' });
     });
 
-    it('resolves a workspace .md file pseudo-space', () => {
+    it('resolves a workspace .md file pseudo-space', async () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'whim-export-file-'));
       try {
         const filePath = path.join(dir, 'notes.md');
         fs.writeFileSync(filePath, '# File body');
         const id = `__file__${encodeURIComponent(filePath)}`;
-        const result = loadCanvasForExport(id);
+        const result = (await loadCanvasForExport(id));
         expect(result).toEqual({ title: 'notes', body: '# File body', baseDir: dir });
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });

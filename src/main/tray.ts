@@ -48,7 +48,7 @@ function getIconPath(): string {
   return path.join(__dirname, '..', '..', 'src', 'assets', iconName);
 }
 
-function buildContextMenu(): Menu {
+async function buildContextMenu(): Promise<Menu> {
   const remoteEnabled = !!getConfigValue('remoteEnabled');
   const template: MenuItemConstructorOptions[] = [];
 
@@ -59,7 +59,7 @@ function buildContextMenu(): Menu {
   };
 
   // ── Active workers ───────────────────────────────────
-  const workers = listTrayWorkers();
+  const workers = (await listTrayWorkers());
   if (workers.length > 0) {
     pushSeparator();
     template.push({ label: 'Workers', enabled: false });
@@ -76,10 +76,11 @@ function buildContextMenu(): Menu {
           }),
       });
     }
+    if (workers.length === 50) template.push({ label: 'More workers are available in Whim', enabled: false });
   }
 
   // ── Open canvases ────────────────────────────────────
-  const canvases = getOpenCanvases();
+  const canvases = (await getOpenCanvases());
   if (canvases.length > 0) {
     pushSeparator();
     template.push({ label: 'Canvases', enabled: false });
@@ -94,10 +95,10 @@ function buildContextMenu(): Menu {
   // ── Reports ──────────────────────────────────────────
   // Backed by the artifact index rather than open windows: the point is to
   // reach a report the user has *not* opened yet.
-  let reports: ReturnType<typeof listActiveArtifacts> = [];
+  let reports: Awaited<ReturnType<typeof listActiveArtifacts>> = [];
   try {
-    reports = listActiveArtifacts();
-  } catch { /* no workspace yet */ }
+    reports = (await listActiveArtifacts(undefined, MAX_TRAY_REPORTS));
+  } catch (error) { console.warn('[tray] Could not refresh reports:', error); }
 
   if (reports.length > 0) {
     pushSeparator();
@@ -122,7 +123,7 @@ function buildContextMenu(): Menu {
       click: async () => {
         const { setAppRemote } = await import('./agent-service');
         await setAppRemote(!remoteEnabled);
-        rebuildTrayMenu();
+        (await rebuildTrayMenu());
       },
     },
     { type: 'separator' },
@@ -133,10 +134,11 @@ function buildContextMenu(): Menu {
 }
 
 /** Rebuild the tray context menu (e.g. after remote/worker/canvas state changes). */
-export function rebuildTrayMenu(): void {
-  if (tray) {
-    tray.setContextMenu(buildContextMenu());
-  }
+export async function rebuildTrayMenu(): Promise<void> {
+  const target = tray;
+  if (!target) return;
+  const menu = await buildContextMenu();
+  if (tray === target) target.setContextMenu(menu);
 }
 
 /** Debounced rebuild — coalesces bursts of worker/canvas change events. */
@@ -144,12 +146,12 @@ function scheduleRebuild(): void {
   if (rebuildTimer) clearTimeout(rebuildTimer);
   rebuildTimer = setTimeout(() => {
     rebuildTimer = null;
-    rebuildTrayMenu();
+    void rebuildTrayMenu().catch(error => console.error('[tray] Menu refresh failed:', error));
   }, 250);
 }
 
 /** Create and show the system tray icon. Call once after app is ready. */
-export function createTray(): void {
+export async function createTray(): Promise<void> {
   const icon = nativeImage.createFromPath(getIconPath());
   // On macOS, mark as template so it adapts to dark/light menu bar
   if (process.platform === 'darwin') {
@@ -158,13 +160,17 @@ export function createTray(): void {
 
   tray = new Tray(icon);
   tray.setToolTip('whim');
-  tray.setContextMenu(buildContextMenu());
   tray.on('click', () => toggleWindow('tray'));
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open whim', click: () => toggleWindow('tray') },
+    { label: 'Quit', click: () => app.quit() },
+  ]));
 
   // Keep the menu fresh as workers and canvases come and go.
   unsubscribers.push(onAgentListChanged(scheduleRebuild));
   unsubscribers.push(onCanvasWindowsChanged(scheduleRebuild));
   unsubscribers.push(onArtifactPublished(scheduleRebuild));
+  await rebuildTrayMenu();
 }
 
 /** Destroy the tray icon (called on app quit). */

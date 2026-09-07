@@ -54,7 +54,18 @@ vi.mock('./sandbox-launch', () => ({
 
 vi.mock('../cloud-agent', () => ({ getWorkspaceRepo: () => Promise.resolve(null) }));
 
-vi.mock('../database', () => ({ updateCanvasContent: () => ({ titleChanged: false, title: '' }) }));
+vi.mock('../storage', async () => ({
+  readDocument: (await import('../storage-documents')).readDocument,
+  ...(await import('../workspace')),
+  ...(await import('../services/skill-schedule-store')),
+  ...(await import('../canvas/artifact-store')),
+  documentMatches: (await import('../storage-documents')).documentMatches,
+  writeDocument: async (input: import('../storage-documents').DocumentWrite) =>
+    (await import('../storage-documents')).writeDocument({ ...input, spaceId: undefined }),
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+ updateCanvasContent: () => ({ titleChanged: false, title: '' }) }));
 
 vi.mock('../canvas-watcher', () => ({ markSelfWrite: vi.fn(), clearSelfWrite: vi.fn() }));
 

@@ -23,6 +23,7 @@ import type {
   WebRemoteTlsMode,
 } from './ipc-contract';
 import type { ChatEvent } from './chat-types';
+import type { ScheduleOptions } from './skill-schedule';
 import type { AgentAnchor, RecurrenceResult, RecallMatch, Skill, SkillContent, SkillScheduleFrequency, CanvasTarget, UpdateState, CanvasAgentStateSnapshot, ExportFormat, ExportDestination } from './types';
 
 
@@ -56,9 +57,18 @@ export interface SubagentAPI {
 }
 
 export interface WhimAPI {
+  getStorageStatus(): Promise<import('./ipc-contract').StorageStatus>;
+  rendererReady(): void;
+  onEditorFlushRequest(callback: (request: import('./ipc-contract').EditorFlushRequest) => void): () => void;
+  onEditorFlushReleased(callback: (token: string) => void): () => void;
+  respondEditorFlush(result: import('./ipc-contract').EditorFlushResult): void;
   // ── Spaces ──────────────────────────────────────────────
   create(input: IpcCommandArgs<'space:create'>[0]): Promise<IpcCommandResult<'space:create'>>;
   list(): Promise<IpcCommandResult<'space:list'>>;
+  listSpacePage(request?: import('./paging').SpacePageRequest): Promise<IpcCommandResult<'space:list-page'>>;
+  getSpace(id: string): Promise<IpcCommandResult<'space:get'>>;
+  listEventPage(request?: import('./paging').PageRequest): Promise<IpcCommandResult<'space:events-page'>>;
+  listActivityPage(request?: import('./paging').ActivityPageRequest): Promise<IpcCommandResult<'activity:list-page'>>;
   update(id: string, updates: IpcCommandArgs<'space:update'>[1]): Promise<IpcCommandResult<'space:update'>>;
   delete(id: string): Promise<IpcCommandResult<'space:delete'>>;
   dismissRecurrence(id: string): Promise<IpcCommandResult<'space:dismiss-recurrence'>>;
@@ -175,7 +185,7 @@ export interface WhimAPI {
   /** Published canvas artifacts for a space. */
   listCanvasArtifacts(spaceId: string): Promise<IpcCommandResult<'canvas-artifact:list'>>;
   /** Published canvas artifacts across every space the user has not completed. */
-  listAllCanvasArtifacts(): Promise<IpcCommandResult<'canvas-artifact:list-all'>>;
+  listAllCanvasArtifacts(spaceIds?: string[]): Promise<IpcCommandResult<'canvas-artifact:list-all'>>;
   /** Open a published canvas artifact in its own window. */
   openCanvasArtifact(spaceId: string, artifactId: string): Promise<IpcCommandResult<'canvas-artifact:open'>>;
   listExportDestinations(): Promise<IpcCommandResult<'export-destinations:list'>>;
@@ -196,6 +206,9 @@ export interface WhimAPI {
   openAgentCli(agentId: string): Promise<IpcCommandResult<'agent:open-cli'>>;
   quickLaunchAgent(prompt: string, personaHandle?: string): Promise<IpcCommandResult<'agent:quick-launch'>>;
   listAllAgents(): Promise<IpcCommandResult<'agent:list-all'>>;
+  listAgentPage(request?: import('./paging').AgentPageRequest): Promise<IpcCommandResult<'agent:list-page'>>;
+  getAgent(agentId: string): Promise<IpcCommandResult<'agent:get'>>;
+  getAgentHistoryPage(agentId: string, request?: import('./paging').PageRequest): Promise<IpcCommandResult<'agent:history-page'>>;
   deleteAgentSession(agentId: string): Promise<IpcCommandResult<'agent:delete-session'>>;
   launchCloudAgent(spaceId: string, prompt: string): Promise<IpcCommandResult<'agent:launch-cloud'>>;
   getCloudJobStatus(agentId: string): Promise<IpcCommandResult<'agent:cloud-status'>>;
@@ -279,6 +292,7 @@ export interface WhimAPI {
   onWorkspaceCommitted(callback: () => void): void;
   onWorkspaceChanged(callback: (path: string | null) => void): void;
   onSpaceTitleUpdated(callback: (data: IpcEventPayload<'space:title-updated'>) => void): void;
+  onSpaceIndexChanged(callback: (data: IpcEventPayload<'space:index-changed'>) => void): void;
 
   // ── Agent events ─────────────────────────────────────────
   onAgentStatusChanged(callback: (data: IpcEventPayload<'agent:status-changed'>) => void): void;
@@ -318,7 +332,8 @@ export interface WhimAPI {
   createSpaceFromSkill(skillId: string): Promise<IpcCommandResult<'skill:create-space'>>;
   launchSkill(skillId: string): Promise<IpcCommandResult<'skill:launch'>>;
   invokeSkill(input: IpcCommandArgs<'skill:invoke'>[0]): Promise<IpcCommandResult<'skill:invoke'>>;
-  setSkillSchedule(skillId: string, frequency: SkillScheduleFrequency, time: string, day: number | null): Promise<IpcCommandResult<'skill:set-schedule'>>;
+  setSkillSchedule(skillId: string, frequency: SkillScheduleFrequency, time: string, day: number | null, options?: ScheduleOptions): Promise<IpcCommandResult<'skill:set-schedule'>>;
+  listSkillScheduleSources(): Promise<IpcCommandResult<'skill:schedule-sources'>>;
   clearSkillSchedule(skillId: string): Promise<IpcCommandResult<'skill:clear-schedule'>>;
   setSkillCanvas(skillId: string, canvas: string | null, spaceMode: 'new' | 'reuse' | null): Promise<IpcCommandResult<'skill:set-canvas'>>;
   onSkillsChanged(callback: () => void): void;
@@ -358,10 +373,27 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
       transport.removeListener(channel, listener),
   };
   const api: WhimAPI = {
+    getStorageStatus: () => ipcRenderer.invoke('storage:status'),
+    rendererReady: () => ipcRenderer.send('window:renderer-ready'),
+    onEditorFlushRequest: callback => {
+      const listener = (_event: unknown, request: import('./ipc-contract').EditorFlushRequest) => callback(request);
+      ipcRenderer.on('lifecycle:flush-request', listener);
+      return () => ipcRenderer.removeListener('lifecycle:flush-request', listener);
+    },
+    respondEditorFlush: result => ipcRenderer.send('lifecycle:flush-result', result),
+    onEditorFlushReleased: callback => {
+      const listener = (_event: unknown, token: string) => callback(token);
+      ipcRenderer.on('lifecycle:flush-released', listener);
+      return () => ipcRenderer.removeListener('lifecycle:flush-released', listener);
+    },
     // ── Spaces ──────────────────────────────────────────────
     create: (input) =>
       ipcRenderer.invoke('space:create', input),
     list: () => ipcRenderer.invoke('space:list'),
+    listSpacePage: (request) => ipcRenderer.invoke('space:list-page', request),
+    getSpace: (id) => ipcRenderer.invoke('space:get', id),
+    listEventPage: (request) => ipcRenderer.invoke('space:events-page', request),
+    listActivityPage: (request) => ipcRenderer.invoke('activity:list-page', request),
     update: (id, updates) =>
       ipcRenderer.invoke('space:update', id, updates),
     delete: (id) => ipcRenderer.invoke('space:delete', id),
@@ -477,7 +509,7 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     exportCanvasToDestination: (spaceId, destinationId, format) =>
       ipcRenderer.invoke('canvas:export-to-destination', spaceId, destinationId, format),
     listCanvasArtifacts: (spaceId) => ipcRenderer.invoke('canvas-artifact:list', spaceId),
-    listAllCanvasArtifacts: () => ipcRenderer.invoke('canvas-artifact:list-all'),
+    listAllCanvasArtifacts: (spaceIds) => ipcRenderer.invoke('canvas-artifact:list-all', spaceIds),
     openCanvasArtifact: (spaceId, artifactId) =>
       ipcRenderer.invoke('canvas-artifact:open', spaceId, artifactId),
     listExportDestinations: () => ipcRenderer.invoke('export-destinations:list'),
@@ -510,6 +542,9 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
       ipcRenderer.invoke('agent:open-cli', agentId),
     quickLaunchAgent: (prompt, personaHandle) =>
       ipcRenderer.invoke('agent:quick-launch', prompt, personaHandle),
+    listAgentPage: (request) => ipcRenderer.invoke('agent:list-page', request),
+    getAgent: (agentId) => ipcRenderer.invoke('agent:get', agentId),
+    getAgentHistoryPage: (agentId, request) => ipcRenderer.invoke('agent:history-page', agentId, request),
     listAllAgents: () =>
       ipcRenderer.invoke('agent:list-all'),
     deleteAgentSession: (agentId) =>
@@ -662,6 +697,9 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     onSpaceTitleUpdated: (callback) => {
       ipcRenderer.on('space:title-updated', (_event: unknown, data: IpcEventPayload<'space:title-updated'>) => callback(data));
     },
+    onSpaceIndexChanged: (callback) => {
+      ipcRenderer.on('space:index-changed', (_event: unknown, data: IpcEventPayload<'space:index-changed'>) => callback(data));
+    },
 
     // ── Agent events ─────────────────────────────────────────
     onAgentStatusChanged: (callback) => {
@@ -750,7 +788,8 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     createSpaceFromSkill: (skillId) => ipcRenderer.invoke('skill:create-space', skillId),
     launchSkill: (skillId) => ipcRenderer.invoke('skill:launch', skillId),
     invokeSkill: (input) => ipcRenderer.invoke('skill:invoke', input),
-    setSkillSchedule: (skillId, frequency, time, day) => ipcRenderer.invoke('skill:set-schedule', skillId, frequency, time, day),
+    setSkillSchedule: (skillId, frequency, time, day, options) => ipcRenderer.invoke('skill:set-schedule', skillId, frequency, time, day, options),
+    listSkillScheduleSources: () => ipcRenderer.invoke('skill:schedule-sources'),
     clearSkillSchedule: (skillId) => ipcRenderer.invoke('skill:clear-schedule', skillId),
     setSkillCanvas: (skillId, canvas, spaceMode) => ipcRenderer.invoke('skill:set-canvas', skillId, canvas, spaceMode),
     onSkillsChanged: (callback) => {

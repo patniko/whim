@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import type { UpdateState } from '../shared/types';
 import { sendToAllWindows } from './ipc/typed-handler';
 import { getConfigValue } from './config';
+import { prepareShutdown } from './lifecycle';
 import {
   startChecking,
   updateAvailable,
@@ -20,6 +21,8 @@ let currentState: UpdateState = { status: 'disabled' };
 let checkTimer: ReturnType<typeof setInterval> | null = null;
 let autoUpdater: any = null;
 let logFilePath: string | null = null;
+let ipcRegistered = false;
+let ipcLog: Pick<Console, 'info' | 'error'> = console;
 
 // Tracks whether the in-flight check was started by the user (Settings → "Check
 // for updates now") or by the background timer. We only surface a visible
@@ -93,7 +96,10 @@ function runCheck(initiatedBy: 'auto' | 'manual', log: any) {
  * log, and — when packaged — trigger checks. Check/download/install are no-ops
  * when the updater isn't active.
  */
-function registerUpdateIpc(log: any) {
+export function registerUpdateHandlers(): void {
+  if (ipcRegistered) return;
+  ipcRegistered = true;
+  currentState = { ...currentState, currentVersion: safeGetVersion() };
   registerIpcHandler('update:get-state', () => currentState);
 
   registerIpcHandler('update:open-log', async () => {
@@ -109,21 +115,22 @@ function registerUpdateIpc(log: any) {
     }
   });
 
-  registerIpcHandler('update:install', () => {
+  registerIpcHandler('update:install', async () => {
     if (!autoUpdater) return;
-    log.info('[update] Install requested — quitAndInstall()');
+    ipcLog.info('[update] Install requested — quitAndInstall()');
+    await prepareShutdown('update');
     autoUpdater.quitAndInstall();
   });
 
   registerIpcHandler('update:check', () => {
-    runCheck('manual', log);
+    runCheck('manual', ipcLog);
   });
 
   registerIpcHandler('update:download', () => {
     if (!autoUpdater) return;
-    log.info('[update] Manual download requested');
+    ipcLog.info('[update] Manual download requested');
     autoUpdater.downloadUpdate().catch((err: any) => {
-      log.error('[update] Download failed:', err?.message ?? err);
+      ipcLog.error('[update] Download failed:', err?.message ?? err);
       setState(updateError(currentState, err?.message ?? String(err)));
     });
   });
@@ -133,7 +140,8 @@ export function initAutoUpdater() {
   // Always expose our own version + log path so the Settings panel works in dev.
   currentState = { ...currentState, currentVersion: safeGetVersion() };
   const log = configureLogger();
-  registerUpdateIpc(log);
+  ipcLog = log;
+  registerUpdateHandlers();
 
   if (!app.isPackaged) {
     log.info('[update] Skipping auto-updater — app is not packaged (dev build)');

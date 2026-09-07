@@ -26,6 +26,7 @@ export interface MainListProps {
     onSkillClick: (skillId: string) => void;
     onRunNow: (skillId: string) => void;
     onSchedule: (skillId: string) => void;
+    onOpenResult: (spaceId: string) => void;
     onCreateSpace: (skillId: string) => void;
     onOpenFolder: (skillId: string) => void;
     onDelete: (skillId: string) => void;

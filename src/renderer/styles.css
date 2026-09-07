@@ -3952,7 +3952,10 @@ body.dark .skill-action:hover {
   background: var(--bg, #fff);
   border-radius: 12px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-  width: 280px;
+  width: min(400px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
@@ -3984,6 +3987,7 @@ body.dark .skill-action:hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow-y: auto;
 }
 
 .schedule-picker-body label {
@@ -3994,8 +3998,30 @@ body.dark .skill-action:hover {
   letter-spacing: 0.5px;
 }
 
+.schedule-primary-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(110px, 0.8fr);
+  gap: 12px;
+}
+
+.schedule-primary-fields > div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.schedule-details summary {
+  cursor: pointer;
+  font-size: var(--fs-label);
+  overflow-wrap: anywhere;
+}
+
+.schedule-details[open] > :not(summary) { margin-top: 8px; }
+
 .schedule-picker-body select,
-.schedule-picker-body input[type="time"] {
+.schedule-picker-body input[type="time"],
+.schedule-picker-body input[type="text"],
+.schedule-picker-body textarea {
   width: 100%;
   padding: 6px 8px;
   border: 1px solid rgba(0, 0, 0, 0.15);
@@ -4003,6 +4029,7 @@ body.dark .skill-action:hover {
   font-size: var(--fs-body);
   background: var(--input-bg, #f8f8f8);
   color: inherit;
+  box-sizing: border-box;
 }
 
 .schedule-next-run {
@@ -4021,6 +4048,8 @@ body.dark .skill-action:hover {
   gap: 8px;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  flex-shrink: 0;
   border-top: 1px solid rgba(0, 0, 0, 0.08);
 }
 
@@ -4035,6 +4064,10 @@ body.dark .skill-action:hover {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  min-width: 0;
 }
 
 body.dark .schedule-section {
@@ -4064,11 +4097,35 @@ body.dark .schedule-section {
   line-height: 1.4;
 }
 
-#schedule-canvas-options {
+.schedule-picker-body #schedule-sources {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
+
+.schedule-picker [hidden] { display: none; }
+.schedule-picker button:disabled { opacity: 0.5; cursor: wait; }
+.schedule-picker textarea { resize: vertical; min-height: 60px; }
+.schedule-preview, .schedule-last-run, .skill-run-outcome {
+  font-size: var(--fs-label);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.schedule-error { color: var(--danger, #dc2626); font-size: var(--fs-label); }
+.schedule-check { overflow-wrap: anywhere; }
+.schedule-check input { flex-shrink: 0; }
+.skill-run-outcome { margin-top: 6px; }
+.skill-run-summary { display: block; opacity: 0.7; }
+.skill-result-link, .schedule-history-toggle, .schedule-retry {
+  background: none;
+  border: 0;
+  color: inherit;
+  text-decoration: underline;
+  padding: 6px 0;
+  cursor: pointer;
+  font-size: var(--fs-label);
+}
+.schedule-history-toggle { margin: 6px 12px; text-decoration: none; }
 
 .schedule-run-btn {
   background: none;

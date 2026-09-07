@@ -18,9 +18,20 @@ vi.mock('../config', () => ({
   getConfigValue: (key: string) => (key === 'workspace' ? workspace : undefined),
 }));
 
-vi.mock('../database', () => ({
+vi.mock('../storage', async () => ({
+  ...(await import('../workspace')),
+  ...(await import('../services/skill-schedule-store')),
+  ...(await import('../canvas/artifact-store')),
+  documentMatches: (await import('../storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   getSpace: (id: string) => spaces.find(s => s.id === id) ?? null,
+  getSpaceSummary: (id: string) => spaces.find(s => s.id === id) ?? null,
   listSpaces: () => spaces,
+  listSpaceSummaries: () => ({ items: spaces, nextCursor: null }),
+  isInitialized: () => true,
 }));
 
 vi.mock('../canvas/artifact-window', () => ({
@@ -69,59 +80,59 @@ afterEach(() => {
 });
 
 describe('listSpaceArtifacts', () => {
-  it('returns published artifacts with a url on the isolated origin', () => {
+  it('returns published artifacts with a url on the isolated origin', async () => {
     addSpace('space-1');
     addArtifact('space-1', 'open-questions', { status: '3 open questions' });
 
-    const [artifact] = listSpaceArtifacts('space-1');
+    const [artifact] = (await listSpaceArtifacts('space-1'));
 
     expect(artifact).toMatchObject({ artifactId: 'open-questions', status: '3 open questions', published: true });
     expect(artifact.url).toBe('whim-artifact://space/space-1/open-questions/index.html');
   });
 
-  it('hides artifacts that were bound but never published', () => {
+  it('hides artifacts that were bound but never published', async () => {
     addSpace('space-1');
     addArtifact('space-1', 'open-questions', {}, false);
 
-    expect(listSpaceArtifacts('space-1')).toEqual([]);
+    expect((await listSpaceArtifacts('space-1'))).toEqual([]);
   });
 
-  it('returns nothing for an unknown space', () => {
-    expect(listSpaceArtifacts('missing')).toEqual([]);
+  it('returns nothing for an unknown space', async () => {
+    expect((await listSpaceArtifacts('missing'))).toEqual([]);
   });
 
-  it('returns nothing when the space folder is gone', () => {
+  it('returns nothing when the space folder is gone', async () => {
     const space = addSpace('space-1');
     addArtifact('space-1', 'open-questions');
     fs.rmSync(path.join(workspace, space.folder), { recursive: true, force: true });
 
-    expect(listSpaceArtifacts('space-1')).toEqual([]);
+    expect((await listSpaceArtifacts('space-1'))).toEqual([]);
   });
 
-  it('lists the most recently published first', () => {
+  it('lists the most recently published first', async () => {
     addSpace('space-1');
     addArtifact('space-1', 'older', { publishedAt: '2024-01-01T00:00:00.000Z' });
     addArtifact('space-1', 'newer', { publishedAt: '2024-06-01T00:00:00.000Z' });
 
-    expect(listSpaceArtifacts('space-1').map(a => a.artifactId)).toEqual(['newer', 'older']);
+    expect((await listSpaceArtifacts('space-1')).map(a => a.artifactId)).toEqual(['newer', 'older']);
   });
 });
 
 describe('listActiveArtifacts', () => {
-  it('spans every space the user has not finished with', () => {
+  it('spans every space the user has not finished with', async () => {
     addSpace('space-1');
     addSpace('space-2');
     addArtifact('space-1', 'questions');
     addArtifact('space-2', 'digest');
 
-    expect(listActiveArtifacts().map(a => a.artifactId).sort()).toEqual(['digest', 'questions']);
+    expect((await listActiveArtifacts()).map(a => a.artifactId).sort()).toEqual(['digest', 'questions']);
   });
 
-  it('drops completed spaces, since closing one is how the user says they are done', () => {
+  it('drops completed spaces, since closing one is how the user says they are done', async () => {
     addSpace('space-1', 'done');
     addArtifact('space-1', 'questions');
 
-    expect(listActiveArtifacts()).toEqual([]);
+    expect((await listActiveArtifacts())).toEqual([]);
   });
 });
 
@@ -132,31 +143,31 @@ describe('canvas-artifact:open', () => {
     return call?.[1];
   }
 
-  it('opens the artifact window with focus, because the user asked for it', () => {
+  it('opens the artifact window with focus, because the user asked for it', async () => {
     addSpace('space-1');
     addArtifact('space-1', 'open-questions');
 
-    const result = handlerFor('canvas-artifact:open')({}, 'space-1', 'open-questions');
+    const result = (await handlerFor('canvas-artifact:open')({}, 'space-1', 'open-questions'));
 
     expect(result).toEqual({ ok: true });
     expect(openedWindows[0]).toMatchObject({ spaceId: 'space-1', artifactId: 'open-questions', focus: true });
   });
 
-  it('reports a missing artifact instead of opening an empty window', () => {
+  it('reports a missing artifact instead of opening an empty window', async () => {
     addSpace('space-1');
 
-    const result = handlerFor('canvas-artifact:open')({}, 'space-1', 'gone');
+    const result = (await handlerFor('canvas-artifact:open')({}, 'space-1', 'gone'));
 
     expect(result).toEqual({ error: 'Report not found' });
     expect(openedWindows).toEqual([]);
   });
 
-  it('will not open an artifact from a space it does not belong to', () => {
+  it('will not open an artifact from a space it does not belong to', async () => {
     addSpace('space-1');
     addSpace('space-2');
     addArtifact('space-2', 'digest');
 
-    const result = handlerFor('canvas-artifact:open')({}, 'space-1', 'digest');
+    const result = (await handlerFor('canvas-artifact:open')({}, 'space-1', 'digest'));
 
     expect(result).toEqual({ error: 'Report not found' });
   });

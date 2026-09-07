@@ -1,7 +1,7 @@
 // Chat message types for the in-app agent chat experience.
 // Inspired by github-tokens' ConversationMessage model.
 
-export type ChatMessage =
+export type ChatMessage = (
   | UserMessage
   | AssistantMessage
   | ToolCallMessage
@@ -10,7 +10,8 @@ export type ChatMessage =
   | UserInputMessage
   | ElicitationMessage
   | SandboxBlockMessage
-  | SessionEventMessage;
+  | SessionEventMessage
+) & { sequence?: number };
 
 export interface UserMessage {
   id: string;
@@ -141,7 +142,15 @@ export interface ChatAttachment {
 }
 
 // Events sent from main process to renderer via IPC
-export type ChatEvent =
+export type ChatEvent = ChatEventPayload & {
+  /** SDK transport identity; absent only on legacy or app-generated events. */
+  eventId?: string;
+  messageId?: string;
+  /** Durable transcript sequence, assigned by the storage worker. */
+  sequence?: number;
+};
+
+type ChatEventPayload =
   | { type: 'assistant.message_delta'; delta: string }
   | { type: 'assistant.message'; content: string }
   | { type: 'assistant.reasoning_delta'; reasoningId: string; delta: string }

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+vi.mock('../storage', async () => await import('./artifact-store'));
 
 vi.mock('electron', () => ({
   BrowserWindow: class {},
@@ -109,7 +110,7 @@ describe('resolveRunCanvasConfig', () => {
 
   it('registers the canvas with the renderer request and a stable provider identity', () => {
     const workingDir = makeSpace('space-a', 'canvas_artifacts: true');
-    const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-a', runId: 'run-1' });
+    const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-a' });
 
     expect(config).not.toBeNull();
     expect(config!.session.canvases).toHaveLength(1);
@@ -161,7 +162,7 @@ describe('resolveRunCanvasConfig', () => {
 
   it('shows a published artifact and focuses it for a manual run', async () => {
     const workingDir = makeSpace('space-h', 'canvas_artifacts: true');
-    const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-h', runId: 'run-1' })!;
+    const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-h' })!;
     const canvas: any = config.session.canvases[0];
 
     await canvas.open({ sessionId: 's', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID, instanceId: 'i1' });
@@ -178,7 +179,7 @@ describe('resolveRunCanvasConfig', () => {
 
   it('opens no window at all for a scheduled run, so it cannot interrupt the user', async () => {
     const workingDir = makeSpace('space-i', 'canvas_artifacts: true\nskill_invocation:\n  skill_id: s1\n  source: schedule');
-    const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-i', runId: 'run-2' })!;
+    const config = resolveRunCanvasConfig({ workspaceRoot, workingDir, spaceId: 'space-i' })!;
     const canvas: any = config.session.canvases[0];
 
     await canvas.open({ sessionId: 's', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID, instanceId: 'i1' });

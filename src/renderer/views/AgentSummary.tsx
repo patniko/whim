@@ -9,19 +9,19 @@ import { useStore } from './useStore';
  * when the Agents filter is active).
  */
 export function AgentSummary(): React.ReactElement {
-  const { spaces } = useStore(spaceStore);
-  const { agents } = useStore(agentStore);
+  const { spaces, page: spacePage } = useStore(spaceStore);
+  const { agents, page } = useStore(agentStore);
 
-  const running = agents.filter(a => a.status === 'running' || a.status === 'waiting-approval').length;
-  const completed = agents.filter(a => a.status === 'completed').length;
-  const failed = agents.filter(a => a.status !== 'running' && a.status !== 'waiting-approval' && a.status !== 'completed').length;
-  const openTasks = spaces.filter(s => s.status !== 'done').length;
-  const scheduled = spaces.filter(s => s.due_at_utc || s.due_at).length;
-  const recurring = spaces.filter(s => s.recurrence).length;
+  const running = page ? page.counts.running + page.counts.waiting : agents.filter(a => a.status === 'running' || a.status === 'waiting-approval').length;
+  const completed = page?.counts.completed ?? agents.filter(a => a.status === 'completed').length;
+  const failed = page?.counts.failed ?? agents.filter(a => a.status !== 'running' && a.status !== 'waiting-approval' && a.status !== 'completed').length;
+  const openTasks = spacePage?.counts.open ?? spaces.filter(s => s.status !== 'done').length;
+  const scheduled = spacePage?.counts.scheduled ?? spaces.filter(s => s.due_at_utc || s.due_at).length;
+  const recurring = spacePage?.counts.recurring ?? spaces.filter(s => s.recurrence).length;
 
   const lines: string[] = [];
 
-  if (agents.length === 0) {
+  if (running + completed + failed === 0) {
     lines.push('No agents are active right now.');
   } else {
     const parts: string[] = [];

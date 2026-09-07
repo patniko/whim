@@ -6,11 +6,17 @@ import { canvasArtifactStore } from '../state/canvas-artifact-store';
 import { useStore } from './useStore';
 import { formatDueDate, timeAgo } from './list-utils';
 import { EmptyState, focusCaptureInput } from './EmptyState';
-import type { Space, SpaceCanvasArtifact } from '../../shared/types';
+import type { Skill, SpaceCanvasArtifact } from '../../shared/types';
+import type { SpaceSummary as Space } from '../../shared/paging';
 import type { AgentListAllItem } from '../../shared/ipc-contract';
 import type { RecallMatch } from '../../shared/types';
+import { VirtualRows } from './VirtualRows';
+import { PageControls } from './PageControls';
+import { getAPI } from '../ipc-client';
+import { loadSpacesSnapshot } from '../state/ipc-bridge';
 
 export interface SpacesListActions {
+  onVisibleSpacesChange?: (spaces: Space[]) => void;
   onSpaceClick: (spaceId: string) => void;
   onToggleStatus: (spaceId: string) => void;
   onDelete: (spaceId: string) => void;
@@ -98,10 +104,10 @@ const SpaceRow = React.memo(function SpaceRow({
   const isRecurring = !!space.recurrence;
   const dueInfo = formatDueDate(space.due_at_utc, space.due_at);
   const hasDue = dueInfo.text !== '';
-  const hasRunningAgents = spaceAgents.some(a => a.status === 'running');
-  const hasWaitingAgents = spaceAgents.some(a => a.status === 'waiting-approval');
-  const hasFailedAgents = spaceAgents.some(a => a.status === 'failed');
-  const runningCount = spaceAgents.filter(a => a.status === 'running').length;
+  const runningCount = space.agentCounts?.running ?? spaceAgents.filter(a => a.status === 'running').length;
+  const hasRunningAgents = runningCount > 0;
+  const hasWaitingAgents = space.agentCounts ? space.agentCounts.waiting > 0 : spaceAgents.some(a => a.status === 'waiting-approval');
+  const hasFailedAgents = space.agentCounts ? space.agentCounts.failed > 0 : spaceAgents.some(a => a.status === 'failed');
 
   const classes = [
     'space-item',
@@ -211,10 +217,44 @@ export interface SpacesListProps extends SpacesListActions {
   searchResults?: Space[] | null;
 }
 
+export function groupScheduledSpaces(
+  spaces: Space[],
+  skills: Skill[],
+  attentionSpaceIds: ReadonlySet<string>,
+): { current: Space[]; history: { skillId: string; name: string; spaces: Space[] }[] } {
+  const historyIds = new Set<string>();
+  const history: { skillId: string; name: string; spaces: Space[] }[] = [];
+  for (const skill of skills) {
+    if (skill.schedule_details?.output !== 'canvas') continue;
+    const runs = new Map((skill.schedule_runs ?? [])
+      .filter(run => run.spaceId)
+      .map(run => [run.spaceId!, run]));
+    const known = spaces.filter(space => space.source_skill_id === skill.id && runs.has(space.id));
+    known.sort((a, b) => {
+      const aRun = runs.get(a.id)!;
+      const bRun = runs.get(b.id)!;
+      return bRun.startedAt.localeCompare(aRun.startedAt);
+    });
+    const latestRun = [...runs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+    const older = known.filter(space => {
+      if (space.id === latestRun?.spaceId) return false;
+      const status = runs.get(space.id)!.status;
+      return space.status !== 'done' && !attentionSpaceIds.has(space.id)
+        && (status === 'ready' || status === 'empty');
+    });
+    if (older.length) {
+      older.forEach(space => historyIds.add(space.id));
+      history.push({ skillId: skill.id, name: skill.name, spaces: older });
+    }
+  }
+  return { current: spaces.filter(space => !historyIds.has(space.id)), history };
+}
+
 export function SpacesList(props: SpacesListProps): React.ReactElement {
-  const { spaces, focusedSpaceId, recallHints, selectedIndex } = useStore(spaceStore);
+  const { spaces, page, focusedSpaceId, recallHints, selectedIndex, activeSearchQuery, filter } = useStore(spaceStore);
   const agentState = useStore(agentStore);
   const { skills } = useStore(skillStore);
+  const [expandedHistory, setExpandedHistory] = React.useState<Set<string>>(() => new Set());
   useStore(canvasArtifactStore);
 
   const displayList = React.useMemo<Space[]>(() => {
@@ -233,8 +273,45 @@ export function SpacesList(props: SpacesListProps): React.ReactElement {
     return m;
   }, [skills]);
 
+  const grouped = React.useMemo(() => {
+    // The legacy keyboard controller needs the same row order as this view.
+    if (props.searchResults || !props.onVisibleSpacesChange) return { current: displayList, history: [] };
+    const attention = new Set([...agentState.activeSessionSpaces, ...agentState.processingSpaces]);
+    if (focusedSpaceId) attention.add(focusedSpaceId);
+    for (const agent of agentState.agents) {
+      if (['running', 'waiting-approval', 'failed'].includes(agent.status)
+        || agentState.approvals.has(agent.agentId) || agentState.sandboxBlocks.has(agent.agentId)) {
+        attention.add(agent.spaceId);
+      }
+    }
+    return groupScheduledSpaces(displayList, skills, attention);
+  }, [displayList, skills, props.searchResults, props.onVisibleSpacesChange, focusedSpaceId, agentState]);
+
+  const visibleSpaces = React.useMemo(() => [
+    ...grouped.current,
+    ...grouped.history.flatMap(group => expandedHistory.has(group.skillId) ? group.spaces : []),
+  ], [grouped, expandedHistory]);
+  React.useEffect(() => {
+    props.onVisibleSpacesChange?.(visibleSpaces);
+  }, [props.onVisibleSpacesChange, visibleSpaces]);
+  const visibleIndexes = new Map(visibleSpaces.map((space, index) => [space.id, index]));
+  const renderRow = (space: Space) => (
+    <SpaceRow
+      key={space.id}
+      space={space}
+      isActiveSession={agentState.activeSessionSpaces.has(space.id)}
+      isFocused={space.id === focusedSpaceId}
+      isSelected={visibleIndexes.get(space.id) === selectedIndex}
+      spaceAgents={agentsBySpace.get(space.id) || []}
+      sourceSkill={space.source_skill_id ? skillByid.get(space.source_skill_id) || null : null}
+      artifact={canvasArtifactStore.getPrimary(space.id)}
+      recallHint={recallHints.get(space.id)}
+      actions={props}
+    />
+  );
+
   if (displayList.length === 0) {
-    return props.searchResults ? (
+    const empty = props.searchResults ? (
       <EmptyState icon="🔍" title="No matching spaces" text="Try a different search." />
     ) : (
       <EmptyState
@@ -244,23 +321,31 @@ export function SpacesList(props: SpacesListProps): React.ReactElement {
         cta={{ label: 'Capture a space', onClick: focusCaptureInput }}
       />
     );
+    return <>{page && <PageControls nextCursor={page.nextCursor} total={page.total} count={0}
+      scope={`${filter}:${activeSearchQuery}`} load={cursor => loadSpacesSnapshot(getAPI(), { cursor, invalidate: true })} />}{empty}</>;
   }
 
   return (
     <>
-      {displayList.map((space, idx) => (
-        <SpaceRow
-          key={space.id}
-          space={space}
-          isActiveSession={agentState.activeSessionSpaces.has(space.id)}
-          isFocused={space.id === focusedSpaceId}
-          isSelected={idx === selectedIndex}
-          spaceAgents={agentsBySpace.get(space.id) || []}
-          sourceSkill={space.source_skill_id ? skillByid.get(space.source_skill_id) || null : null}
-          artifact={canvasArtifactStore.getPrimary(space.id)}
-          recallHint={recallHints.get(space.id)}
-          actions={props}
-        />
+      {page && <PageControls nextCursor={page.nextCursor} total={page.total} count={page.items.length}
+        scope={`${filter}:${activeSearchQuery}`} load={cursor => loadSpacesSnapshot(getAPI(), { cursor, invalidate: true })} />}
+      <VirtualRows rows={grouped.current} rowId={space => space.id} render={renderRow}
+        selectedIndex={selectedIndex} total={page?.total} offset={page?.offset} />
+      {grouped.history.map(group => (
+        <section className="schedule-history" key={group.skillId} aria-label={`${group.name} schedule history`}>
+          <button type="button" className="schedule-history-toggle"
+            aria-expanded={expandedHistory.has(group.skillId)}
+            onClick={() => setExpandedHistory(previous => {
+              const next = new Set(previous);
+              if (next.has(group.skillId)) next.delete(group.skillId);
+              else next.add(group.skillId);
+              return next;
+            })}>
+            {expandedHistory.has(group.skillId) ? '▾' : '▸'} {group.name} history{page ? ' on this page' : ''} ({group.spaces.length})
+          </button>
+          {expandedHistory.has(group.skillId) ? <VirtualRows rows={group.spaces} rowId={space => space.id} render={renderRow}
+            selectedIndex={group.spaces.findIndex(space => visibleIndexes.get(space.id) === selectedIndex)} /> : null}
+        </section>
       ))}
     </>
   );

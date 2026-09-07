@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { assignSpaceFolder, getSpace } from '../database';
-import { initSpaceCanvas, resolveSpaceFolder, sanitizePageName } from '../workspace';
+import { assignSpaceFolder, getSpace } from '../storage';
+import { resolveSpaceFolder, sanitizePageName } from '../workspace';
+import { initSpaceCanvas } from '../storage';
 
 export interface CommentLaunchTarget {
   launchSpaceId: string;
@@ -32,7 +33,7 @@ export function parseSyntheticPageId(spaceId: string): { realSpaceId: string; pa
   }
 }
 
-export function resolveCommentLaunchTarget(spaceId: string, workspace: string): CommentLaunchTarget | { error: string } {
+export async function resolveCommentLaunchTarget(spaceId: string, workspace: string): Promise<CommentLaunchTarget | { error: string }> {
   let launchSpaceId = spaceId;
   let realSpaceId = spaceId;
   let pageName: string | null = null;
@@ -50,13 +51,13 @@ export function resolveCommentLaunchTarget(spaceId: string, workspace: string): 
     launchSpaceId = spaceId;
   }
 
-  const space = getSpace(realSpaceId);
+  const space = (await getSpace(realSpaceId));
   if (!space) return { error: 'space_not_found' };
 
   let folder = space.folder;
   if (!folder) {
-    folder = initSpaceCanvas(workspace, realSpaceId, space.description, space.body);
-    assignSpaceFolder(realSpaceId, folder);
+    folder = (await initSpaceCanvas(workspace, realSpaceId, space.description, space.body));
+    (await assignSpaceFolder(realSpaceId, folder));
   }
 
   if (!pageName) return { launchSpaceId, realSpaceId, folder };

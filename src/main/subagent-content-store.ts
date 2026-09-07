@@ -19,6 +19,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { isContentFilename, syncDirectory, writeAll } from './persistence-snapshot';
 
 /** Content shorter than this many UTF-8 bytes stays inline in the event log. */
 export const INLINE_THRESHOLD = 4096;
@@ -89,21 +90,30 @@ export function makeDigest(content: string): ContentDigest {
  *   • `inline` set when content ≤ {@link INLINE_THRESHOLD} bytes (no disk write).
  *   • `path` set when content was written to a side file.
  *
- * Side-file writes use atomic temp+rename so partial reads can never see
- * a half-written file. A write failure falls back to inline so callers
- * never lose data.
+ * New paths include the content hash, leaving earlier logged versions intact.
+ * Writes use fsync + atomic rename before a path is returned to a log writer.
+ * A write failure falls back to inline so callers never lose data.
  */
 export function storeContent(key: string, content: string): ContentRef {
   const digest = makeDigest(content);
-  if (content.length <= INLINE_THRESHOLD || !contentDir) {
+  if (Buffer.byteLength(content, 'utf8') <= INLINE_THRESHOLD || !contentDir) {
     return { inline: content, digest };
   }
-  const relPath = sanitizeKey(key);
+  // Never overwrite content referenced by an earlier durable event. A crash
+  // between this write and the log append must leave the old version intact.
+  const relPath = `${sanitizeKey(key).slice(0, 130)}.${digest.sha256}`;
   const fullPath = path.join(contentDir, relPath);
   const tmpPath = `${fullPath}.tmp-${process.pid}-${Date.now()}`;
   try {
-    fs.writeFileSync(tmpPath, content, 'utf8');
+    const fd = fs.openSync(tmpPath, 'wx');
+    try {
+      writeAll(fd, content);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
     fs.renameSync(tmpPath, fullPath);
+    syncDirectory(contentDir);
     return { path: relPath, digest };
   } catch (err) {
     console.warn(`[content-store] Failed to write side file ${relPath}, falling back to inline:`, err);
@@ -120,6 +130,7 @@ export function storeContent(key: string, content: string): ContentRef {
  */
 export function readContent(relPath: string): string | null {
   if (!contentDir) return null;
+  if (!isContentFilename(relPath)) throw new Error('Invalid content path');
   try {
     return fs.readFileSync(path.join(contentDir, relPath), 'utf8');
   } catch {
@@ -130,10 +141,12 @@ export function readContent(relPath: string): string | null {
 /** Remove a side file. Used by compaction. No-op if the file is missing. */
 export function deleteContent(relPath: string): void {
   if (!contentDir) return;
+  if (!isContentFilename(relPath)) throw new Error('Invalid content path');
   try {
     fs.unlinkSync(path.join(contentDir, relPath));
-  } catch {
-    // Ignore: already gone or never existed.
+    syncDirectory(contentDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
 }
 
@@ -160,5 +173,7 @@ export function resolveContent(ref: { path?: string | null; inline?: string | nu
  * call IDs), so collisions after sanitisation are extremely unlikely.
  */
 function sanitizeKey(key: string): string {
-  return key.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 200);
+  const sanitized = key.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 200);
+  if (!isContentFilename(sanitized)) throw new Error('Invalid content key');
+  return sanitized;
 }

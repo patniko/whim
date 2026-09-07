@@ -16,7 +16,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { protocol, session } from 'electron';
-import { getArtifact, isValidArtifactId, resolveArtifactDir } from './artifact-store';
+import { isValidArtifactId, resolveArtifactDir } from './artifact-store';
+import { getArtifact } from '../storage';
 
 export const ARTIFACT_SCHEME = 'whim-artifact';
 /** In-memory session partition: artifacts get no persistent storage of any kind. */
@@ -115,7 +116,7 @@ export type ArtifactRequestResult =
  * Containment is enforced with realpath, so a symlink planted inside the
  * artifact folder cannot be used to read arbitrary files.
  */
-export function resolveArtifactRequest(rawUrl: string, resolveSpace: SpaceResolver): ArtifactRequestResult {
+export async function resolveArtifactRequest(rawUrl: string, resolveSpace: SpaceResolver): Promise<ArtifactRequestResult> {
   const parsed = parseArtifactUrl(rawUrl);
   if (!parsed) return { ok: false, status: 400, reason: 'bad_url' };
 
@@ -123,7 +124,7 @@ export function resolveArtifactRequest(rawUrl: string, resolveSpace: SpaceResolv
   if (!location) return { ok: false, status: 404, reason: 'unknown_space' };
 
   // The artifact must exist as a real, manifest-backed artifact.
-  const artifact = getArtifact(location.workspaceRoot, location.folder, parsed.artifactId);
+  const artifact = (await getArtifact(location.workspaceRoot, location.folder, parsed.artifactId));
   if (!artifact) return { ok: false, status: 404, reason: 'unknown_artifact' };
 
   let artifactDir: string;
@@ -229,12 +230,14 @@ export function stripMetaRefresh(html: string): string {
  * Install the artifact handler on the isolated session. Registered on that
  * session only, so the app's own renderer can never fetch artifact URLs.
  */
-export function registerArtifactProtocol(resolveSpace: SpaceResolver): void {
+export function registerArtifactProtocol(resolveSpace: (id: string) => SpaceLocation | null | Promise<SpaceLocation | null>): void {
   if (handlerRegistered) return;
   handlerRegistered = true;
 
-  getArtifactSession().protocol.handle(ARTIFACT_SCHEME, request => {
-    const result = resolveArtifactRequest(request.url, resolveSpace);
+  getArtifactSession().protocol.handle(ARTIFACT_SCHEME, async request => {
+    const parsed = parseArtifactUrl(request.url);
+    const location = parsed ? await resolveSpace(parsed.spaceId) : null;
+    const result = (await resolveArtifactRequest(request.url, () => location));
     if (!result.ok) {
       return new Response(result.reason, {
         status: result.status,
@@ -243,7 +246,7 @@ export function registerArtifactProtocol(resolveSpace: SpaceResolver): void {
     }
 
     try {
-      const body = fs.readFileSync(result.filePath);
+      const body = await fs.promises.readFile(result.filePath);
       const served = result.mimeType.startsWith('text/html')
         ? stripMetaRefresh(body.toString('utf-8'))
         : body;

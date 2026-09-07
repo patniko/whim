@@ -98,12 +98,14 @@ export function notifyForEvent(channel: string, payload: unknown): void {
     });
 }
 
-/** Register the offline shell worker. Silently no-ops outside a secure context. */
+/** Module evaluation/React effects may run after the navigation load event. */
 export function registerServiceWorker(): void {
   if (!('serviceWorker' in navigator)) return;
-  window.addEventListener('load', () => {
+  const register = () => {
     void navigator.serviceWorker.register('/sw.js').catch(() => {
-      /* http:// on a non-loopback host — expected until TLS is enabled */
+      console.warn('[web] Offline shell registration failed');
     });
-  });
+  };
+  if (document.readyState === 'complete') register();
+  else window.addEventListener('load', register, { once: true });
 }

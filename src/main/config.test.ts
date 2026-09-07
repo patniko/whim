@@ -73,7 +73,7 @@ describe('config', () => {
         { kind: 'address', address: '127.0.0.1' },
         { kind: 'address', address: '203.0.113.9' },
       ]);
-      expect((config as Record<string, unknown>).webRemoteBindAddresses).toBeUndefined();
+      expect(config).not.toHaveProperty('webRemoteBindAddresses');
     });
 
     it('preserves saved selections for interfaces that are not currently up', () => {

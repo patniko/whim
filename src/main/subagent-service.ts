@@ -20,8 +20,7 @@ import {
   updateSubagentToolCall,
   listSubagentRecords,
   listSubagentToolCalls,
-} from './database';
-import { resolveContent } from './subagent-content-store';
+} from './storage';
 
 /** Max completed turns to retain per agent (prevents unbounded memory) */
 const MAX_TURNS_PER_AGENT = 50;
@@ -80,13 +79,13 @@ export class SubagentTracker {
 
   // --- Lifecycle events ---
 
-  trackStarted(parentAgentId: string, data: {
+  async trackStarted(parentAgentId: string, data: {
     agentId?: string;
     toolCallId: string;
     agentName: string;
     agentDisplayName: string;
     agentDescription: string;
-  }): void {
+  }): Promise<void> {
     const parent = this.ensureParent(parentAgentId);
     const agentId = data.agentId || `agent-${data.toolCallId}`;
 
@@ -112,11 +111,11 @@ export class SubagentTracker {
 
     parent.set(agentId, info);
     this.toolCallIndex.set(data.toolCallId, { parentAgentId, agentId });
-    this.persistCreated(info);
+    (await this.persistCreated(info));
     this.notifyChange(parentAgentId);
   }
 
-  trackCompleted(parentAgentId: string, data: {
+  async trackCompleted(parentAgentId: string, data: {
     agentId?: string;
     toolCallId: string;
     agentName?: string;
@@ -125,7 +124,7 @@ export class SubagentTracker {
     model?: string;
     totalTokens?: number;
     totalToolCalls?: number;
-  }): void {
+  }): Promise<void> {
     const agentId = this.resolveAgentId(data, parentAgentId);
     if (!agentId) return;
     const agent = this.ensureParent(parentAgentId).get(agentId);
@@ -141,11 +140,11 @@ export class SubagentTracker {
     if (data.totalTokens != null) agent.totalTokens = data.totalTokens;
     if (data.totalToolCalls != null) agent.totalToolCalls = data.totalToolCalls;
     if (data.agentDisplayName) agent.displayName = data.agentDisplayName;
-    this.persistCompleted(agent);
+    (await this.persistCompleted(agent));
     this.notifyChange(parentAgentId);
   }
 
-  trackFailed(parentAgentId: string, data: {
+  async trackFailed(parentAgentId: string, data: {
     agentId?: string;
     toolCallId: string;
     agentName?: string;
@@ -154,7 +153,7 @@ export class SubagentTracker {
     model?: string;
     totalTokens?: number;
     totalToolCalls?: number;
-  }): void {
+  }): Promise<void> {
     const agentId = this.resolveAgentId(data, parentAgentId);
     if (!agentId) return;
     const agent = this.ensureParent(parentAgentId).get(agentId);
@@ -169,7 +168,7 @@ export class SubagentTracker {
     if (data.model) agent.model = data.model;
     if (data.totalTokens != null) agent.totalTokens = data.totalTokens;
     if (data.totalToolCalls != null) agent.totalToolCalls = data.totalToolCalls;
-    this.persistCompleted(agent);
+    (await this.persistCompleted(agent));
     this.notifyChange(parentAgentId);
   }
 
@@ -191,11 +190,11 @@ export class SubagentTracker {
     this.notifyChange(parentAgentId);
   }
 
-  trackToolStart(parentAgentId: string, agentId: string, data: {
+  async trackToolStart(parentAgentId: string, agentId: string, data: {
     toolCallId: string;
     toolName: string;
     args: Record<string, unknown>;
-  }): void {
+  }): Promise<void> {
     const agent = this.ensureParent(parentAgentId).get(agentId);
     if (!agent) return;
     if (agent.toolCalls.length >= MAX_TOOL_CALLS_PER_AGENT) {
@@ -208,15 +207,15 @@ export class SubagentTracker {
       completed: false,
       startedAt: Date.now(),
     });
-    this.persistToolStart(agentId, parentAgentId, data);
+    (await this.persistToolStart(agentId, parentAgentId, data));
   }
 
-  trackToolComplete(parentAgentId: string, agentId: string, data: {
+  async trackToolComplete(parentAgentId: string, agentId: string, data: {
     toolCallId: string;
     success: boolean;
     result?: string;
     error?: string;
-  }): void {
+  }): Promise<void> {
     const agent = this.ensureParent(parentAgentId).get(agentId);
     if (!agent) return;
     const tc = agent.toolCalls.find((t) => t.toolCallId === data.toolCallId);
@@ -228,7 +227,7 @@ export class SubagentTracker {
       tc.completedAt = Date.now();
     }
     agent.progress.toolCallsCompleted++;
-    this.persistToolComplete(agent.agentId, agent.parentAgentId, data);
+    (await this.persistToolComplete(agent.agentId, agent.parentAgentId, data));
   }
 
   trackUsage(parentAgentId: string, agentId: string, inputTokens: number, outputTokens: number): void {
@@ -345,10 +344,10 @@ export class SubagentTracker {
 
   // --- DB persistence helpers ---
 
-  private persistCreated(agent: SubagentInfo): void {
+  private async persistCreated(agent: SubagentInfo): Promise<void> {
     if (!isInitialized()) return;
     try {
-      createSubagentRecord({
+      (await createSubagentRecord({
         id: agent.agentId,
         parent_agent_id: agent.parentAgentId,
         tool_call_id: agent.toolCallId,
@@ -367,14 +366,14 @@ export class SubagentTracker {
         streaming_content: '',
         turns_json: '[]',
         progress_json: JSON.stringify(agent.progress),
-      });
+      }));
     } catch { /* non-fatal */ }
   }
 
-  private persistCompleted(agent: SubagentInfo): void {
+  private async persistCompleted(agent: SubagentInfo): Promise<void> {
     if (!isInitialized()) return;
     try {
-      updateSubagentRecord(agent.agentId, {
+      (await updateSubagentRecord(agent.agentId, {
         status: agent.status,
         completed_at: agent.completedAt ?? null,
         duration_ms: agent.durationMs ?? null,
@@ -385,14 +384,14 @@ export class SubagentTracker {
         streaming_content: agent.streamingContent,
         turns_json: JSON.stringify(agent.turns),
         progress_json: JSON.stringify(agent.progress),
-      });
+      }));
     } catch { /* non-fatal */ }
   }
 
-  private persistToolStart(subagentId: string, parentAgentId: string, data: { toolCallId: string; toolName: string; args: Record<string, unknown> }): void {
+  private async persistToolStart(subagentId: string, parentAgentId: string, data: { toolCallId: string; toolName: string; args: Record<string, unknown> }): Promise<void> {
     if (!isInitialized()) return;
     try {
-      createSubagentToolCall({
+      (await createSubagentToolCall({
         subagent_id: subagentId,
         parent_agent_id: parentAgentId,
         tool_call_id: data.toolCallId,
@@ -403,30 +402,31 @@ export class SubagentTracker {
         error: null,
         started_at: Date.now(),
         completed_at: null,
-      });
+      }));
     } catch { /* non-fatal */ }
   }
 
-  private persistToolComplete(subagentId: string, _parentAgentId: string, data: { toolCallId: string; success: boolean; result?: string; error?: string }): void {
+  private async persistToolComplete(subagentId: string, _parentAgentId: string, data: { toolCallId: string; success: boolean; result?: string; error?: string }): Promise<void> {
     if (!isInitialized()) return;
     try {
-      updateSubagentToolCall(subagentId, data.toolCallId, {
+      (await updateSubagentToolCall(subagentId, data.toolCallId, {
         success: data.success ? 1 : 0,
         result: data.result,
         error: data.error,
         completed_at: Date.now(),
-      });
+      }));
     } catch { /* non-fatal */ }
   }
 
   /** Load persisted subagent data from DB for a historical parent agent. */
-  loadPersistedSubagents(parentAgentId: string): SubagentInfo[] {
+  async loadPersistedSubagents(parentAgentId: string): Promise<SubagentInfo[]> {
     if (!isInitialized()) return [];
     try {
-      const rows = listSubagentRecords(parentAgentId);
-      return rows.map((row) => {
-        const toolCalls = listSubagentToolCalls(row.id).map((tc): SubagentToolCall => {
-          const resultText = resolveContent({ inline: tc.result, path: tc.result_path });
+      const rows = (await listSubagentRecords(parentAgentId));
+      const result: SubagentInfo[] = [];
+      for (const row of rows) {
+        const toolCalls = (await listSubagentToolCalls(row.id)).map((tc): SubagentToolCall => {
+          const resultText = tc.result;
           return {
             toolCallId: tc.tool_call_id ?? '',
             toolName: tc.tool_name,
@@ -442,16 +442,13 @@ export class SubagentTracker {
         // Resolve potentially off-loaded turns_json + streaming_content via
         // the side-file store. Parse failures fall back to safe defaults so
         // a corrupt side file never breaks the overlay.
-        const turnsText = resolveContent({ inline: row.turns_json, path: row.turns_path });
+        const turnsText = row.turns_json;
         let turns: SubagentTurn[] = [];
         if (turnsText) {
           try { turns = JSON.parse(turnsText); } catch { turns = []; }
         }
-        const streamingContent = resolveContent({
-          inline: row.streaming_content,
-          path: row.streaming_content_path,
-        });
-        return {
+        const streamingContent = row.streaming_content;
+        result.push({
           agentId: row.id,
           parentAgentId: row.parent_agent_id,
           toolCallId: row.tool_call_id ?? '',
@@ -471,8 +468,9 @@ export class SubagentTracker {
           streamingContent,
           turns,
           toolCalls,
-        };
-      });
+        });
+      }
+      return result;
     } catch { return []; }
   }
 }

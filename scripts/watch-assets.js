@@ -3,7 +3,8 @@ const path = require('path');
 
 // Fonts are not watched: they are static files that only change when someone
 // deliberately replaces them, and the initial copy already picks that up.
-const watched = ['index.html', 'styles.css', 'copilot.png'];
+// Generated HTML belongs exclusively to the manifest-aware renderer builder.
+const watched = ['styles.css', 'copilot.png'];
 const srcDir = path.join(__dirname, '..', 'src', 'renderer');
 const distDir = path.join(__dirname, '..', 'dist', 'renderer');
 

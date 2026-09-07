@@ -1,11 +1,24 @@
 import { registerIpcHandler } from './ipc/registry';
-import { BrowserWindow, screen, ipcMain, shell, app } from 'electron';
+import { BrowserWindow, screen, ipcMain, shell, app, dialog } from 'electron';
+import { flushEditors } from './lifecycle';
 import { EventEmitter } from 'events';
 import { getConfigValue, setConfigValue, type SnapPosition } from './config';
-import { getSpace } from './database';
+import { getSpace } from './storage';
 import * as fs from 'fs';
 import * as nodePath from 'path';
 import type { WindowToggleSource } from '../shared/ipc-contract';
+const readyRenderers = new WeakSet<BrowserWindow>();
+const trackedRenderers = new WeakSet<BrowserWindow>();
+const pendingRendererActions = new WeakMap<BrowserWindow, () => void>();
+
+export function whenRendererReady(win: BrowserWindow, action: () => void): void {
+  if (!trackedRenderers.has(win)) {
+    trackedRenderers.add(win);
+    win.webContents.on('did-start-loading', () => readyRenderers.delete(win));
+  }
+  if (readyRenderers.has(win) && !win.webContents.isLoading()) action();
+  else pendingRendererActions.set(win, action);
+}
 
 function getWindowIconPath(): string | undefined {
   if (process.platform === 'darwin') return undefined;
@@ -101,13 +114,13 @@ function emitCanvasChange(): void {
 }
 
 /** Derive a human-readable label for a canvas window from its current target. */
-function resolveCanvasLabel(winId: number): string {
+async function resolveCanvasLabel(winId: number): Promise<string> {
   const target = canvasTargets.get(winId);
   if (!target) return 'Canvas';
   if (typeof target.title === 'string' && target.title.trim()) return target.title.trim();
   if (target.kind === 'space' && target.id) {
     try {
-      const space = getSpace(target.id);
+      const space = (await getSpace(target.id));
       if (space?.description?.trim()) return space.description.trim();
     } catch { /* DB may not be ready */ }
   }
@@ -116,11 +129,11 @@ function resolveCanvasLabel(winId: number): string {
 }
 
 /** Currently *visible* canvas windows, with a label for each. Used by the tray. */
-export function getOpenCanvases(): { winId: number; label: string }[] {
+export async function getOpenCanvases(): Promise<{ winId: number; label: string }[]> {
   const result: { winId: number; label: string }[] = [];
   for (const win of canvasWindows) {
     if (win.isDestroyed() || !win.isVisible()) continue;
-    result.push({ winId: win.id, label: resolveCanvasLabel(win.id) });
+    result.push({ winId: win.id, label: (await resolveCanvasLabel(win.id)) });
   }
   return result;
 }
@@ -355,11 +368,19 @@ export function setupSnapOnDrop(): void {
 
 /** Register all window-related IPC handlers. Call after createMainWindow(). */
 export function registerWindowIpcHandlers(preloadPath: string): void {
+  ipcMain.on('window:renderer-ready', event => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win || win.isDestroyed()) return;
+    readyRenderers.add(win);
+    const action = pendingRendererActions.get(win);
+    pendingRendererActions.delete(win);
+    action?.();
+  });
   storedPreloadPath = preloadPath;
 
   ipcMain.on('window:hide', () => {
     cancelBlurTimer();
-    mainWindow?.hide();
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
   });
 
   ipcMain.on('window:expand', () => {
@@ -453,14 +474,10 @@ export function registerWindowIpcHandlers(preloadPath: string): void {
         if (!canvasWindow.isVisible()) canvasWindow.show();
         canvasWindow.focus();
       };
-      if (canvasWindow.webContents.isLoading()) {
-        canvasWindow.webContents.once('did-finish-load', reveal);
-      } else {
-        reveal();
-      }
+      whenRendererReady(canvasWindow, reveal);
     } else {
       canvasWindow = createCanvasWindow(preloadPath, { isPrimary: true });
-      canvasWindow.webContents.once('did-finish-load', () => {
+      whenRendererReady(canvasWindow, () => {
         if (canvasWindow) sendCanvasTarget(canvasWindow, target);
         canvasWindow?.show();
         canvasWindow?.focus();
@@ -487,7 +504,7 @@ export function registerWindowIpcHandlers(preloadPath: string): void {
     if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
       mainWindow.focus();
     }
-    mainWindow?.webContents.send('canvas-window:closed');
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('canvas-window:closed');
   });
 
   // Open a new canvas window (even if one already exists)
@@ -495,7 +512,7 @@ export function registerWindowIpcHandlers(preloadPath: string): void {
     const win = createCanvasWindow(preloadPath);
     // Track as the "primary" canvas for default reuse
     canvasWindow = win;
-    win.webContents.once('did-finish-load', () => {
+    whenRendererReady(win, () => {
       sendCanvasTarget(win, target);
       win.show();
     });
@@ -680,7 +697,7 @@ function navigateCanvasToSpace(win: BrowserWindow, spaceId: string): void {
 function openPageInNewWindow(preloadPath: string, spaceId: string, page: string): void {
   const win = createCanvasWindow(preloadPath);
   const target = { kind: 'page' as const, spaceId, page, title: page };
-  win.webContents.once('did-finish-load', () => {
+  whenRendererReady(win, () => {
     sendCanvasTarget(win, target);
     win.show();
   });
@@ -691,7 +708,7 @@ export function openFileInNewWindow(filePath: string): void {
   const title = filePath.split('/').pop()?.replace(/\.md$/i, '') ?? filePath;
   const win = createCanvasWindow(storedPreloadPath);
   const target = { kind: 'file' as const, filePath, title };
-  win.webContents.once('did-finish-load', () => {
+  whenRendererReady(win, () => {
     sendCanvasTarget(win, target);
     win.show();
   });
@@ -891,13 +908,26 @@ function createCanvasWindow(preloadPath: string, options: { isPrimary?: boolean 
       event.preventDefault();
       win.webContents.send('canvas-window:request-hide');
     });
+  } else {
+    let closeApproved = false;
+    win.on('close', event => {
+      if (canvasWindowAllowClose || closeApproved || win.isDestroyed()) return;
+      event.preventDefault();
+      void flushEditors('quit', [win]).then(release => {
+        closeApproved = true;
+        if (!win.isDestroyed()) win.close();
+        release();
+      }).catch(error => {
+        dialog.showErrorBox('whim - Document not saved', error instanceof Error ? error.message : String(error));
+      });
+    });
   }
 
   win.on('closed', () => {
     canvasWindows.delete(win);
     canvasTargets.delete(win.id);
     if (canvasWindow === win) canvasWindow = null;
-    mainWindow?.webContents.send('canvas-window:closed');
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('canvas-window:closed');
     emitCanvasChange();
   });
 
@@ -945,7 +975,12 @@ function createSettingsWindow(preloadPath: string): BrowserWindow {
     if (settingsWindowAllowClose) return;
     if (win.isDestroyed()) return;
     event.preventDefault();
-    win.hide();
+    void flushEditors('quit', [win]).then(release => {
+      if (!win.isDestroyed()) win.hide();
+      release();
+    }).catch(error => {
+      dialog.showErrorBox('whim - Settings not saved', error instanceof Error ? error.message : String(error));
+    });
   });
 
   win.on('closed', () => {

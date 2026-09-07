@@ -32,7 +32,10 @@ function loadServiceWorker() {
       return {
         // The real Cache API normalises request keys to absolute URLs.
         addAll: async (urls: string[]) => { for (const u of urls) entries.set(new URL(u, 'https://host').href, { cached: true }); },
-        put: async (req: { url: string }, res: unknown) => { entries.set(req.url, res); },
+        put: async (req: { url: string } | string, res: unknown) => {
+          entries.set(new URL(typeof req === 'string' ? req : req.url, 'https://host').href, res);
+        },
+        match: async (req: string) => entries.get(new URL(req, 'https://host').href),
         keys: async () => [...entries.keys()].map((url) => ({ url })),
       };
     },
@@ -48,6 +51,10 @@ function loadServiceWorker() {
   const fetched: string[] = [];
   const self = {
     __WHIM_SHELL__: SHELL,
+    __WHIM_LAZY__: ['/chunks/editor.ABCDEFGH.js', '/desktop/app.ABCDEFGH.js'],
+    __WHIM_DESKTOP_ENTRY__: '/desktop/app.ABCDEFGH.js',
+    __WHIM_DESKTOP_SHELL__: ['/desktop/index.html', '/desktop/app.ABCDEFGH.js'],
+    __WHIM_HTML__: { mobile: '<script src="/app.abc123def456.js"></script>', desktop: '<script src="/desktop/app.ABCDEFGH.js"></script>' },
     __WHIM_BUILD__: 'testbuild0001',
     location: { origin: 'https://host' },
     addEventListener: (name: string, fn: (event: unknown) => void) => { listeners[name] = fn; },
@@ -60,7 +67,7 @@ function loadServiceWorker() {
     },
   };
 
-  const context = vm.createContext({ self, caches, fetch: self.fetch, URL, Response: { error: () => ({ error: true }) }, Promise, console });
+  const context = vm.createContext({ self, caches, fetch: (req: { url: string }) => self.fetch(req), URL, Response, Promise, console });
   vm.runInContext(source, context);
   return { listeners, cacheStore, deleted, fetched, self };
 }
@@ -99,12 +106,60 @@ describe('web remote service worker', () => {
     expect(sw.deleted).toEqual(['whim-shell-oldbuild9999']);
   });
 
+  it('updates a previously visited desktop shell before retiring its old cache', async () => {
+    sw.cacheStore.set('whim-shell-previous', new Map([['https://host/desktop/index.html', { cached: true }]]));
+    let work: unknown;
+    sw.listeners.install({ waitUntil: (value: unknown) => { work = value; } });
+    await work;
+    const entries = sw.cacheStore.get('whim-shell-testbuild0001')!;
+    expect(entries.has('https://host/desktop/index.html')).toBe(true);
+    expect(entries.has('https://host/desktop/app.ABCDEFGH.js')).toBe(true);
+    expect(entries.has('https://host/chunks/editor.ABCDEFGH.js')).toBe(false);
+  });
+
   it('serves content-hashed shell assets from cache', async () => {
     let work: unknown;
     sw.listeners.install({ waitUntil: (v: unknown) => { work = v; } });
     await work;
     const res = await handleFetch(sw, 'https://host/app.abc123def456.js');
     expect(res).toEqual({ cached: true });
+  });
+
+  it('caches lazy features only after use, not at installation', async () => {
+    let work: unknown;
+    sw.listeners.install({ waitUntil: (value: unknown) => { work = value; } });
+    await work;
+    expect(sw.cacheStore.get('whim-shell-testbuild0001')!.has('https://host/chunks/editor.ABCDEFGH.js')).toBe(false);
+    await handleFetch(sw, 'https://host/chunks/editor.ABCDEFGH.js');
+    expect(sw.cacheStore.get('whim-shell-testbuild0001')!.has('https://host/chunks/editor.ABCDEFGH.js')).toBe(true);
+    await handleFetch(sw, 'https://host/chunks/editor.ABCDEFGH.js');
+    expect(sw.fetched.filter(url => url.endsWith('editor.ABCDEFGH.js'))).toHaveLength(1);
+  });
+
+  it('does not force activation over a client with an older module graph', () => {
+    const source = fs.readFileSync(path.join(__dirname, 'sw.js'), 'utf-8');
+    expect(source).not.toContain('self.skipWaiting(');
+  });
+
+  it('leaves unrelated origin caches untouched', async () => {
+    sw.cacheStore.set('other-app', new Map());
+    let work: unknown;
+    sw.listeners.activate({ waitUntil: (value: unknown) => { work = value; } });
+    await work;
+    expect(sw.deleted).not.toContain('other-app');
+  });
+
+  it('caches the desktop initial shell on use without precaching its editor', async () => {
+    let work: unknown;
+    sw.listeners.message({
+      data: { type: 'cache-desktop-shell', entry: '/desktop/app.ABCDEFGH.js' },
+      source: { url: 'https://host/desktop/' },
+      waitUntil: (value: unknown) => { work = value; },
+    });
+    await work;
+    const keys = [...sw.cacheStore.get('whim-shell-testbuild0001')!.keys()];
+    expect(keys).toContain('https://host/desktop/index.html');
+    expect(keys).not.toContain('https://host/chunks/editor.ABCDEFGH.js');
   });
 
   /*
@@ -134,6 +189,30 @@ describe('web remote service worker', () => {
   it('sends navigations to the network so the bundle reference is never stale', async () => {
     await handleFetch(sw, 'https://host/desktop/', 'navigate');
     expect(sw.fetched).toContain('https://host/desktop/');
+  });
+
+  it('keeps a coherent offline graph when a newer deployment is served to an old client', async () => {
+    let work: unknown;
+    sw.listeners.install({ waitUntil: (value: unknown) => { work = value; } });
+    await work;
+    await handleFetch(sw, 'https://host/', 'navigate');
+    sw.self.fetch = async () => { throw new Error('offline'); };
+    const response = await handleFetch(sw, 'https://host/', 'navigate') as Response;
+    expect(await response.text()).toBe(sw.self.__WHIM_HTML__.mobile);
+    expect(sw.cacheStore.get('whim-shell-testbuild0001')!.has('https://host/app.abc123def456.js')).toBe(true);
+  });
+
+  it('uses the visited desktop shell, never mobile HTML, when offline', async () => {
+    let work: unknown;
+    sw.listeners.message({
+      data: { type: 'cache-desktop-shell', entry: '/desktop/app.ABCDEFGH.js' },
+      source: { url: 'https://host/desktop/' },
+      waitUntil: (value: unknown) => { work = value; },
+    });
+    await work;
+    sw.self.fetch = async () => { throw new Error('offline'); };
+    const response = await handleFetch(sw, 'https://host/desktop/', 'navigate') as Response;
+    expect(await response.text()).toBe(sw.self.__WHIM_HTML__.desktop);
   });
 
   it('ignores non-GET requests', async () => {

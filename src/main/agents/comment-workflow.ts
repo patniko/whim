@@ -126,7 +126,7 @@ export async function launchCommentAgent(
 
   registry.set(agentId, record);
   try {
-    persistence.createAgentSessionRecord({
+    (await persistence.createAgentSessionRecord({
       id: agentId,
       session_id: agentId,
       space_id: spaceId,
@@ -142,7 +142,7 @@ export async function launchCommentAgent(
       yolo_mode: record.yoloMode === true,
       created_at: now,
       updated_at: now,
-    });
+    }));
   } catch (err: any) {
     registry.delete(agentId);
     return { error: err.message || 'Failed to create agent record' };
@@ -164,14 +164,14 @@ export async function launchCommentAgent(
     const sessionId = session?.sessionId || agentId;
     record.sessionId = sessionId;
     record.session = session;
-    persistence.updateSessionId(agentId, sessionId);
+    (await persistence.updateSessionId(agentId, sessionId));
     try {
       await session.abort();
       try { await session.disconnect?.(); } catch { /* best-effort cleanup */ }
       record.session = undefined;
       record.status = 'failed';
       record.summary = 'Aborted by user';
-      persistence.updateStatus(record);
+      (await persistence.updateStatus(record));
       notifier.notifyRenderer('agent:status-changed', {
         agentId,
         status: 'failed',
@@ -183,7 +183,7 @@ export async function launchCommentAgent(
       record.aborted = false;
       record.phase = 'active';
       record.summary = 'Could not stop this cloud agent after startup. It may still be running; retry before deleting it.';
-      persistence.updateStatus(record);
+      (await persistence.updateStatus(record));
       setupListeners(session, record);
       notifier.notifyRenderer('agent:status-changed', {
         agentId,
@@ -231,13 +231,13 @@ export async function launchCommentAgent(
       policy: personaCanvasPolicy(persona.canvas, agentId),
       pinnedArtifactId: artifactId,
       hooks: {
-        onArtifactPublished: (artifact) => {
+        onArtifactPublished: async (artifact) => {
           record.commentContext?.publishedArtifacts?.push({
             artifactId: artifact.artifactId,
             title: artifact.title,
             ...(artifact.status ? { status: artifact.status } : {}),
           });
-          linkArtifactIntoDocument({
+          (await linkArtifactIntoDocument({
             workspaceRoot,
             spaceId: realSpaceId,
             folder: intentFolder,
@@ -248,7 +248,7 @@ export async function launchCommentAgent(
               title: artifact.title,
               ...(artifact.status ? { status: artifact.status } : {}),
             },
-          });
+          }));
         },
       },
     });
@@ -355,8 +355,8 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
     const sessionId = (session as any).sessionId || agentId;
     record.sessionId = sessionId;
     record.session = session;
-    persistence.updateSessionId(agentId, sessionId);
-    persistence.updateStatus(record);
+    (await persistence.updateSessionId(agentId, sessionId));
+    (await persistence.updateStatus(record));
 
     setupListeners(session, record);
 
@@ -397,7 +397,7 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
     if (record.aborted && !session) {
       record.status = 'failed';
       record.summary = 'Launch cancelled before the cloud session started';
-      persistence.updateStatus(record);
+      (await persistence.updateStatus(record));
       notifier.notifyRenderer('agent:status-changed', {
         agentId,
         status: 'failed',
@@ -418,7 +418,7 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
       try { await session?.disconnect?.(); } catch { /* best-effort cleanup */ }
       record.status = 'failed';
       record.summary = `Error: ${err.message || 'Unknown'}`;
-      persistence.updateStatus(record);
+      (await persistence.updateStatus(record));
       notifier.notifyRenderer('agent:status-changed', {
         agentId,
         status: 'failed',

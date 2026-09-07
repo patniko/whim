@@ -5,7 +5,6 @@ import type { SpaceEvent } from '../../shared/ipc-contract';
 
 function space(over: Partial<Space> & { id: string }): Space {
   return {
-    id: over.id,
     description: 'A space',
     status: 'done',
     created_at: '2026-05-20T09:00:00.000Z',
@@ -17,7 +16,6 @@ function space(over: Partial<Space> & { id: string }): Space {
 
 function event(over: Partial<SpaceEvent> & { id: string }): SpaceEvent {
   return {
-    id: over.id,
     space_id: 'gone',
     event_type: 'completed',
     due_at: null,

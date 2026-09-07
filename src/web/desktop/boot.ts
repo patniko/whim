@@ -13,6 +13,7 @@
 import { establishSession, hasSession, WebRemoteClient } from '../lib/client';
 import { createWebTransport } from './transport';
 import { createWhimAPI } from '../../shared/whim-api';
+declare const __WHIM_DESKTOP_ENTRY__: string;
 
 async function boot(): Promise<void> {
   if (!(await establishSessionFromUrl()) && !(await hasSession())) {
@@ -31,9 +32,17 @@ async function boot(): Promise<void> {
 
   const client = new WebRemoteClient();
   let interfaceRunning = false;
+  let initialResync = true;
+  let workspaceChanged = false;
 
   client.connect(
-    (event) => dispatch(event),
+    (event) => {
+      if (event.channel === 'workspace:changed') {
+        workspaceChanged = true;
+        showWorkspaceChanged();
+      }
+      if (!workspaceChanged) dispatch(event);
+    },
     () => {},
     () => showFatal('Signed out', 'This device is no longer paired.'),
     () => {
@@ -42,12 +51,37 @@ async function boot(): Promise<void> {
       // on that signal restarts the page before it has finished starting —
       // an infinite reload loop. Only a gap that opens *after* the interface
       // is live means we have missed something worth recovering from.
-      if (interfaceRunning) window.location.reload();
+      if (initialResync) {
+        initialResync = false;
+        return;
+      }
+      if (interfaceRunning && !workspaceChanged) window.location.reload();
     },
   );
 
   await loadRenderer();
   interfaceRunning = true;
+  if ('serviceWorker' in navigator) {
+    void navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready)
+      .then(registration => registration.active?.postMessage({
+        type: 'cache-desktop-shell', entry: __WHIM_DESKTOP_ENTRY__,
+      }))
+      .catch(() => { console.warn('[web] Offline shell registration failed'); });
+  }
+}
+
+function showWorkspaceChanged(): void {
+  if (document.querySelector('.web-workspace-changed')) return;
+  const notice = document.createElement('div');
+  notice.className = 'web-workspace-changed';
+  notice.setAttribute('role', 'alert');
+  notice.textContent = 'The desktop workspace changed. Copy any unsaved drafts before reloading. ';
+  const reload = document.createElement('button');
+  reload.type = 'button';
+  reload.textContent = 'Reload';
+  reload.addEventListener('click', () => window.location.reload());
+  notice.appendChild(reload);
+  document.body.appendChild(notice);
 }
 
 /**
@@ -81,7 +115,8 @@ async function establishSessionFromUrl(): Promise<boolean> {
 function loadRenderer(): Promise<void> {
   return new Promise((resolve, reject) => {
     const script = document.createElement('script');
-    script.src = '/desktop/app.js';
+    script.type = 'module';
+    script.src = __WHIM_DESKTOP_ENTRY__;
     script.onload = () => resolve();
     script.onerror = () => reject(new Error('Failed to load the whim interface.'));
     document.body.appendChild(script);

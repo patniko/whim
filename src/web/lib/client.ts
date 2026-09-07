@@ -1,5 +1,6 @@
 import type { IpcCommandArgs, IpcCommandChannel, IpcCommandResult } from '../../shared/ipc-contract';
 import type { WebRemoteEvent } from '../../main/web/event-hub';
+import { rememberWorkspaceEpoch, workspaceRequestScope } from './workspace-epoch';
 
 export interface InvokeEnvelope<T> {
   ok: boolean;
@@ -35,15 +36,15 @@ export async function establishSession(token: string): Promise<void> {
     if (res.status === 401) throw new Error(detail || 'That token was not accepted.');
     throw new Error(detail ? `${detail} (${res.status})` : `Sign-in failed (${res.status})`);
   }
+  rememberWorkspaceEpoch(res);
 }
 
 export async function hasSession(): Promise<boolean> {
-  try {
-    const res = await fetch('/api/health', { credentials: 'same-origin' });
-    return res.ok;
-  } catch {
-    return false;
-  }
+  const res = await fetch('/api/health', { credentials: 'same-origin' });
+  if (res.status === 401) return false;
+  if (!res.ok) throw new Error(`Whim is temporarily unavailable (HTTP ${res.status}).`);
+  rememberWorkspaceEpoch(res);
+  return true;
 }
 
 export async function endSession(): Promise<void> {
@@ -59,7 +60,7 @@ export class WebRemoteClient {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channel, args }),
+      body: JSON.stringify({ channel, args, ...workspaceRequestScope() }),
     });
     if (res.status === 401) throw new UnauthorizedError();
     const body = await res.json() as InvokeEnvelope<IpcCommandResult<C>>;
@@ -113,6 +114,9 @@ export class WebRemoteClient {
               onStatus('signed out');
               onUnauthorized?.();
             }
+          }).catch(error => {
+            console.warn('[web] Session check failed while reconnecting:', error);
+            onStatus('connection error');
           });
         }
         onStatus('reconnecting');

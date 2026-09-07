@@ -4,7 +4,15 @@ import { describe, expect, it, vi } from 'vitest';
 // records them, so a stub is enough to keep Electron out of the test process.
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }));
 
-vi.mock('../database', () => ({
+vi.mock('../storage', async () => ({
+  ...(await import('../workspace')),
+  ...(await import('../services/skill-schedule-store')),
+  ...(await import('../canvas/artifact-store')),
+  documentMatches: (await import('../storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   assignSpaceFolder: vi.fn(),
   createSpace: vi.fn(),
   deleteAgentSession: vi.fn(),
@@ -12,6 +20,11 @@ vi.mock('../database', () => ({
   isInitialized: vi.fn(() => true),
   listSpaceEvents: vi.fn(() => []),
   listSpaces: vi.fn(() => [{ id: 'space-1', description: 'Test space' }]),
+  listSpaceSummaries: vi.fn(() => ({
+    items: [{ id: 'space-1', description: 'Test space' }], total: 123, offset: 60,
+    nextCursor: 'next', counts: { open: 123, closed: 0 },
+  })),
+  listActivityPage: vi.fn(() => ({ items: [], total: 88, nextCursor: null })),
   searchSpaces: vi.fn(() => []),
   updateCanvasContent: vi.fn(),
 }));
@@ -48,13 +61,41 @@ vi.mock('../canvas-watcher', () => ({
 vi.mock('../notify', () => ({
   notifyAllWindows: vi.fn(),
 }));
+vi.mock('../agent-service', () => ({
+  getAgentHistoryPage: vi.fn(async () => ({ items: [], total: 123, nextCursor: 'older', watermark: 456 })),
+}));
 
 import { GatewayError, invokeWebRemoteCommand, isAllowedWebRemoteCommand, WEB_REMOTE_IMPLEMENTED_CHANNELS } from './gateway';
 import { webAccessFor } from '../../shared/web-access';
 import { registerIpcHandler } from '../ipc/registry';
 import { notifyAllWindows } from '../notify';
+import { getSpace, listSpaces, listSpaceSummaries, listActivityPage } from '../storage';
+import { getAgentHistoryPage } from '../agent-service';
 
 describe('web remote gateway', () => {
+  it('forwards bounded summary requests without invoking full collection reads', async () => {
+    vi.mocked(listSpaces).mockClear();
+    const request = { cursor: 'cursor', limit: 20, query: 'substring' };
+    await expect(invokeWebRemoteCommand('space:list-page', [request])).resolves.toMatchObject({
+      total: 123, offset: 60, nextCursor: 'next',
+    });
+    expect(listSpaceSummaries).toHaveBeenCalledWith(request);
+    expect(listSpaces).not.toHaveBeenCalled();
+    await expect(invokeWebRemoteCommand('space:list-page', [null])).rejects.toThrow();
+    vi.mocked(getSpace).mockResolvedValueOnce(null);
+    await expect(invokeWebRemoteCommand('space:get', ['space-1'])).resolves.toBeNull();
+    expect(getSpace).toHaveBeenCalledWith('space-1');
+    const activity = { dayStart: '2026-01-02T00:00:00.000Z', weekStart: '2025-12-28T00:00:00.000Z' };
+    await invokeWebRemoteCommand('activity:list-page', [activity]);
+    expect(listActivityPage).toHaveBeenCalledWith(activity);
+  });
+  it('forwards transcript-page cursors and durable watermarks', async () => {
+    const request = { cursor: 'before', limit: 20 };
+    await expect(invokeWebRemoteCommand('agent:history-page', ['agent-1', request])).resolves.toEqual({
+      items: [], total: 123, nextCursor: 'older', watermark: 456,
+    });
+    expect(getAgentHistoryPage).toHaveBeenCalledWith('agent-1', request);
+  });
   it('allows only reviewed channels', () => {
     expect(isAllowedWebRemoteCommand('space:list')).toBe(true);
     expect(isAllowedWebRemoteCommand('chat:send-message')).toBe(true);

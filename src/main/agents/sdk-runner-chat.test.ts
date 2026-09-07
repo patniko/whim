@@ -76,7 +76,16 @@ vi.mock('./sandbox-policies', () => ({
   SANDBOX_WORKSPACE_SYSTEM_PROMPT: '',
 }));
 
-vi.mock('../database', () => ({
+vi.mock('../storage', async () => ({
+  appendSpaceActivity: mocks.appendSpaceActivity,
+  ...(await import('../workspace')),
+  ...(await import('../services/skill-schedule-store')),
+  ...(await import('../canvas/artifact-store')),
+  documentMatches: (await import('../storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   listSpaces: mocks.listSpaces,
   updateCanvasContent: mocks.updateCanvasContent,
   listSkills: mocks.listSkills,

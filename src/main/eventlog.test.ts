@@ -334,9 +334,7 @@ describe('replayLog', () => {
       expect(space.body).toBe('Original body');
     });
 
-    it('skips unknown fields with a warning but does not crash', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
+    it('fails closed on unknown update fields and rolls back replay', () => {
       writeLog([
         {
           ts: '2024-01-01T00:00:00.000Z',
@@ -359,20 +357,11 @@ describe('replayLog', () => {
       ]);
 
       db.exec('DELETE FROM spaces');
-      expect(() => replayLog(logRoot, db)).not.toThrow();
-
-      const space = getSpace('u1');
-      expect(space.description).toBe('Updated');
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Skipping unknown field')
-      );
-
-      warnSpy.mockRestore();
+      expect(() => replayLog(logRoot, db)).toThrow('Unsupported space update field');
+      expect(getSpace('u1')).toBeUndefined();
     });
 
-    it('does nothing when update has only unknown fields', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
+    it('rejects an update containing only unknown fields', () => {
       writeLog([
         {
           ts: '2024-01-01T00:00:00.000Z',
@@ -392,10 +381,8 @@ describe('replayLog', () => {
       ]);
 
       db.exec('DELETE FROM spaces');
-      expect(() => replayLog(logRoot, db)).not.toThrow();
-      expect(getSpace('u1').description).toBe('Original');
-
-      warnSpy.mockRestore();
+      expect(() => replayLog(logRoot, db)).toThrow('Unsupported space update field');
+      expect(getSpace('u1')).toBeUndefined();
     });
   });
 
@@ -1309,21 +1296,14 @@ describe('replayLog', () => {
   // ── Unknown ops ───────────────────────────────────────
 
   describe('unknown event op', () => {
-    it('logs a warning but does not crash', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
+    it('refuses an unsupported durable operation', () => {
       writeLog([{
         ts: '2024-01-01T00:00:00.000Z',
         op: 'totally.unknown.operation',
         data: { id: 'x' },
       }]);
 
-      expect(() => replayLog(logRoot, db)).not.toThrow();
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Unknown event op: totally.unknown.operation')
-      );
-
-      warnSpy.mockRestore();
+      expect(() => replayLog(logRoot, db)).toThrow('Unsupported durable event op: totally.unknown.operation');
     });
   });
 

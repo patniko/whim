@@ -12,7 +12,15 @@ vi.mock('../ai', () => ({
   evaluateRecurrence: mockEvaluateRecurrence,
 }));
 
-vi.mock('../database', () => ({
+vi.mock('../storage', async () => ({
+  ...(await import('../workspace')),
+  ...(await import('./skill-schedule-store')),
+  ...(await import('../canvas/artifact-store')),
+  documentMatches: (await import('../storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   updateSpaceCAS: mockUpdateIntentCAS,
   logSpaceEvent: mockLogSpaceEvent,
 }));
@@ -125,15 +133,15 @@ describe('recurrence service', () => {
   });
 
   describe('applyRecurrence', () => {
-    it('updates space via CAS and logs event on success', () => {
+    it('updates space via CAS and logs event on success', async () => {
       mockUpdateIntentCAS.mockReturnValue(true);
 
-      applyRecurrence('space-1', 'v1', {
+      (await applyRecurrence('space-1', 'v1', {
         should_recur: true,
         reasoning: 'Weekly',
         next_due: '2024-01-22',
         next_due_utc: '2024-01-22T00:00:00Z',
-      });
+      }));
 
       expect(mockUpdateIntentCAS).toHaveBeenCalledWith('space-1', 'v1', expect.objectContaining({
         status: 'captured',
@@ -143,15 +151,15 @@ describe('recurrence service', () => {
       expect(mockNotifyAllWindows).toHaveBeenCalledWith('space:recurrence-applied', 'space-1');
     });
 
-    it('does not log event when CAS fails', () => {
+    it('does not log event when CAS fails', async () => {
       mockUpdateIntentCAS.mockReturnValue(false);
 
-      applyRecurrence('space-1', 'v1', {
+      (await applyRecurrence('space-1', 'v1', {
         should_recur: true,
         reasoning: 'Weekly',
         next_due: '2024-01-22',
         next_due_utc: '2024-01-22T00:00:00Z',
-      });
+      }));
 
       expect(mockLogSpaceEvent).not.toHaveBeenCalled();
       expect(mockNotifyAllWindows).not.toHaveBeenCalledWith('space:recurrence-applied', 'space-1');
@@ -170,7 +178,7 @@ describe('recurrence service', () => {
       await handleRecurrence(sampleIntent, 'v1');
       expect(hasPendingRecurrence('space-1')).toBe(true);
 
-      dismissRecurrence('space-1');
+      (await dismissRecurrence('space-1'));
 
       expect(hasPendingRecurrence('space-1')).toBe(false);
       expect(mockLogSpaceEvent).toHaveBeenCalledWith('space-1', 'recurrence_dismissed', expect.any(Object));
@@ -180,8 +188,8 @@ describe('recurrence service', () => {
       expect(mockUpdateIntentCAS).not.toHaveBeenCalled();
     });
 
-    it('is a no-op for non-pending space', () => {
-      dismissRecurrence('unknown-space');
+    it('is a no-op for non-pending space', async () => {
+      (await dismissRecurrence('unknown-space'));
       expect(mockLogSpaceEvent).not.toHaveBeenCalled();
     });
   });

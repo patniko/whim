@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
-import { getSpace, assignSpaceFolder, createCanvasAgent } from './database';
+import { getSpace, assignSpaceFolder, createCanvasAgent, updateCanvasAgentStatus } from './storage';
 import { checkCopilotCli, checkCliCompatibility } from './session';
 import { createSpaceFolder } from './workspace';
 import { CanvasAgent } from '../shared/types';
@@ -37,7 +37,7 @@ export async function launchCanvasAgent(
     };
   }
 
-  const space = getSpace(spaceId);
+  const space = (await getSpace(spaceId));
   if (!space) {
     return { success: false, error: 'Space not found' };
   }
@@ -46,7 +46,7 @@ export async function launchCanvasAgent(
   let folder = space.folder;
   if (!folder) {
     folder = createSpaceFolder(workspaceRoot, spaceId, space.description);
-    assignSpaceFolder(spaceId, folder);
+    (await assignSpaceFolder(spaceId, folder));
   }
 
   const cwd = path.join(workspaceRoot, folder);
@@ -76,7 +76,7 @@ export async function launchCanvasAgent(
   agent.pid = pid;
 
   // Record in database
-  createCanvasAgent(agent);
+  (await createCanvasAgent(agent));
 
   console.log(`[canvas-agent] Launched interactive agent ${agentId} for space ${spaceId} (PID ${pid || 'unknown'})`);
   return { success: true, agent };
@@ -94,13 +94,12 @@ async function launchInteractive(cli: string, cwd: string, agentId: string, prom
 
   // On macOS, resolve the real PID asynchronously
   if (process.platform === 'darwin' && pid === 0) {
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
         const output = execSync(`pgrep -nf "copilot.*-i"`, { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
         const realPid = parseInt(output);
         if (realPid && !isNaN(realPid)) {
-          const db = require('./database').getDatabase();
-          db.prepare('UPDATE canvas_agents SET pid = ? WHERE id = ?').run(realPid, agentId);
+          (await updateCanvasAgentStatus(agentId, 'running', realPid));
         }
       } catch { /* process may not have started yet */ }
     }, 2000);

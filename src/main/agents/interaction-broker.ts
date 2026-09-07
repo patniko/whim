@@ -5,6 +5,7 @@ import type { AgentNotifier } from './agent-notifier';
 import type { AgentPersistence } from './agent-persistence';
 import type { AgentRecord } from './agent-registry';
 import type { PendingCanvasInteraction } from '../../shared/types';
+import { markScheduledInteractionBlocked } from '../services/scheduled-result';
 import {
   checkPathScope,
   normalizePath,
@@ -79,7 +80,7 @@ export interface SandboxBlockRequest {
 export type SandboxResolutionDecision = 'allow-once' | 'allow-for-session' | 'disable';
 
 export interface SandboxResolution {
-  decision: SandboxResolutionDecision;
+  decision: SandboxResolutionDecision | 'deny';
 }
 
 export class InteractionBroker {
@@ -109,7 +110,11 @@ export class InteractionBroker {
    * the user whether to allow once, allow for session, or disable sandbox
    * altogether.
    */
-  emitSandboxBlock(record: AgentRecord, req: Omit<SandboxBlockRequest, 'agentId' | 'requestId'> & { requestId?: string }): Promise<SandboxResolution> {
+  async emitSandboxBlock(record: AgentRecord, req: Omit<SandboxBlockRequest, 'agentId' | 'requestId'> & { requestId?: string }): Promise<SandboxResolution> {
+    if (record.scheduledResult) {
+      markScheduledInteractionBlocked(record.scheduledResult, `Sandbox denied ${req.kind}: ${req.target}`);
+      return Promise.resolve({ decision: 'deny' });
+    }
     const requestId = req.requestId ?? crypto.randomUUID();
     const payload: SandboxBlockRequest = {
       ...req,
@@ -120,7 +125,7 @@ export class InteractionBroker {
       threadId: record.commentContext?.threadId,
     };
     record.status = 'waiting-approval';
-    this.persistence.updateStatus(record);
+    (await this.persistence.updateStatus(record));
     this.interactionContexts.set(requestId, {
       agentId: record.agentId,
       spaceId: record.spaceId,
@@ -156,13 +161,15 @@ export class InteractionBroker {
       onAllowOnce: () => this.resolveSandboxBlock(record.agentId, requestId, 'allow-once'),
     });
 
-    return new Promise<SandboxResolution>((resolve) => {
+    return new Promise<SandboxResolution>((resolve, reject) => {
       this.sandboxBlockCallbacks.set(requestId, (resolution) => {
+        void (async () => {
         if (record.status === 'waiting-approval') {
           record.status = 'running';
-          this.persistence.updateStatus(record);
+          (await this.persistence.updateStatus(record));
         }
         resolve(resolution);
+        })().catch(reject);
       });
     });
   }
@@ -212,7 +219,7 @@ export class InteractionBroker {
       if (request.kind === 'read') return { kind: 'approve-once' as const };
       if (request.kind === 'write') return { kind: 'reject' as const };
       // For shell, mcp, url, and other kinds, fall through to normal handler
-      return this.createPermissionHandler(findRecord)(request, invocation);
+      return (await this.createPermissionHandler(findRecord)(request, invocation));
     };
   }
 
@@ -242,7 +249,7 @@ export class InteractionBroker {
 
       // Mid-session opt-out → behave like the normal handler.
       if (!record.sandbox || record.sandbox.state === 'off') {
-        return this.createPermissionHandler(findRecord)(request, invocation);
+        return (await this.createPermissionHandler(findRecord)(request, invocation));
       }
 
       const req = request as unknown as Record<string, unknown>;
@@ -296,7 +303,7 @@ export class InteractionBroker {
 
       // If sandbox has been disabled mid-session, behave like the normal handler.
       if (!record.sandbox || record.sandbox.state === 'off') {
-        return this.createPermissionHandler(findRecord)(request, invocation);
+        return (await this.createPermissionHandler(findRecord)(request, invocation));
       }
 
       const policy = record.sandbox.policy;
@@ -318,13 +325,13 @@ export class InteractionBroker {
           target: targetPath,
           reason: r.decision === 'deny' ? r.reason : 'out-of-scope',
         });
-        return this.handleSandboxBlockForPermission(record, request, {
+        return (await this.handleSandboxBlockForPermission(record, request, {
           source: 'permission',
           kind: 'read',
           target: targetPath,
           intention: typeof req.intention === 'string' ? req.intention : undefined,
           layer: 'host:permission',
-        });
+        }));
       }
 
       if (request.kind === 'write') {
@@ -332,7 +339,7 @@ export class InteractionBroker {
           : typeof req.path === 'string' ? req.path : '';
         if (!targetPath) {
           // No path info → require interactive approval to be safe.
-          return this.createPermissionHandler(findRecord)(request, invocation);
+          return (await this.createPermissionHandler(findRecord)(request, invocation));
         }
         const norm = normalizePath(targetPath);
         if (allowList.paths.has(norm)) return { kind: 'approve-once' as const };
@@ -344,13 +351,13 @@ export class InteractionBroker {
           target: targetPath,
           reason: r.decision === 'deny' ? r.reason : 'out-of-scope',
         });
-        return this.handleSandboxBlockForPermission(record, request, {
+        return (await this.handleSandboxBlockForPermission(record, request, {
           source: 'permission',
           kind: 'write',
           target: targetPath,
           intention: typeof req.intention === 'string' ? req.intention : undefined,
           layer: 'host:permission',
-        });
+        }));
       }
 
       if (request.kind === 'mcp' && !record.sandbox.allowMcpServers) {
@@ -364,13 +371,13 @@ export class InteractionBroker {
           target: serverName,
           reason: 'mcp denied by policy',
         });
-        return this.handleSandboxBlockForPermission(record, request, {
+        return (await this.handleSandboxBlockForPermission(record, request, {
           source: 'permission',
           kind: 'mcp',
           target: serverName || '<unknown mcp>',
           intention: typeof req.intention === 'string' ? req.intention : undefined,
           layer: 'host:permission',
-        });
+        }));
       }
 
       if (request.kind === 'url') {
@@ -384,18 +391,18 @@ export class InteractionBroker {
           target: url,
           reason: 'url denied by policy',
         });
-        return this.handleSandboxBlockForPermission(record, request, {
+        return (await this.handleSandboxBlockForPermission(record, request, {
           source: 'permission',
           kind: 'url',
           target: url || '<unknown url>',
           intention: typeof req.intention === 'string' ? req.intention : undefined,
           layer: 'host:permission',
-        });
+        }));
       }
 
       // shell + other kinds: fall through (mxc enforces shell at the OS level;
       // user gets standard approval prompt for anything else).
-      return this.createPermissionHandler(findRecord)(request, invocation);
+      return (await this.createPermissionHandler(findRecord)(request, invocation));
     };
   }
 
@@ -528,7 +535,7 @@ export class InteractionBroker {
           path,
         });
       }
-      this.persistence.updateStatus(record);
+      (await this.persistence.updateStatus(record));
 
       this.notifier.notifyRenderer('agent:approval-needed', {
         agentId: record.agentId,
@@ -559,8 +566,9 @@ export class InteractionBroker {
         onDeny: () => this.approveAgent(record.agentId, requestId, false),
       });
 
-      return new Promise<{ kind: 'approve-once' } | { kind: 'reject' }>((resolve) => {
+      return new Promise<{ kind: 'approve-once' } | { kind: 'reject' }>((resolve, reject) => {
         this.approvalCallbacks.set(requestId, (approved: boolean) => {
+          void (async () => {
           record.pendingApprovals.delete(requestId);
           if (record.pendingApprovals.size === 0) {
             record.pendingApprovalId = null;
@@ -572,12 +580,13 @@ export class InteractionBroker {
             record.pendingApprovalId = nextId;
             record.pendingPermissionKind = next.permissionKind;
           }
-          this.persistence.updateStatus(record);
+          (await this.persistence.updateStatus(record));
           const result = approved
             ? { kind: 'approve-once' as const }
             : { kind: 'reject' as const };
           console.log(`[InteractionBroker] Permission resolved: requestId=${requestId} result=${result.kind}`);
           resolve(result);
+          })().catch(reject);
         });
       });
     };

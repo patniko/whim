@@ -18,6 +18,15 @@ import { generateTintColor, isValidTint, hueOf } from './lib/tint';
 import { parseFrontmatter } from '../shared/frontmatter';
 import { deriveMarkdownTitle, ensureMarkdownH1Title } from '../shared/markdown-title';
 import type { CanvasSaveResult, WindowToggleSource } from '../shared/ipc-contract';
+import type { ScheduleOptions } from '../shared/skill-schedule';
+import { createSchedulePicker, formatScheduleDate } from './scheduled-skills';
+import { trackSettingWrites, installSaveLifecycle, FormDrafts } from './save-lifecycle';
+import { DebouncedSave } from './debounced-save';
+import { waitForCaptureStorage } from './startup';
+import { startTiming, observeRendererTasks, getPerformanceTimings } from './performance';
+const finishShellTiming = startTiming('startup.shell');
+observeRendererTasks();
+Object.defineProperty(window, '__whimPerformance', { value: getPerformanceTimings });
 
 interface ResolvedProfile {
   id: string;
@@ -46,7 +55,7 @@ interface RecallMatch {
   confidence: number;
 }
 
-interface SandboxPolicy {
+export interface SandboxPolicy {
   scopeToSpaceFolder: boolean;
   extraReadwritePaths: string[];
   extraReadonlyPaths: string[];
@@ -70,7 +79,7 @@ const DEFAULT_SANDBOX_POLICY: SandboxPolicy = {
   enforcementMode: 'both',
 };
 
-interface AgentPersona {
+export interface AgentPersona {
   id: string;
   handle: string;
   instructions: string;
@@ -84,18 +93,18 @@ interface AgentPersona {
   ephemeral?: boolean;
 }
 
-interface CliRuntime {
+export interface CliRuntime {
   id: string;
   label: string;
   path: string;
 }
 
-interface CliToolDefinition {
+export interface CliToolDefinition {
   name: string;
   description: string;
 }
 
-interface CustomMcpServer {
+export interface CustomMcpServer {
   name: string;
   type: 'stdio' | 'http' | 'sse';
   command?: string;
@@ -104,7 +113,7 @@ interface CustomMcpServer {
   tools: string[];
 }
 
-interface DiscoveredMcpServer {
+export interface DiscoveredMcpServer {
   name: string;
   source: 'config' | 'plugin';
   type: string;
@@ -112,7 +121,7 @@ interface DiscoveredMcpServer {
   url?: string;
 }
 
-type InterfaceScope = 'loopback' | 'private' | 'vpn' | 'public';
+export type InterfaceScope = 'loopback' | 'private' | 'vpn' | 'public';
 
 interface WebRemoteInterface {
   name: string;
@@ -123,12 +132,12 @@ interface WebRemoteInterface {
   label: string;
 }
 
-type WebRemoteBindSelection =
+export type WebRemoteBindSelection =
   | { kind: 'interface'; interfaceName: string; family: 'IPv4' | 'IPv6' }
   | { kind: 'address'; address: string }
   | { kind: 'all'; family: 'IPv4' | 'IPv6' };
 
-interface WebRemoteBindingStatus {
+export interface WebRemoteBindingStatus {
   selection: WebRemoteBindSelection;
   label: string;
   scope: InterfaceScope;
@@ -137,7 +146,7 @@ interface WebRemoteBindingStatus {
   detail: string | null;
 }
 
-type WebRemoteTlsMode = 'auto' | 'off' | 'custom';
+export type WebRemoteTlsMode = 'auto' | 'off' | 'custom';
 
 interface WebRemoteTlsState {
   mode: WebRemoteTlsMode;
@@ -156,7 +165,8 @@ interface WebRemoteDevice {
   userAgent: string | null;
 }
 
-interface WebRemoteState {
+export interface WebRemoteState {
+  activity: import('../shared/ipc-contract').WebRemoteState['activity'];
   enabled: boolean;
   running: boolean;
   port: number;
@@ -182,6 +192,8 @@ interface FolderCommit {
 }
 
 interface WhimAPI {
+  setCanvasAlwaysOnTop(pinned: boolean): void;
+  getCanvasAlwaysOnTop(): Promise<boolean>;
   create(input: { body: string }): Promise<Space>;
   list(): Promise<Space[]>;
   update(id: string, updates: Record<string, unknown>): Promise<Space>;
@@ -255,6 +267,8 @@ interface WhimAPI {
   canvasRestore(spaceId: string, sha: string): Promise<{ success: boolean; error?: string }>;
   canvasPreviewVersion(spaceId: string, sha: string): Promise<{ content: string; error?: string }>;
   searchSpaces(query: string): Promise<Space[]>;
+  listSpacePage(request?: import('../shared/paging').SpacePageRequest): Promise<import('../shared/paging').SpacePage>;
+  getSpace(id: string): Promise<import('../shared/types').Space | null>;
   unarchive(id: string): Promise<Space | null>;
   summarizeTitle(canvasContent: string): Promise<{ title: string | null }>;
   pasteFile(spaceId: string, filename: string, dataArray: number[]): Promise<{ success?: boolean; relativePath?: string; filename?: string; error?: string }>;
@@ -269,6 +283,7 @@ interface WhimAPI {
   listAgents(spaceId: string): Promise<any[]>;
   quickLaunchAgent(prompt: string, personaHandle?: string): Promise<{ agentId?: string; sessionId?: string; error?: string }>;
   listAllAgents(): Promise<any[]>;
+  getAgent(agentId: string): Promise<import('../shared/ipc-contract').AgentListAllItem | null>;
   deleteAgentSession(agentId: string): Promise<{ ok?: boolean; error?: string }>;
   setAgentYolo(agentId: string, enabled: boolean): Promise<{ ok?: boolean; error?: string }>;
   launchCloudAgent(spaceId: string, prompt: string): Promise<{ agentId?: string; sessionId?: string; jobId?: string; error?: string }>;
@@ -370,7 +385,8 @@ interface WhimAPI {
   createSpaceFromSkill(skillId: string): Promise<any>;
   launchSkill(skillId: string): Promise<any>;
   invokeSkill(input: SkillInvocationInput): Promise<SkillInvocationResult | { error: string }>;
-  setSkillSchedule(skillId: string, frequency: string, time: string, day: number | null): Promise<any>;
+  setSkillSchedule(skillId: string, frequency: string, time: string, day: number | null, options?: ScheduleOptions): Promise<SharedSkill | { error: string }>;
+  listSkillScheduleSources(): Promise<{ name: string }[] | { error: string }>;
   clearSkillSchedule(skillId: string): Promise<{ success: boolean } | { error: string }>;
   onSkillsChanged(callback: () => void): void;
   // ── Platform ─────────────────────────────────────────────
@@ -388,8 +404,6 @@ interface Attachment {
 interface Space {
   id: string;
   description: string;
-  body: string | null;
-  raw_text: string | null;
   client: string | null;
   due_at: string | null;
   due_at_utc: string | null;
@@ -398,13 +412,23 @@ interface Space {
   folder: string | null;
   session_id: string | null;
   source_skill_id: string | null;
-  attachments: Attachment[];
   status: 'captured' | 'in_progress' | 'done';
   created_at: string;
   updated_at: string;
 }
 
-declare const whimAPI: WhimAPI;
+declare global { interface Window { whimAPI: WhimAPI } }
+const settingWrites = trackSettingWrites(window.whimAPI, () => showStatus('Settings save failed; changes are kept. Retry saving before closing.', true));
+const whimAPI = settingWrites.api;
+const settingsDrafts = new FormDrafts();
+document.addEventListener('input', event => {
+  const form = (event.target as Element).closest('.persona-form');
+  if (form) settingsDrafts.changed(form);
+}, true);
+document.addEventListener('change', event => {
+  const form = (event.target as Element).closest('.persona-form');
+  if (form) settingsDrafts.changed(form);
+}, true);
 
 // ── Canvas window mode detection ────────────────────────
 const isCanvasMode = new URLSearchParams(window.location.search).get('mode') === 'canvas';
@@ -415,35 +439,38 @@ const form = document.getElementById('capture-form') as HTMLFormElement;
 const listEl = document.getElementById('space-list') as HTMLDivElement;
 const countEl = document.getElementById('space-count') as HTMLSpanElement;
 const statusBar = document.getElementById('status-bar') as HTMLDivElement;
+window.addEventListener('whim:feature-load-failed', () => showStatus(
+  'Editor could not load. Drafts are kept; reconnect and retry, or save drafts before reloading.', true));
 const settingsBtn = document.getElementById('settings-btn') as HTMLButtonElement;
 const settingsOverlay = document.getElementById('settings-overlay') as HTMLDivElement;
-const settingsBackdrop = settingsOverlay.querySelector('.settings-backdrop') as HTMLDivElement;
-const settingsClose = document.getElementById('settings-close') as HTMLButtonElement;
 const mainView = document.getElementById('main-view') as HTMLDivElement;
 
 // ── Update banner ───────────────────────────────────────
-import { mountUpdateBanner } from './views/UpdateBanner.tsx';
+import { mountUpdateBanner } from './views/UpdateBanner';
 import { applyTheme, getResolvedTheme, normalizeChoice, type ThemeChoice } from './theme';
 import { initFontSetting } from './font-setting';
 
 // ── React migration: stores + IPC bridge + mount for the four main lists ──
-// These run alongside the legacy imperative DOM code during the migration.
-// The stores are the React source of truth; legacy module vars stay in
-// sync via dual-writes at every mutation site (see Phase 6 in MIGRATION.md).
+// The bridge owns collection refreshes; store subscriptions keep the remaining
+// imperative actions and keyboard-navigation mirrors current.
 import { spaceStore } from './state/space-store';
-import { agentStore } from './state/agent-store';
+import { agentStore, WORKER_PREVIEW_STEPS } from './state/agent-store';
 import { skillStore } from './state/skill-store';
 import { historyStore } from './state/history-store';
 import { personaStore } from './state/persona-store';
 import {
   installIpcBridge,
   loadSpacesSnapshot,
+  loadAgentsSnapshot,
+  loadSkillsSnapshot,
+  loadPersonasSnapshot,
   loadHistorySnapshot,
   loadCanvasArtifactsSnapshot,
+  refreshVisibleCollections,
+  getWorkspaceGeneration,
   openCanvasArtifact as openCanvasArtifactAndReconcile,
 } from './state/ipc-bridge';
-import { mountLists } from './views/mount.tsx';
-import { bootValue, UNKNOWN_CLI_RUNTIME } from './boot-guard';
+import { mountLists } from './views/mount';
 import { isWebRemote } from './transport-mode';
 import { shouldStartHidden, shouldHideWindow, shouldPopOutCanvas, shouldCloseWindowOnCanvasClose } from './window-chrome';
 import type { WhimAPI as PreloadWhimAPI } from '../shared/whim-api';
@@ -454,7 +481,6 @@ import type { Skill as SharedSkill, CanvasAgentStateSnapshot, ExportFormat, Expo
 // once via `bridgeApi` to avoid noisy `as unknown as ...` at every call site.
 const bridgeApi = whimAPI as unknown as PreloadWhimAPI;
 
-const modelSelect = document.getElementById('model-select') as HTMLSelectElement;
 const recordingIndicator = document.getElementById('recording-indicator') as HTMLDivElement;
 const waveformCanvas = document.getElementById('waveform-canvas') as HTMLCanvasElement;
 const inputHints = document.getElementById('input-hints') as HTMLDivElement;
@@ -535,6 +561,7 @@ const focusClear = document.getElementById('focus-clear') as HTMLButtonElement;
 let focusedSpaceId: string | null = null;
 let selectedIndex = -1;
 let displayedSpaces: Space[] = [];
+let spaceRowsOwnedByReact = false;
 let searchResults: Space[] | null = null;
 let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 let searchMode = false;
@@ -655,6 +682,7 @@ function slideOut(callback?: () => void): void {
   slideTransitionId++;
   const myId = slideTransitionId;
   windowVisualState = 'sliding-out';
+  void refreshVisibleCollections();
 
   // Add hidden class → transition fires, content slides out
   appEl.classList.add(windowSide === 'left' ? 'app-hidden-left' : 'app-hidden-right');
@@ -844,7 +872,10 @@ whimAPI.onGitSyncChanged((status: any) => {
 
 // Refresh sync on window focus / visibility change
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) refreshGitSync();
+  void refreshVisibleCollections();
+  if (!document.hidden) {
+    refreshGitSync();
+  }
 });
 
 // ── Filter bar ──────────────────────────────────────────
@@ -874,10 +905,10 @@ function setFilter(filter: typeof currentFilter): void {
   if (filter === currentFilter) return;
   currentFilter = filter;
   spaceStore.setFilter(filter);
-  // History view fetches its events lazily when first activated.
-  if (filter === 'closed') {
-    void loadHistorySnapshot(bridgeApi);
-  }
+  void loadSpacesSnapshot(bridgeApi, { invalidate: true }).catch(error => {
+    console.error('[lists] Failed to change page:', error);
+    showStatus('Could not load spaces. Try switching tabs again.');
+  });
   filterBar.querySelectorAll('.filter-btn').forEach(b => {
     b.classList.remove('active');
     b.setAttribute('aria-selected', 'false');
@@ -1042,6 +1073,33 @@ launchCliBtn.addEventListener('click', async () => {
 
 // ── Settings modal ──────────────────────────────────────
 let settingsModalOpen = false;
+let settingsController: ReturnType<typeof import('./settings/controls').mountSettings> | undefined;
+let settingsLoading: Promise<NonNullable<typeof settingsController>> | undefined;
+const reportSettingsSaveError = (error: unknown) => showStatus(
+  error instanceof Error ? error.message : 'Settings save failed', true);
+
+function loadSettingsControls(): Promise<NonNullable<typeof settingsController>> {
+  if (settingsController) return Promise.resolve(settingsController);
+  if (!settingsLoading) {
+    settingsLoading = import('./settings/controls').then(({ mountSettings }) => {
+      settingsController = mountSettings(settingsHost());
+      return settingsController;
+    }).finally(() => { settingsLoading = undefined; });
+  }
+  return settingsLoading;
+}
+
+function syncThemeControl(choice: ThemeChoice): void {
+  settingsController?.syncThemeControl(choice);
+}
+
+function renderProfilesSettings(): void {
+  settingsController?.renderProfilesSettings();
+}
+
+function renderHotkeysTab(): void {
+  settingsController?.renderHotkeysTab();
+}
 
 function showSettings(): void {
   // Open settings in a separate window
@@ -1056,8 +1114,11 @@ function hideSettings(): void {
 }
 
 settingsBtn.addEventListener('click', showSettings);
-settingsClose.addEventListener('click', hideSettings);
-settingsBackdrop.addEventListener('click', hideSettings);
+function closeSettings(): void {
+  if (isSettingsMode) {
+    void flushLocalDrafts().then(() => window.close()).catch(reportSettingsSaveError);
+  } else hideSettings();
+}
 
 // ── Pin toggle ──────────────────────────────────────────
 pinBtn.addEventListener('click', async () => {
@@ -1349,49 +1410,13 @@ async function loadRemoteState(): Promise<void> {
   } catch { /* not critical */ }
 }
 
-modelSelect.addEventListener('change', async () => {
-  const model = modelSelect.value;
-  if (model) {
-    await whimAPI.setSetting('model', model);
-    showStatus(`✓ Model set to ${model}`);
-    setTimeout(hideStatus, 2000);
-  }
-});
-
-async function loadModels(): Promise<void> {
-  const currentModel = await whimAPI.getSetting('model');
-  try {
-    const models = await whimAPI.listModels();
-    modelSelect.innerHTML = '';
-
-    if (models.length === 0) {
-      modelSelect.innerHTML = '<option value="">No models available</option>';
-      return;
-    }
-
-    for (const m of models) {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = m.name || m.id;
-      if (m.id === currentModel) opt.selected = true;
-      modelSelect.appendChild(opt);
-    }
-
-    // If no saved model, select the first one
-    if (!currentModel && models.length > 0) {
-      modelSelect.value = models[0].id;
-    }
-  } catch {
-    modelSelect.innerHTML = '<option value="">Failed to load models</option>';
-  }
-}
-
 async function loadSettings(): Promise<void> {
   await loadThemeSetting();
 }
 
 // ── Theme ───────────────────────────────────────────────
-void initFontSetting(whimAPI, isSettingsMode && !isWebRemote());
+void initFontSetting(whimAPI, false)
+  .catch(error => showStatus(error instanceof Error ? error.message : 'Font setting could not load', true));
 
 // Theme resolve/apply/persist + OS-change handling lives in ./theme.
 // app.ts only loads the stored choice and wires the Settings control.
@@ -1401,47 +1426,7 @@ async function loadThemeSetting(): Promise<void> {
   applyTheme(stored);
   syncThemeControl(stored);
 }
-
-// ── Theme toggle (Settings → Appearance) ────────────────
-const themeToggle = document.getElementById('theme-toggle') as HTMLDivElement | null;
-const themeToggleBtns = themeToggle
-  ? Array.from(themeToggle.querySelectorAll<HTMLButtonElement>('.theme-btn'))
-  : [];
-
-/** Reflect the active choice in the segmented control's button states. */
-function syncThemeControl(choice: ThemeChoice): void {
-  for (const btn of themeToggleBtns) {
-    const active = btn.dataset.theme === choice;
-    btn.classList.toggle('active', active);
-    btn.setAttribute('aria-checked', String(active));
-  }
-}
-
-for (const btn of themeToggleBtns) {
-  btn.addEventListener('click', async () => {
-    const choice = normalizeChoice(btn.dataset.theme);
-    applyTheme(choice);
-    syncThemeControl(choice);
-    await whimAPI.setSetting('theme', choice);
-    // Broadcast so any open canvas / settings popout windows update live.
-    whimAPI.notifyCanvasThemeChanged(choice);
-  });
-}
-
-async function loadWorkspaceSetting(): Promise<void> {
-  const ws = await whimAPI.getSetting('workspace_root');
-  updateWorkspaceDisplay(ws);
-}
-
-// ── Agent Personas ──────────────────────────────────────
-const agentsSelectionList = document.getElementById('agents-selection-list') as HTMLDivElement;
-const agentsEditor = document.getElementById('agents-editor') as HTMLDivElement;
-const personaAddBtn = document.getElementById('persona-add-btn') as HTMLButtonElement;
 let personas: AgentPersona[] = [];
-let personaModels: { id: string; name?: string }[] = [];
-let selectedAgentId: string | null = null;
-
-const HANDLE_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const DEFAULT_AGENT_HANDLE = 'agent';
 const DEFAULT_AGENT_INSTRUCTIONS = 'Follow the users instructions and respond to comments or create comments when you work on canvas.md documents.';
 
@@ -1459,1284 +1444,6 @@ function ensureDefaultAgent(): void {
     whimAPI.savePersonas(personas);
   }
 }
-
-async function loadPersonas(): Promise<void> {
-  personas = await whimAPI.listPersonas() || [];
-  try { personaModels = await whimAPI.listModels(); } catch { personaModels = []; }
-  ensureDefaultAgent();
-  personaStore.setPersonas(personas);
-  renderAgentsSidebar();
-  // Auto-select @agent if nothing selected
-  if (!selectedAgentId) {
-    const defaultAgent = personas.find(p => p.handle === DEFAULT_AGENT_HANDLE);
-    if (defaultAgent) selectAgent(defaultAgent.id);
-  } else {
-    // Re-render editor for currently selected agent
-    const current = personas.find(p => p.id === selectedAgentId);
-    if (current) renderAgentEditor(current);
-    else {
-      selectedAgentId = null;
-      renderAgentEditorPlaceholder();
-    }
-  }
-}
-
-function renderAgentsSidebar(): void {
-  agentsSelectionList.innerHTML = '';
-  // Sort: @agent always first, then alphabetical
-  const sorted = [...personas].sort((a, b) => {
-    if (a.handle === DEFAULT_AGENT_HANDLE) return -1;
-    if (b.handle === DEFAULT_AGENT_HANDLE) return 1;
-    return a.handle.localeCompare(b.handle);
-  });
-  for (const persona of sorted) {
-    const item = document.createElement('div');
-    item.className = 'agent-list-item' + (persona.id === selectedAgentId ? ' active' : '');
-    item.dataset.agentId = persona.id;
-
-    const emoji = document.createElement('span');
-    emoji.className = 'agent-list-emoji';
-    emoji.textContent = persona.emoji || '🤖';
-
-    const handle = document.createElement('span');
-    handle.className = 'agent-list-handle';
-    handle.textContent = '@' + persona.handle;
-
-    item.appendChild(emoji);
-    item.appendChild(handle);
-    item.addEventListener('click', () => selectAgent(persona.id));
-    agentsSelectionList.appendChild(item);
-  }
-}
-
-function selectAgent(agentId: string): void {
-  selectedAgentId = agentId;
-  // Update active state in list
-  agentsSelectionList.querySelectorAll('.agent-list-item').forEach(el => {
-    el.classList.toggle('active', (el as HTMLElement).dataset.agentId === agentId);
-  });
-  const persona = personas.find(p => p.id === agentId);
-  if (persona) renderAgentEditor(persona);
-}
-
-function renderAgentEditorPlaceholder(): void {
-  agentsEditor.innerHTML = '<div class="agents-editor-placeholder">Select an agent to edit its settings.</div>';
-}
-
-function renderAgentEditor(persona: AgentPersona): void {
-  agentsEditor.innerHTML = '';
-  const isDefault = persona.handle === DEFAULT_AGENT_HANDLE;
-
-  const form = document.createElement('div');
-  form.className = 'persona-form';
-  form.style.border = 'none';
-  form.style.padding = '0';
-  form.style.background = 'none';
-
-  // Handle input — with emoji picker
-  const handleRow = document.createElement('div');
-  handleRow.className = 'persona-form-row';
-  const emojiBtn = document.createElement('button');
-  emojiBtn.type = 'button';
-  emojiBtn.className = 'emoji-picker-btn';
-  emojiBtn.textContent = persona.emoji || '🤖';
-  emojiBtn.title = 'Pick emoji avatar';
-  let selectedEmoji = persona.emoji || '';
-
-  const EMOJI_OPTIONS = [
-    '😀','😎','🤖','👻','🦊','🐱','🐶','🦁',
-    '🧠','💡','🔥','⚡','🚀','🎯','💻','🛡️',
-    '🌟','🎨','🔮','🧪','🪄','👾','🤠','🥷',
-    '🦄','🐙','🦅','🐝','🌈','❄️','🌊','🍀',
-  ];
-
-  emojiBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const existing_popup = document.querySelector('.emoji-picker-popup');
-    if (existing_popup) { existing_popup.remove(); return; }
-
-    const popup = document.createElement('div');
-    popup.className = 'emoji-picker-popup';
-    for (const em of EMOJI_OPTIONS) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = em;
-      btn.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        selectedEmoji = em;
-        emojiBtn.textContent = em;
-        popup.remove();
-      });
-      popup.appendChild(btn);
-    }
-
-    const clearBtn = document.createElement('button');
-    clearBtn.type = 'button';
-    clearBtn.textContent = '✕';
-    clearBtn.title = 'Clear emoji';
-    clearBtn.style.color = '#999';
-    clearBtn.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      selectedEmoji = '';
-      emojiBtn.textContent = '🤖';
-      popup.remove();
-    });
-    popup.appendChild(clearBtn);
-
-    emojiBtn.style.position = 'relative';
-    emojiBtn.appendChild(popup);
-
-    const closePopup = () => { popup.remove(); document.removeEventListener('click', closePopup); };
-    setTimeout(() => document.addEventListener('click', closePopup), 0);
-  });
-
-  const handleLabel = document.createElement('label');
-  handleLabel.textContent = '@';
-  handleLabel.className = 'persona-handle-prefix';
-  const handleInput = document.createElement('input');
-  handleInput.type = 'text';
-  handleInput.className = 'persona-form-input';
-  handleInput.placeholder = 'handle';
-  handleInput.value = persona.handle;
-  handleInput.maxLength = 32;
-  if (isDefault) {
-    handleInput.readOnly = true;
-    handleInput.style.opacity = '0.6';
-    handleInput.title = 'The default agent handle cannot be changed';
-  }
-  handleRow.appendChild(emojiBtn);
-  handleRow.appendChild(handleLabel);
-  handleRow.appendChild(handleInput);
-
-  // Instructions textarea
-  const instrRow = document.createElement('div');
-  instrRow.className = 'persona-form-row';
-  const instrInput = document.createElement('textarea');
-  instrInput.className = 'persona-form-textarea';
-  instrInput.placeholder = 'Instructions for this agent...';
-  instrInput.value = persona.instructions;
-  instrInput.rows = 4;
-  instrInput.maxLength = 2000;
-  instrRow.appendChild(instrInput);
-
-  // Model dropdown
-  const modelRow = document.createElement('div');
-  modelRow.className = 'persona-form-row';
-  const modelLabel = document.createElement('label');
-  modelLabel.textContent = 'Model';
-  modelLabel.className = 'persona-form-label';
-  const modelSelect = document.createElement('select');
-  modelSelect.className = 'persona-form-select';
-
-  const defaultOpt = document.createElement('option');
-  defaultOpt.value = '';
-  defaultOpt.textContent = 'Default';
-  modelSelect.appendChild(defaultOpt);
-
-  for (const m of personaModels) {
-    const opt = document.createElement('option');
-    opt.value = m.id;
-    opt.textContent = m.name || m.id;
-    if (m.id === persona.model) opt.selected = true;
-    modelSelect.appendChild(opt);
-  }
-
-  modelRow.appendChild(modelLabel);
-  modelRow.appendChild(modelSelect);
-
-  // Run location dropdown
-  const locationRow = document.createElement('div');
-  locationRow.className = 'persona-form-row';
-  const locationLabel = document.createElement('label');
-  locationLabel.textContent = 'Run location';
-  locationLabel.className = 'persona-form-label';
-  const locationSelect = document.createElement('select');
-  locationSelect.className = 'persona-form-select';
-  const localOpt = document.createElement('option');
-  localOpt.value = 'local';
-  localOpt.textContent = '💻 Local';
-  const cloudOpt = document.createElement('option');
-  cloudOpt.value = 'cloud';
-  cloudOpt.textContent = '☁️ Cloud';
-  const ccaOpt = document.createElement('option');
-  ccaOpt.value = 'cca';
-  ccaOpt.textContent = '🤖 Copilot Cloud Agent';
-  locationSelect.appendChild(localOpt);
-  locationSelect.appendChild(cloudOpt);
-  locationSelect.appendChild(ccaOpt);
-  if (persona.runLocation === 'cca') ccaOpt.selected = true;
-  else if (persona.runLocation === 'cloud') cloudOpt.selected = true;
-  locationRow.appendChild(locationLabel);
-  locationRow.appendChild(locationSelect);
-
-  // Sandbox checkbox (available on all platforms with runtime sandbox support)
-  const sandboxRow = document.createElement('div');
-  sandboxRow.className = 'persona-form-row persona-sandbox-row';
-  if (persona.runLocation !== 'local') {
-    sandboxRow.style.display = 'none';
-  }
-  const sandboxLabel = document.createElement('label');
-  sandboxLabel.className = 'persona-form-checkbox-label';
-  const sandboxCheck = document.createElement('input');
-  sandboxCheck.type = 'checkbox';
-  sandboxCheck.checked = persona.sandboxed === true;
-  sandboxLabel.appendChild(sandboxCheck);
-  sandboxLabel.appendChild(document.createTextNode(' 🔒 Run in sandbox (restrict writes & dangerous commands)'));
-  sandboxRow.appendChild(sandboxLabel);
-
-  const sandboxInfoNote = document.createElement('div');
-  sandboxInfoNote.className = 'persona-sandbox-info';
-  sandboxInfoNote.textContent = 'ℹ The agent\'s working directory is always included in read/write paths.';
-  sandboxInfoNote.style.display = sandboxCheck.checked ? '' : 'none';
-  sandboxRow.appendChild(sandboxInfoNote);
-
-  locationSelect.addEventListener('change', () => {
-    if (locationSelect.value !== 'local') {
-      sandboxRow.style.display = 'none';
-      sandboxCheck.checked = false;
-      sandboxOverrideRow.style.display = 'none';
-    } else {
-      sandboxRow.style.display = '';
-      updateSandboxOverrideVisibility();
-    }
-  });
-
-  // Sandbox override
-  const sandboxOverrideRow = document.createElement('div');
-  sandboxOverrideRow.className = 'persona-form-row persona-sandbox-override-row';
-  sandboxOverrideRow.style.display = 'none';
-  sandboxOverrideRow.style.flexDirection = 'column';
-  sandboxOverrideRow.style.gap = '6px';
-
-  const inheritLabel = document.createElement('label');
-  inheritLabel.className = 'persona-form-checkbox-label';
-  const inheritCheck = document.createElement('input');
-  inheritCheck.type = 'checkbox';
-  // For @agent, there's no "inherit" — it IS the default
-  if (isDefault) {
-    inheritCheck.checked = false;
-    inheritLabel.style.display = 'none';
-  } else {
-    inheritCheck.checked = persona.sandboxPolicyOverride == null;
-  }
-  inheritLabel.appendChild(inheritCheck);
-  inheritLabel.appendChild(document.createTextNode(' Inherit sandbox policy from @agent'));
-  sandboxOverrideRow.appendChild(inheritLabel);
-
-  const overrideContainer = document.createElement('div');
-  overrideContainer.className = 'sandbox-policy-form';
-  overrideContainer.style.display = (isDefault || !inheritCheck.checked) ? '' : 'none';
-  sandboxOverrideRow.appendChild(overrideContainer);
-
-  let personaPolicyApi: { getPolicy: () => SandboxPolicy; setPolicy: (p: SandboxPolicy) => void } | null = null;
-
-  async function ensurePolicyForm(): Promise<void> {
-    if (personaPolicyApi) return;
-    let initial: SandboxPolicy;
-    if (isDefault) {
-      // @agent reads/writes the global default sandbox policy
-      try {
-        initial = await whimAPI.getSandboxDefaultPolicy() ?? DEFAULT_SANDBOX_POLICY;
-      } catch {
-        initial = DEFAULT_SANDBOX_POLICY;
-      }
-    } else if (persona.sandboxPolicyOverride) {
-      initial = persona.sandboxPolicyOverride;
-    } else {
-      try {
-        initial = await whimAPI.getSandboxDefaultPolicy() ?? DEFAULT_SANDBOX_POLICY;
-      } catch {
-        initial = DEFAULT_SANDBOX_POLICY;
-      }
-    }
-    personaPolicyApi = renderSandboxPolicyForm(overrideContainer, initial, { idPrefix: `persona-${persona.id}` });
-  }
-
-  inheritCheck.addEventListener('change', async () => {
-    if (inheritCheck.checked) {
-      overrideContainer.style.display = 'none';
-    } else {
-      await ensurePolicyForm();
-      overrideContainer.style.display = '';
-    }
-  });
-
-  function updateSandboxOverrideVisibility(): void {
-    const show = sandboxCheck.checked && locationSelect.value === 'local';
-    sandboxInfoNote.style.display = show ? '' : 'none';
-    if (show) {
-      sandboxOverrideRow.style.display = '';
-      if (isDefault || !inheritCheck.checked) ensurePolicyForm();
-    } else {
-      sandboxOverrideRow.style.display = 'none';
-    }
-  }
-  sandboxCheck.addEventListener('change', updateSandboxOverrideVisibility);
-  if (sandboxCheck.checked) updateSandboxOverrideVisibility();
-
-  // CLI Runtime dropdown
-  const runtimeRow = document.createElement('div');
-  runtimeRow.className = 'persona-form-row';
-  const runtimeLabel = document.createElement('label');
-  runtimeLabel.textContent = 'CLI Runtime';
-  runtimeLabel.className = 'persona-form-label';
-  const runtimeSelect = document.createElement('select');
-  runtimeSelect.className = 'persona-form-select';
-  const defaultRtOpt = document.createElement('option');
-  defaultRtOpt.value = '';
-  defaultRtOpt.textContent = 'Default';
-  runtimeSelect.appendChild(defaultRtOpt);
-  whimAPI.listRuntimes().then(runtimes => {
-    for (const rt of runtimes) {
-      const opt = document.createElement('option');
-      opt.value = rt.id;
-      opt.textContent = rt.label;
-      if (rt.id === persona.cliRuntime) opt.selected = true;
-      runtimeSelect.appendChild(opt);
-    }
-  });
-  runtimeRow.appendChild(runtimeLabel);
-  runtimeRow.appendChild(runtimeSelect);
-
-  // Yolo mode checkbox
-  const yoloRow = document.createElement('div');
-  yoloRow.className = 'persona-form-row persona-yolo-row';
-  const yoloLabel = document.createElement('label');
-  yoloLabel.className = 'persona-form-checkbox-label';
-  const yoloCheck = document.createElement('input');
-  yoloCheck.type = 'checkbox';
-  yoloCheck.checked = persona.yolo === true;
-  yoloLabel.appendChild(yoloCheck);
-  yoloLabel.appendChild(document.createTextNode(' 🔥 Auto-enable yolo mode (skip all permission prompts)'));
-  yoloRow.appendChild(yoloLabel);
-
-  // Ephemeral mode checkbox
-  const ephemeralRow = document.createElement('div');
-  ephemeralRow.className = 'persona-form-row persona-ephemeral-row';
-  if (persona.runLocation === 'cca') {
-    ephemeralRow.style.display = 'none';
-  }
-  const ephemeralLabel = document.createElement('label');
-  ephemeralLabel.className = 'persona-form-checkbox-label';
-  const ephemeralCheck = document.createElement('input');
-  ephemeralCheck.type = 'checkbox';
-  ephemeralCheck.checked = persona.ephemeral === true;
-  ephemeralLabel.appendChild(ephemeralCheck);
-  ephemeralLabel.appendChild(document.createTextNode(' 🕵️ Ephemeral mode (no session history — nothing persisted to disk or DB)'));
-  ephemeralRow.appendChild(ephemeralLabel);
-
-  // Hide ephemeral option for CCA personas
-  locationSelect.addEventListener('change', () => {
-    if (locationSelect.value === 'cca') {
-      ephemeralRow.style.display = 'none';
-      ephemeralCheck.checked = false;
-    } else {
-      ephemeralRow.style.display = '';
-    }
-  });
-
-  // Error display
-  const errorEl = document.createElement('div');
-  errorEl.className = 'persona-form-error hidden';
-
-  // Action buttons
-  const btnRow = document.createElement('div');
-  btnRow.className = 'persona-form-actions';
-
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'persona-form-save';
-  saveBtn.textContent = 'Save';
-  saveBtn.addEventListener('click', async () => {
-    const rawHandle = isDefault ? DEFAULT_AGENT_HANDLE : handleInput.value.trim().replace(/^@/, '').toLowerCase();
-    const instructions = instrInput.value.trim();
-    const model = modelSelect.value;
-    const runLocation = locationSelect.value as 'local' | 'cca' | 'cloud';
-    const sandboxed = sandboxCheck.checked && runLocation === 'local';
-    const emoji = selectedEmoji;
-    const cliRuntime = runtimeSelect.value;
-
-    // For @agent, save sandbox policy to global default as well.
-    // ensurePolicyForm() is materialized lazily (and its callers don't await
-    // it), so read through it here — otherwise a quick check-then-save would
-    // see personaPolicyApi === null and silently drop the policy.
-    let sandboxOverride: SandboxPolicy | undefined;
-    if (sandboxed) {
-      if (isDefault) {
-        await ensurePolicyForm();
-        if (personaPolicyApi) {
-          await whimAPI.saveSandboxDefaultPolicy(personaPolicyApi.getPolicy());
-        }
-        sandboxOverride = undefined; // @agent uses the global default
-      } else if (!inheritCheck.checked) {
-        await ensurePolicyForm();
-        // Fall back to the persona's stored override rather than wiping it
-        // if the form still couldn't be built.
-        sandboxOverride = personaPolicyApi
-          ? personaPolicyApi.getPolicy()
-          : persona.sandboxPolicyOverride;
-      }
-    } else if (!isDefault) {
-      // Sandboxing is off — main drops sandboxPolicyOverride in that case,
-      // so leave it undefined here to stay in sync with what's persisted.
-      sandboxOverride = undefined;
-    }
-
-    if (!isDefault && !HANDLE_RE.test(rawHandle)) {
-      errorEl.textContent = 'Handle must be 1-32 lowercase letters, numbers, or dashes.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    if (!instructions) {
-      errorEl.textContent = 'Instructions are required.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    if (!isDefault) {
-      const duplicate = personas.find(p => p.handle === rawHandle && p.id !== persona.id);
-      if (duplicate) {
-        errorEl.textContent = `Handle @${rawHandle} is already taken.`;
-        errorEl.classList.remove('hidden');
-        return;
-      }
-    }
-
-    personas = personas.map(p => p.id === persona.id
-      ? {
-          ...p,
-          handle: rawHandle,
-          instructions,
-          model,
-          runLocation,
-          emoji: emoji || undefined,
-          cliRuntime: cliRuntime || undefined,
-          ...(sandboxed ? { sandboxed: true } : { sandboxed: undefined }),
-          ...(sandboxOverride ? { sandboxPolicyOverride: sandboxOverride } : { sandboxPolicyOverride: undefined }),
-          ...(yoloCheck.checked ? { yolo: true } : { yolo: undefined }),
-          ...(ephemeralCheck.checked && (runLocation === 'local' || runLocation === 'cloud') ? { ephemeral: true } : { ephemeral: undefined }),
-        }
-      : p
-    );
-
-    const result = await whimAPI.savePersonas(personas);
-    if (result && 'error' in result) {
-      errorEl.textContent = result.error;
-      errorEl.className = 'persona-form-error';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    // Adopt the persisted list. Main-side validation normalizes fields and
-    // silently drops incomplete entries (e.g. an untouched "+ Add" draft), so
-    // keeping the optimistic array would leave ghost rows in the sidebar.
-    personas = await whimAPI.listPersonas() || [];
-    personaStore.setPersonas(personas);
-    renderAgentsSidebar();
-    // Show animated save confirmation
-    errorEl.textContent = '✓ Saved';
-    errorEl.className = 'persona-form-error persona-save-toast';
-    errorEl.classList.remove('hidden');
-    setTimeout(() => { errorEl.classList.add('hidden'); errorEl.className = 'persona-form-error hidden'; }, 2000);
-  });
-
-  const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'persona-form-cancel';
-  deleteBtn.textContent = 'Delete';
-  deleteBtn.style.color = '#b91414';
-  if (isDefault) {
-    deleteBtn.style.display = 'none';
-  }
-  deleteBtn.addEventListener('click', async () => {
-    if (isDefault) return;
-    personas = personas.filter(p => p.id !== persona.id);
-    await whimAPI.savePersonas(personas);
-    personas = await whimAPI.listPersonas() || [];
-    personaStore.setPersonas(personas);
-    selectedAgentId = null;
-    renderAgentsSidebar();
-    // Select @agent after deletion
-    const defaultAgent = personas.find(p => p.handle === DEFAULT_AGENT_HANDLE);
-    if (defaultAgent) selectAgent(defaultAgent.id);
-    else renderAgentEditorPlaceholder();
-  });
-
-  btnRow.appendChild(saveBtn);
-  btnRow.appendChild(deleteBtn);
-
-  // "Open config preview" — materializes the persona's current sandbox
-  // policy to a config.json file under userData/sandbox-config/preview/ and
-  // opens it in the OS default text editor. Lets the user verify exactly
-  // which config the runtime will load at agent launch (companion to the
-  // [sandbox] launch-time logs in main).
-  const previewBtn = document.createElement('button');
-  previewBtn.className = 'persona-form-cancel';
-  previewBtn.type = 'button';
-  previewBtn.textContent = 'Open config preview';
-  previewBtn.title = 'Materialize the runtime config.json for this policy and open it in your default text editor.';
-  previewBtn.style.marginLeft = 'auto';
-  previewBtn.addEventListener('click', async () => {
-    if (!sandboxCheck.checked) {
-      errorEl.textContent = 'Enable "Run in sandbox" to preview the config.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    // Materialize the policy form lazily — covers both inherit-from-default
-    // and explicit-override cases. Either way personaPolicyApi.getPolicy()
-    // returns the values that would be saved on click.
-    await ensurePolicyForm();
-    if (!personaPolicyApi) {
-      errorEl.textContent = 'Could not load sandbox policy form.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    const policy = personaPolicyApi.getPolicy();
-    const result = await whimAPI.openSandboxConfigPreview(policy);
-    if (result?.ok) {
-      errorEl.textContent = `Opened ${result.path}`;
-      errorEl.style.color = '#2d8a3a';
-      errorEl.classList.remove('hidden');
-      setTimeout(() => { errorEl.classList.add('hidden'); errorEl.style.color = ''; }, 2500);
-    } else {
-      errorEl.textContent = result?.error || 'Failed to open config preview';
-      errorEl.classList.remove('hidden');
-    }
-  });
-  // Hide the preview button when sandbox is off (or the platform doesn't
-  // support sandboxing at all) — there's nothing meaningful to materialize.
-  const updatePreviewVisibility = () => {
-    previewBtn.style.display = sandboxCheck.checked ? '' : 'none';
-  };
-  updatePreviewVisibility();
-  sandboxCheck.addEventListener('change', updatePreviewVisibility);
-  btnRow.appendChild(previewBtn);
-
-  form.appendChild(handleRow);
-  form.appendChild(instrRow);
-  form.appendChild(modelRow);
-  form.appendChild(locationRow);
-  form.appendChild(sandboxRow);
-  form.appendChild(sandboxOverrideRow);
-  form.appendChild(runtimeRow);
-  form.appendChild(yoloRow);
-  form.appendChild(ephemeralRow);
-  form.appendChild(errorEl);
-  form.appendChild(btnRow);
-
-  agentsEditor.appendChild(form);
-}
-
-personaAddBtn.addEventListener('click', () => {
-  const newId = crypto.randomUUID();
-  const newPersona: AgentPersona = {
-    id: newId,
-    handle: '',
-    instructions: '',
-    model: '',
-    runLocation: 'local',
-  };
-  personas.push(newPersona);
-  personaStore.setPersonas(personas);
-  renderAgentsSidebar();
-  selectAgent(newId);
-});
-
-// ── CLI Runtimes ────────────────────────────────────────
-const runtimesList = document.getElementById('runtimes-list') as HTMLDivElement;
-const runtimeAddBtn = document.getElementById('runtime-add-btn') as HTMLButtonElement;
-let cliRuntimes: CliRuntime[] = [];
-
-async function loadRuntimes(): Promise<void> {
-  cliRuntimes = await whimAPI.listRuntimes() || [];
-  renderRuntimes();
-}
-
-function renderRuntimes(): void {
-  const openForm = runtimesList.querySelector('.persona-form');
-  runtimesList.innerHTML = '';
-  for (const rt of cliRuntimes) {
-    runtimesList.appendChild(createRuntimeCard(rt));
-  }
-  if (openForm) runtimesList.appendChild(openForm);
-}
-
-function createRuntimeCard(rt: CliRuntime): HTMLElement {
-  const card = document.createElement('div');
-  card.className = 'persona-card';
-
-  const info = document.createElement('div');
-  info.className = 'persona-card-info';
-
-  const label = document.createElement('div');
-  label.className = 'persona-card-handle';
-  label.textContent = rt.label;
-
-  const pathEl = document.createElement('div');
-  pathEl.className = 'persona-card-instructions';
-  pathEl.textContent = rt.path;
-
-  info.appendChild(label);
-  info.appendChild(pathEl);
-
-  const actions = document.createElement('div');
-  actions.className = 'persona-card-actions';
-
-  const editBtn = document.createElement('button');
-  editBtn.className = 'persona-action-btn';
-  editBtn.textContent = '✎';
-  editBtn.title = 'Edit';
-  editBtn.addEventListener('click', () => showRuntimeForm(rt));
-
-  const delBtn = document.createElement('button');
-  delBtn.className = 'persona-action-btn danger';
-  delBtn.textContent = '✕';
-  delBtn.title = 'Delete';
-  delBtn.addEventListener('click', async () => {
-    cliRuntimes = cliRuntimes.filter(r => r.id !== rt.id);
-    await whimAPI.saveRuntimes(cliRuntimes);
-    renderRuntimes();
-  });
-
-  actions.appendChild(editBtn);
-  actions.appendChild(delBtn);
-
-  card.appendChild(info);
-  card.appendChild(actions);
-  return card;
-}
-
-function showRuntimeForm(existing?: CliRuntime): void {
-  const prev = runtimesList.querySelector('.persona-form');
-  if (prev) prev.remove();
-
-  const form = document.createElement('div');
-  form.className = 'persona-form';
-
-  const labelRow = document.createElement('div');
-  labelRow.className = 'persona-form-row';
-  const labelInput = document.createElement('input');
-  labelInput.type = 'text';
-  labelInput.className = 'persona-form-input';
-  labelInput.placeholder = 'Label (e.g. Copilot Dev)';
-  labelInput.value = existing?.label || '';
-  labelInput.maxLength = 50;
-  labelRow.appendChild(labelInput);
-
-  const pathRow = document.createElement('div');
-  pathRow.className = 'persona-form-row';
-  const pathInput = document.createElement('input');
-  pathInput.type = 'text';
-  pathInput.className = 'persona-form-input';
-  pathInput.placeholder = 'Path or command (e.g. copilot-dev)';
-  pathInput.value = existing?.path || '';
-  pathInput.spellcheck = false;
-  pathRow.appendChild(pathInput);
-
-  const errorEl = document.createElement('div');
-  errorEl.className = 'persona-form-error hidden';
-
-  const btnRow = document.createElement('div');
-  btnRow.className = 'persona-form-actions';
-
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'persona-form-save';
-  saveBtn.textContent = existing ? 'Save' : 'Add';
-  saveBtn.addEventListener('click', async () => {
-    const label = labelInput.value.trim();
-    const rPath = pathInput.value.trim();
-    if (!label) {
-      errorEl.textContent = 'Label is required.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    if (!rPath) {
-      errorEl.textContent = 'Path is required.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-
-    if (existing) {
-      cliRuntimes = cliRuntimes.map(r => r.id === existing.id ? { ...r, label, path: rPath } : r);
-    } else {
-      cliRuntimes.push({ id: crypto.randomUUID(), label, path: rPath });
-    }
-
-    const result = await whimAPI.saveRuntimes(cliRuntimes);
-    // Update local state with resolved paths from the backend
-    if (result && result.runtimes) {
-      cliRuntimes = result.runtimes;
-    }
-    form.remove();
-    renderRuntimes();
-  });
-
-  const cancelBtn = document.createElement('button');
-  cancelBtn.className = 'persona-form-cancel';
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.addEventListener('click', () => form.remove());
-
-  btnRow.appendChild(saveBtn);
-  btnRow.appendChild(cancelBtn);
-
-  form.appendChild(labelRow);
-  form.appendChild(pathRow);
-  form.appendChild(errorEl);
-  form.appendChild(btnRow);
-
-  runtimesList.appendChild(form);
-  labelInput.focus();
-}
-
-runtimeAddBtn.addEventListener('click', () => showRuntimeForm());
-
-// ── Export Destinations ─────────────────────────────────
-const exportDestinationsList = document.getElementById('export-destinations-list') as HTMLDivElement;
-const exportDestAddBtn = document.getElementById('export-dest-add-btn') as HTMLButtonElement;
-let exportDestinations: ExportDestination[] = [];
-
-const EXPORT_FORMAT_LABELS: Record<ExportFormat, string> = { pdf: 'PDF', docx: 'Word', md: 'Markdown' };
-
-async function loadExportDestinations(): Promise<void> {
-  exportDestinations = await whimAPI.listExportDestinations() || [];
-  renderExportDestinations();
-}
-
-function renderExportDestinations(): void {
-  const openForm = exportDestinationsList.querySelector('.persona-form');
-  exportDestinationsList.innerHTML = '';
-  for (const dest of exportDestinations) {
-    exportDestinationsList.appendChild(createExportDestCard(dest));
-  }
-  if (openForm) exportDestinationsList.appendChild(openForm);
-}
-
-function createExportDestCard(dest: ExportDestination): HTMLElement {
-  const card = document.createElement('div');
-  card.className = 'persona-card';
-
-  const info = document.createElement('div');
-  info.className = 'persona-card-info';
-
-  const label = document.createElement('div');
-  label.className = 'persona-card-handle';
-  label.textContent = `${dest.label} · ${EXPORT_FORMAT_LABELS[dest.defaultFormat]}`;
-
-  const pathEl = document.createElement('div');
-  pathEl.className = 'persona-card-instructions';
-  pathEl.textContent = dest.path;
-
-  info.appendChild(label);
-  info.appendChild(pathEl);
-
-  const actions = document.createElement('div');
-  actions.className = 'persona-card-actions';
-
-  const editBtn = document.createElement('button');
-  editBtn.className = 'persona-action-btn';
-  editBtn.textContent = '✎';
-  editBtn.title = 'Edit';
-  editBtn.addEventListener('click', () => showExportDestForm(dest));
-
-  const delBtn = document.createElement('button');
-  delBtn.className = 'persona-action-btn danger';
-  delBtn.textContent = '✕';
-  delBtn.title = 'Delete';
-  delBtn.addEventListener('click', async () => {
-    exportDestinations = exportDestinations.filter(d => d.id !== dest.id);
-    await whimAPI.saveExportDestinations(exportDestinations);
-    renderExportDestinations();
-  });
-
-  actions.appendChild(editBtn);
-  actions.appendChild(delBtn);
-
-  card.appendChild(info);
-  card.appendChild(actions);
-  return card;
-}
-
-function showExportDestForm(existing?: ExportDestination): void {
-  const prev = exportDestinationsList.querySelector('.persona-form');
-  if (prev) prev.remove();
-
-  const form = document.createElement('div');
-  form.className = 'persona-form';
-
-  const labelRow = document.createElement('div');
-  labelRow.className = 'persona-form-row';
-  const labelInput = document.createElement('input');
-  labelInput.type = 'text';
-  labelInput.className = 'persona-form-input';
-  labelInput.placeholder = 'Label (e.g. Work SharePoint)';
-  labelInput.value = existing?.label || '';
-  labelInput.maxLength = 50;
-  labelRow.appendChild(labelInput);
-
-  const pathRow = document.createElement('div');
-  pathRow.className = 'persona-form-row export-dest-path-row';
-  const pathInput = document.createElement('input');
-  pathInput.type = 'text';
-  pathInput.className = 'persona-form-input';
-  pathInput.placeholder = 'Folder path (e.g. ~/OneDrive/Shared)';
-  pathInput.value = existing?.path || '';
-  pathInput.spellcheck = false;
-  const browseBtn = document.createElement('button');
-  browseBtn.className = 'workspace-btn';
-  browseBtn.type = 'button';
-  browseBtn.textContent = 'Browse…';
-  browseBtn.addEventListener('click', async () => {
-    const result = await whimAPI.selectFolder({ title: 'Select export destination folder' });
-    if ('path' in result) pathInput.value = result.path;
-  });
-  pathRow.appendChild(pathInput);
-  pathRow.appendChild(browseBtn);
-
-  const formatRow = document.createElement('div');
-  formatRow.className = 'persona-form-row';
-  const formatSelect = document.createElement('select');
-  formatSelect.className = 'persona-form-input';
-  for (const fmt of ['pdf', 'docx', 'md'] as ExportFormat[]) {
-    const opt = document.createElement('option');
-    opt.value = fmt;
-    opt.textContent = `Default format: ${EXPORT_FORMAT_LABELS[fmt]}`;
-    if ((existing?.defaultFormat || 'pdf') === fmt) opt.selected = true;
-    formatSelect.appendChild(opt);
-  }
-  formatRow.appendChild(formatSelect);
-
-  const errorEl = document.createElement('div');
-  errorEl.className = 'persona-form-error hidden';
-
-  const btnRow = document.createElement('div');
-  btnRow.className = 'persona-form-actions';
-
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'persona-form-save';
-  saveBtn.textContent = existing ? 'Save' : 'Add';
-  saveBtn.addEventListener('click', async () => {
-    const label = labelInput.value.trim();
-    const destPath = pathInput.value.trim();
-    const defaultFormat = formatSelect.value as ExportFormat;
-    if (!label) {
-      errorEl.textContent = 'Label is required.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    if (!destPath) {
-      errorEl.textContent = 'Folder path is required.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-
-    if (existing) {
-      exportDestinations = exportDestinations.map(d =>
-        d.id === existing.id ? { ...d, label, path: destPath, defaultFormat } : d);
-    } else {
-      exportDestinations.push({ id: crypto.randomUUID(), label, path: destPath, defaultFormat });
-    }
-
-    const result = await whimAPI.saveExportDestinations(exportDestinations);
-    if ('destinations' in result) exportDestinations = result.destinations;
-    form.remove();
-    renderExportDestinations();
-  });
-
-  const cancelBtn = document.createElement('button');
-  cancelBtn.className = 'persona-form-cancel';
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.addEventListener('click', () => form.remove());
-
-  btnRow.appendChild(saveBtn);
-  btnRow.appendChild(cancelBtn);
-
-  form.appendChild(labelRow);
-  form.appendChild(pathRow);
-  form.appendChild(formatRow);
-  form.appendChild(errorEl);
-  form.appendChild(btnRow);
-
-  exportDestinationsList.appendChild(form);
-  labelInput.focus();
-}
-
-exportDestAddBtn?.addEventListener('click', () => showExportDestForm());
-
-// ── MCP Servers ─────────────────────────────────────────
-const mcpDiscoveredList = document.getElementById('mcp-discovered-list') as HTMLDivElement;
-const mcpCustomList = document.getElementById('mcp-custom-list') as HTMLDivElement;
-const mcpAddBtn = document.getElementById('mcp-add-btn') as HTMLButtonElement;
-let customMcpServers: CustomMcpServer[] = [];
-
-async function loadMcpServers(): Promise<void> {
-  // Load discovered MCPs
-  try {
-    const discovered: DiscoveredMcpServer[] = await whimAPI.listDiscoveredMcp();
-    mcpDiscoveredList.innerHTML = '';
-    for (const s of discovered) {
-      mcpDiscoveredList.appendChild(createMcpCard(s, true));
-    }
-  } catch { mcpDiscoveredList.innerHTML = ''; }
-
-  // Load custom MCPs
-  try {
-    customMcpServers = await whimAPI.listCustomMcp() || [];
-    renderCustomMcpServers();
-  } catch { customMcpServers = []; }
-}
-
-function renderCustomMcpServers(): void {
-  mcpCustomList.innerHTML = '';
-  for (const s of customMcpServers) {
-    mcpCustomList.appendChild(createMcpCard(s, false));
-  }
-}
-
-function createMcpCard(server: DiscoveredMcpServer | CustomMcpServer, isDiscovered: boolean): HTMLElement {
-  const card = document.createElement('div');
-  card.className = 'mcp-card';
-
-  const info = document.createElement('div');
-  info.className = 'mcp-card-info';
-
-  const name = document.createElement('div');
-  name.className = 'mcp-card-name';
-  name.textContent = (server as any).name;
-
-  const meta = document.createElement('div');
-  meta.className = 'mcp-card-meta';
-  const type = (server as any).type || 'stdio';
-  const detail = type === 'http' || type === 'sse'
-    ? ((server as any).url || '')
-    : ((server as any).command || '');
-  meta.textContent = `${type}${detail ? ' · ' + detail : ''}`;
-
-  if (isDiscovered) {
-    const source = document.createElement('span');
-    source.className = 'mcp-card-source';
-    source.textContent = (server as DiscoveredMcpServer).source === 'plugin' ? ' (plugin)' : ' (config)';
-    meta.appendChild(source);
-  }
-
-  info.appendChild(name);
-  info.appendChild(meta);
-  card.appendChild(info);
-
-  if (!isDiscovered) {
-    const delBtn = document.createElement('button');
-    delBtn.className = 'persona-action-btn danger';
-    delBtn.textContent = '✕';
-    delBtn.title = 'Remove';
-    delBtn.addEventListener('click', async () => {
-      customMcpServers = customMcpServers.filter(s => s.name !== (server as CustomMcpServer).name);
-      await whimAPI.saveCustomMcp(customMcpServers);
-      customMcpServers = await whimAPI.listCustomMcp() || [];
-      renderCustomMcpServers();
-    });
-    card.appendChild(delBtn);
-  }
-
-  return card;
-}
-
-function showMcpForm(): void {
-  // The form is rendered with class `persona-form` — matching on `.mcp-form`
-  // here never hit, so repeated "+ Add" clicks stacked duplicate forms.
-  const prev = mcpCustomList.querySelector('.persona-form');
-  if (prev) prev.remove();
-
-  const form = document.createElement('div');
-  form.className = 'persona-form';
-
-  // Name
-  const nameRow = document.createElement('div');
-  nameRow.className = 'persona-form-row';
-  const nameInput = document.createElement('input');
-  nameInput.type = 'text';
-  nameInput.className = 'persona-form-input';
-  nameInput.placeholder = 'Server name';
-  nameRow.appendChild(nameInput);
-
-  // Type select
-  const typeRow = document.createElement('div');
-  typeRow.className = 'persona-form-row';
-  const typeLabel = document.createElement('label');
-  typeLabel.className = 'persona-form-label';
-  typeLabel.textContent = 'Type';
-  const typeSelect = document.createElement('select');
-  typeSelect.className = 'persona-form-select';
-  for (const t of ['stdio', 'http', 'sse']) {
-    const opt = document.createElement('option');
-    opt.value = t;
-    opt.textContent = t;
-    typeSelect.appendChild(opt);
-  }
-  typeRow.appendChild(typeLabel);
-  typeRow.appendChild(typeSelect);
-
-  // Command (for stdio)
-  const cmdRow = document.createElement('div');
-  cmdRow.className = 'persona-form-row';
-  const cmdInput = document.createElement('input');
-  cmdInput.type = 'text';
-  cmdInput.className = 'persona-form-input';
-  cmdInput.placeholder = 'Command (e.g., npx -y @modelcontextprotocol/server-github)';
-  cmdRow.appendChild(cmdInput);
-
-  // URL (for http/sse)
-  const urlRow = document.createElement('div');
-  urlRow.className = 'persona-form-row hidden';
-  const urlInput = document.createElement('input');
-  urlInput.type = 'text';
-  urlInput.className = 'persona-form-input';
-  urlInput.placeholder = 'URL (e.g., http://localhost:3000/mcp)';
-  urlRow.appendChild(urlInput);
-
-  typeSelect.addEventListener('change', () => {
-    const isRemote = typeSelect.value === 'http' || typeSelect.value === 'sse';
-    cmdRow.classList.toggle('hidden', isRemote);
-    urlRow.classList.toggle('hidden', !isRemote);
-  });
-
-  // Error
-  const errorEl = document.createElement('div');
-  errorEl.className = 'persona-form-error hidden';
-
-  // Buttons
-  const btnRow = document.createElement('div');
-  btnRow.className = 'persona-form-actions';
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'persona-form-save';
-  saveBtn.textContent = 'Add';
-  saveBtn.addEventListener('click', async () => {
-    const name = nameInput.value.trim();
-    const type = typeSelect.value as 'stdio' | 'http' | 'sse';
-    const command = cmdInput.value.trim();
-    const url = urlInput.value.trim();
-
-    if (!name) {
-      errorEl.textContent = 'Name is required.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    if (customMcpServers.some(s => s.name === name)) {
-      errorEl.textContent = 'A server with this name already exists.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    if (type === 'stdio' && !command) {
-      errorEl.textContent = 'Command is required for stdio servers.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    if ((type === 'http' || type === 'sse') && !url) {
-      errorEl.textContent = 'URL is required for remote servers.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-
-    const entry: CustomMcpServer = {
-      name,
-      type,
-      tools: ['*'],
-      ...(type === 'stdio' ? { command, args: [] } : { url }),
-    };
-
-    customMcpServers.push(entry);
-    const result = await whimAPI.saveCustomMcp(customMcpServers);
-    if (result && 'error' in result) {
-      customMcpServers = customMcpServers.filter(s => s !== entry);
-      errorEl.textContent = result.error;
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    // Adopt the persisted list — main-side validation may normalize or drop
-    // entries, and keeping the optimistic copy would show rows that aren't
-    // actually saved.
-    customMcpServers = await whimAPI.listCustomMcp() || [];
-    renderCustomMcpServers();
-  });
-
-  const cancelBtn = document.createElement('button');
-  cancelBtn.className = 'persona-form-cancel';
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.addEventListener('click', () => form.remove());
-
-  btnRow.appendChild(saveBtn);
-  btnRow.appendChild(cancelBtn);
-
-  form.appendChild(nameRow);
-  form.appendChild(typeRow);
-  form.appendChild(cmdRow);
-  form.appendChild(urlRow);
-  form.appendChild(errorEl);
-  form.appendChild(btnRow);
-
-  mcpCustomList.appendChild(form);
-  nameInput.focus();
-}
-
-mcpAddBtn.addEventListener('click', showMcpForm);
-
-// ── CLI Tools ───────────────────────────────────────────
-const cliToolsList = document.getElementById('cli-tools-list') as HTMLDivElement;
-const cliToolAddBtn = document.getElementById('cli-tool-add-btn') as HTMLButtonElement;
-let cliTools: CliToolDefinition[] = [];
-
-async function loadCliTools(): Promise<void> {
-  try {
-    cliTools = await whimAPI.listCliTools() || [];
-    renderCliTools();
-  } catch { cliTools = []; }
-}
-
-function renderCliTools(): void {
-  cliToolsList.innerHTML = '';
-  for (const tool of cliTools) {
-    cliToolsList.appendChild(createCliToolCard(tool));
-  }
-}
-
-function createCliToolCard(tool: CliToolDefinition): HTMLElement {
-  const card = document.createElement('div');
-  card.className = 'mcp-card';
-
-  const info = document.createElement('div');
-  info.className = 'mcp-card-info';
-
-  const name = document.createElement('div');
-  name.className = 'mcp-card-name';
-  name.textContent = tool.name;
-
-  const desc = document.createElement('div');
-  desc.className = 'mcp-card-meta';
-  desc.textContent = tool.description;
-
-  info.appendChild(name);
-  info.appendChild(desc);
-
-  const actions = document.createElement('div');
-  actions.className = 'persona-card-actions';
-
-  const editBtn = document.createElement('button');
-  editBtn.className = 'persona-action-btn';
-  editBtn.textContent = '✎';
-  editBtn.title = 'Edit';
-  editBtn.addEventListener('click', () => showCliToolForm(tool));
-
-  const delBtn = document.createElement('button');
-  delBtn.className = 'persona-action-btn danger';
-  delBtn.textContent = '✕';
-  delBtn.title = 'Remove';
-  delBtn.addEventListener('click', async () => {
-    cliTools = cliTools.filter(t => t.name !== tool.name);
-    await whimAPI.saveCliTools(cliTools);
-    cliTools = await whimAPI.listCliTools() || [];
-    renderCliTools();
-  });
-
-  actions.appendChild(editBtn);
-  actions.appendChild(delBtn);
-  card.appendChild(info);
-  card.appendChild(actions);
-  return card;
-}
-
-function showCliToolForm(existing?: CliToolDefinition): void {
-  const prev = cliToolsList.querySelector('.persona-form');
-  if (prev) prev.remove();
-
-  const form = document.createElement('div');
-  form.className = 'persona-form';
-
-  const nameRow = document.createElement('div');
-  nameRow.className = 'persona-form-row';
-  const nameInput = document.createElement('input');
-  nameInput.type = 'text';
-  nameInput.className = 'persona-form-input';
-  nameInput.placeholder = 'Command name (e.g., gh)';
-  nameInput.value = existing?.name || '';
-  nameRow.appendChild(nameInput);
-
-  const descRow = document.createElement('div');
-  descRow.className = 'persona-form-row';
-  const descInput = document.createElement('textarea');
-  descInput.className = 'persona-form-textarea';
-  descInput.placeholder = 'Description (e.g., Used for GitHub operations including git, issues, pull requests, actions)';
-  descInput.value = existing?.description || '';
-  descInput.rows = 2;
-  descInput.maxLength = 500;
-  descRow.appendChild(descInput);
-
-  const errorEl = document.createElement('div');
-  errorEl.className = 'persona-form-error hidden';
-
-  const btnRow = document.createElement('div');
-  btnRow.className = 'persona-form-actions';
-  const saveBtn = document.createElement('button');
-  saveBtn.className = 'persona-form-save';
-  saveBtn.textContent = existing ? 'Save' : 'Add';
-  saveBtn.addEventListener('click', async () => {
-    const name = nameInput.value.trim();
-    const description = descInput.value.trim();
-
-    if (!name) {
-      errorEl.textContent = 'Command name is required.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    if (!description) {
-      errorEl.textContent = 'Description is required.';
-      errorEl.classList.remove('hidden');
-      return;
-    }
-    const duplicate = cliTools.find(t => t.name === name && t.name !== (existing?.name || ''));
-    if (duplicate) {
-      errorEl.textContent = `Tool "${name}" already exists.`;
-      errorEl.classList.remove('hidden');
-      return;
-    }
-
-    if (existing) {
-      cliTools = cliTools.map(t => t.name === existing.name ? { name, description } : t);
-    } else {
-      cliTools = [...cliTools, { name, description }];
-    }
-
-    const result = await whimAPI.saveCliTools(cliTools);
-    if (result && 'error' in result) {
-      errorEl.textContent = result.error;
-      errorEl.classList.remove('hidden');
-    }
-    cliTools = await whimAPI.listCliTools() || [];
-    renderCliTools();
-  });
-
-  const cancelBtn = document.createElement('button');
-  cancelBtn.className = 'persona-form-cancel';
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.addEventListener('click', () => form.remove());
-
-  btnRow.appendChild(saveBtn);
-  btnRow.appendChild(cancelBtn);
-
-  form.appendChild(nameRow);
-  form.appendChild(descRow);
-  form.appendChild(errorEl);
-  form.appendChild(btnRow);
-
-  if (existing) {
-    const cards = cliToolsList.querySelectorAll('.mcp-card');
-    const idx = cliTools.findIndex(t => t.name === existing.name);
-    if (cards[idx]) {
-      cards[idx].after(form);
-    } else {
-      cliToolsList.appendChild(form);
-    }
-  } else {
-    cliToolsList.appendChild(form);
-  }
-
-  nameInput.focus();
-}
-
-cliToolAddBtn.addEventListener('click', () => showCliToolForm());
 
 // ── Voice Input (spacebar-triggered) ────────────────────
 let mediaRecorder: MediaRecorder | null = null;
@@ -2897,6 +1604,7 @@ function stopRecording(): void {
 }
 
 function setInputState(state: 'idle' | 'recording' | 'transcribing'): void {
+  voiceInputState = state;
   descInput.classList.remove('recording', 'transcribing');
   recordingIndicator.classList.add('hidden');
   const submitBtn = document.getElementById('submit-btn') as HTMLButtonElement | null;
@@ -3101,7 +1809,8 @@ async function maybeRefreshPersonas(): Promise<void> {
   mentionPersonasReloadAt = now;
   mentionPersonasReloadInflight = true;
   try {
-    const fresh = await whimAPI.listPersonas() || [];
+    await loadPersonasSnapshot(bridgeApi);
+    const fresh = personaStore.getState().personas;
     const changed = fresh.length !== personas.length
       || fresh.some((p, i) => p.handle !== personas[i]?.handle);
     if (changed) {
@@ -3125,7 +1834,8 @@ async function maybeRefreshSkills(): Promise<void> {
   mentionSkillsReloadAt = now;
   mentionSkillsReloadInflight = true;
   try {
-    const fresh = await whimAPI.listSkills();
+    await loadSkillsSnapshot(bridgeApi);
+    const fresh = skillStore.getState().skills;
     const changed = fresh.length !== cachedSkills.length
       || fresh.some((skill, i) => skill.id !== cachedSkills[i]?.id || skill.updated_at !== cachedSkills[i]?.updated_at);
     if (changed) {
@@ -3240,17 +1950,27 @@ descInput.addEventListener('input', () => {
     if (currentFilter === 'agents') renderAgentsList();
     else if (currentFilter === 'skills') renderSkillsList();
     else render();
+    void loadSpacesSnapshot(bridgeApi, { invalidate: true, cursor: undefined }).catch(error => showStatus(String(error), true));
     return;
   }
 
   searchTimeout = setTimeout(async () => {
+    const generation = getWorkspaceGeneration();
+    const filter = currentFilter;
     if (currentFilter === 'agents') {
       renderAgentsList(query);
     } else if (currentFilter === 'skills') {
       renderSkillsList(query);
     } else {
-      searchResults = await whimAPI.searchSpaces(query);
-      spaceStore.setSearchResults(searchResults);
+      try {
+        await loadSpacesSnapshot(bridgeApi, { invalidate: true, cursor: undefined });
+      } catch (error) {
+        if (generation === getWorkspaceGeneration() && query === activeSearchQuery) showStatus(String(error), true);
+        return;
+      }
+      if (generation !== getWorkspaceGeneration() || !searchMode
+        || query !== activeSearchQuery || filter !== currentFilter) return;
+      searchResults = spaceStore.getState().searchResults;
       selectedIndex = -1;
       render();
     }
@@ -3286,6 +2006,7 @@ function exitSearchMode(): void {
   spaceStore.setSearchResults(null);
   activeSearchQuery = '';
   spaceStore.setActiveSearchQuery('');
+  void loadSpacesSnapshot(bridgeApi, { invalidate: true, cursor: undefined }).catch(error => showStatus(String(error), true));
   selectedIndex = -1;
   inputHints.classList.remove('hidden');
   updatePromptHint();
@@ -3418,160 +2139,23 @@ descInput.addEventListener('keydown', (e) => {
   }
 });
 
-// ── Text refinement animation ───────────────────────────
-function animateTextReplace(el: HTMLElement, oldText: string, newText: string, duration = 600): Promise<void> {
-  return new Promise(resolve => {
-    const startTime = performance.now();
-    const maxLen = Math.max(oldText.length, newText.length);
-
-    function step(now: number) {
-      const elapsed = now - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      const eased = 1 - Math.pow(1 - progress, 3);
-      const revealedCount = Math.floor(eased * newText.length);
-
-      let html = '';
-      for (let i = 0; i < newText.length; i++) {
-        if (i < revealedCount) {
-          // Already placed — check if it just appeared (within last few chars of the wave)
-          const justRevealed = i >= revealedCount - 3;
-          if (justRevealed) {
-            html += `<span class="letter-glow">${newText[i] === ' ' ? '&nbsp;' : escapeHtmlChar(newText[i])}</span>`;
-          } else {
-            html += newText[i] === ' ' ? ' ' : escapeHtmlChar(newText[i]);
-          }
-        } else {
-          // Not yet revealed — show old char or nothing
-          if (i < oldText.length) {
-            html += `<span class="letter-fading">${oldText[i] === ' ' ? '&nbsp;' : escapeHtmlChar(oldText[i])}</span>`;
-          }
-        }
-      }
-
-      el.innerHTML = html;
-
-      if (progress < 1) {
-        requestAnimationFrame(step);
-      } else {
-        el.textContent = newText;
-        el.classList.add('refined');
-        setTimeout(() => el.classList.remove('refined'), 600);
-        resolve();
-      }
-    }
-
-    requestAnimationFrame(step);
-  });
-}
-
-function escapeHtmlChar(ch: string): string {
-  if (ch === '<') return '&lt;';
-  if (ch === '>') return '&gt;';
-  if (ch === '&') return '&amp;';
-  if (ch === '"') return '&quot;';
-  return ch;
-}
-
-async function animateRefinement(spaceId: string): Promise<void> {
-  const oldIntent = spaces.find(i => i.id === spaceId);
-  const oldText = oldIntent?.description || '';
-
-  const updatedSpaces = await whimAPI.list();
-  const newSpace = updatedSpaces.find(i => i.id === spaceId);
-
-  if (!newSpace || oldText === newSpace.description) {
-    spaces = updatedSpaces;
-    render();
-    return;
-  }
-
-  const itemEl = listEl.querySelector(`[data-id="${spaceId}"]`);
-  const descEl = itemEl?.querySelector('.whim-desc') as HTMLElement | null;
-
-  if (!descEl) {
-    spaces = updatedSpaces;
-    render();
-    return;
-  }
-
-  itemEl?.classList.remove('processing');
-  const badge = itemEl?.querySelector('.processing-badge');
-  if (badge) badge.remove();
-
-  await animateTextReplace(descEl, oldText, newSpace.description);
-
-  // Fade in new meta
-  const metaEl = itemEl?.querySelector('.whim-meta') as HTMLElement | null;
-  if (metaEl) {
-    const dueInfo = formatDueDate(newSpace.due_at_utc, newSpace.due_at);
-    const hasDue = dueInfo.text !== '';
-    const isRecurring = !!newSpace.recurrence;
-    let metaHtml = '';
-    if (newSpace.client) metaHtml += `<span class="meta-fade-in">👤 ${escapeHtml(newSpace.client)}</span>`;
-    if (hasDue) metaHtml += `<span class="meta-fade-in due-badge ${dueInfo.overdue ? 'overdue' : ''}">📅 ${escapeHtml(dueInfo.text)}</span>`;
-    if (isRecurring) metaHtml += `<span class="meta-fade-in recurring-badge">↻</span>`;
-    metaHtml += `<span>${timeAgo(newSpace.updated_at)}</span>`;
-    metaEl.innerHTML = metaHtml;
-  }
-
-  spaces = updatedSpaces;
-}
-
 // ── Space CRUD ─────────────────────────────────────────
-let loadSpacesRequestId = 0;
 
 /**
  * Optimistically add a freshly-created space to the store so its row renders
  * immediately, without the full three-call loadSpaces() reload. Background AI
- * refinement (space:processed → animateRefinement) reconciles the row in place.
+ * refinement arrives through the bridge and reconciles the row in place.
  */
 function insertSpaceOptimistically(space: Space): void {
   spaceStore.upsertSpace(space);
   spaces = [...spaceStore.getState().spaces];
-  updateFocusBanner();
+  if (spaceStore.getState().hydrated) updateFocusBanner();
 }
 
 async function loadSpaces(): Promise<void> {
-  const requestId = ++loadSpacesRequestId;
-
-  // Atomic snapshot via the React migration's IPC bridge: fetches list +
-  // getActiveSessions + listAllAgents in parallel and applies them to the
-  // stores atomically (per-store stale-fetch guards drop late results).
-  await loadSpacesSnapshot(bridgeApi);
-
-  // Mirror store state into the legacy module vars so cross-file readers
-  // (capture form, settings, canvas, chat) continue to work during the
-  // migration. Phase 7 collapses these away.
-  if (requestId !== loadSpacesRequestId) return;
-  spaces = [...spaceStore.getState().spaces];
-  activeSessionSpaces = new Set(agentStore.getState().activeSessionSpaces);
-  agentsBySpace = agentStore.getAgentsBySpace();
-
-  updateFocusBanner();
-}
-
-// ── Debounced refresh for agent status events ──────────
-// Coalesces rapid-fire agent status/completion IPC events into a single
-// sidebar re-render, preventing the full innerHTML replacement from running
-// on every individual event (which causes visible flicker).
-let _agentRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-let _agentListRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-const AGENT_REFRESH_DELAY_MS = 300;
-
-function scheduleAgentSpacesRefresh(): void {
-  if (_agentRefreshTimer) clearTimeout(_agentRefreshTimer);
-  _agentRefreshTimer = setTimeout(() => {
-    _agentRefreshTimer = null;
-    if (currentFilter === 'open') loadSpaces();
-  }, AGENT_REFRESH_DELAY_MS);
-}
-
-function scheduleAgentListRefresh(): void {
-  if (_agentListRefreshTimer) clearTimeout(_agentListRefreshTimer);
-  _agentListRefreshTimer = setTimeout(() => {
-    _agentListRefreshTimer = null;
-    if (currentFilter === 'agents') renderAgentsList();
-  }, AGENT_REFRESH_DELAY_MS);
+  // Mutation callers invalidate an older flight; window/show readers use the
+  // bridge's shared hydration path without creating another refresh owner.
+  await loadSpacesSnapshot(bridgeApi, { invalidate: true });
 }
 
 function render(): void {
@@ -3596,9 +2180,9 @@ function render(): void {
     // Normal mode — open spaces
     displayList = spaces.filter(i => i.status !== 'done');
   }
-  displayedSpaces = displayList;
+  if (!spaceRowsOwnedByReact) displayedSpaces = displayList;
 
-  countEl.textContent = String(spaces.filter(i => i.status !== 'done').length);
+  countEl.textContent = String(spaceStore.getState().page?.counts.open ?? spaces.filter(i => i.status !== 'done').length);
 
   // DOM rendering is now owned by React (mounted on #space-list by the
   // views/mount.tsx module). The store mutations earlier in this call chain
@@ -3612,20 +2196,13 @@ function render(): void {
 }
 
 async function renderHistoryView(): Promise<void> {
-  const gen = ++renderGeneration;
   displayedSpaces = [];
-  countEl.textContent = String(spaces.filter(i => i.status !== 'done').length);
+  countEl.textContent = String(spaceStore.getState().page?.counts.open ?? spaces.filter(i => i.status !== 'done').length);
 
   // React owns the History view DOM (HistoryView component reads spaces from
   // spaceStore and events from historyStore). We still fetch events here so
   // the store is populated for the React tree.
-  try {
-    const events = await whimAPI.listEvents(200);
-    if (gen !== renderGeneration) return;
-    historyStore.setEvents(events);
-  } catch {
-    /* leave existing events in place */
-  }
+  await loadHistorySnapshot(bridgeApi);
 }
 
 function renderAgentSummary(_agents: Array<{ status: string; createdAt?: string }>): void {
@@ -3690,6 +2267,7 @@ function subscribeAgentChat(agentId: string): void {
         status: 'running' as const,
       };
       steps.push(step);
+      if (steps.length > WORKER_PREVIEW_STEPS) steps.splice(0, steps.length - WORKER_PREVIEW_STEPS);
       agentSteps.set(agentId, steps);
       agentStore.addStep(agentId, step);
       updateAgentCardSteps(agentId);
@@ -3697,7 +2275,7 @@ function subscribeAgentChat(agentId: string): void {
       const steps = agentSteps.get(agentId);
       if (steps) {
         const step = steps.find(s => s.toolCallId === event.toolCallId);
-        if (step && event.message) step.label = event.message;
+        if (step && event.message) step.label = String(event.message).slice(0, 160);
         agentStore.setSteps(agentId, [...steps]);
         updateAgentCardSteps(agentId);
       }
@@ -3768,38 +2346,24 @@ function updateAgentCardApproval(_agentId: string): void {
 
 // ── Skills rendering ────────────────────────────────────
 
-interface SkillData {
-  id: string;
-  name: string;
-  description: string;
-  emoji: string;
-  folder: string;
-  filePath: string;
-  schedule: string | null;
-  schedule_time: string | null;
-  schedule_day: number | null;
-  next_run_at: string | null;
-  last_run_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
+type SkillData = SharedSkill;
 
 let cachedSkills: SkillData[] = [];
 
 async function loadSkills(): Promise<SkillData[]> {
-  try {
-    cachedSkills = await whimAPI.listSkills();
-    skillStore.setSkills(cachedSkills as unknown as SharedSkill[]);
-    return cachedSkills;
-  } catch {
-    return cachedSkills;
-  }
+  await loadSkillsSnapshot(bridgeApi, { force: isCanvasMode });
+  return [...skillStore.getState().skills];
+}
+
+async function readCanvasPersonas(): Promise<AgentPersona[]> {
+  await loadPersonasSnapshot(bridgeApi, { force: true });
+  return [...personaStore.getState().personas];
 }
 
 async function renderSkillsList(filterQuery?: string): Promise<void> {
   const gen = ++renderGeneration;
   displayedSpaces = [];
-  countEl.textContent = String(spaces.filter(i => i.status !== 'done').length);
+  countEl.textContent = String(spaceStore.getState().page?.counts.open ?? spaces.filter(i => i.status !== 'done').length);
 
   // React owns the skills list DOM (SkillsList component reads from
   // skillStore). loadSkills() populates the store; client-side filtering
@@ -3836,6 +2400,7 @@ async function openSkillEditor(skillId: string): Promise<void> {
   }
 
   // ── Below draws the canvas in this window ──
+  await loadCanvasFeature();
   const result = await whimAPI.readSkill(skillId);
   if ('error' in result) {
     return;
@@ -3886,7 +2451,8 @@ async function openSkillEditor(skillId: string): Promise<void> {
 
 async function saveSkillFromCanvas(skillId: string, content: string): Promise<void> {
   const { frontmatter, body } = parseFrontmatter<Record<string, unknown>>(content);
-  await whimAPI.writeSkill(skillId, frontmatter, body);
+  const result = await whimAPI.writeSkill(skillId, frontmatter, body);
+  if (result && 'error' in result) throw new Error(result.error || 'Skill save failed; local text retained.');
 }
 
 async function openSkillFolder(skillId: string): Promise<void> {
@@ -3977,7 +2543,7 @@ async function invokeSkillFromPrompt(raw: string): Promise<boolean> {
     return true;
   }
 
-  descInput.value = '';
+  if (descInput.value === raw) descInput.value = '';
   descInput.style.height = 'auto';
   selectedPersonaHandle = null;
   selectedSkillMentionId = null;
@@ -4002,15 +2568,12 @@ async function runSkillNow(skillId: string): Promise<void> {
   closeSchedulePicker();
   const skill = cachedSkills.find(s => s.id === skillId);
   showStatus(`▶ Running ${skill?.name || 'skill'}...`);
-  await launchSkillAsSpace(skillId, 'skill-card');
-}
-
-// Wire up skills changed event
-whimAPI.onSkillsChanged(() => {
-  if (currentFilter === 'skills') {
-    renderSkillsList();
+  try {
+    await launchSkillAsSpace(skillId, 'skill-card');
+  } catch (error) {
+    showStatus(`Failed: ${error instanceof Error ? error.message : String(error)}`, true);
   }
-});
+}
 
 // Expose skill functions to onclick handlers
 (window as any).createNewSkill = createNewSkill;
@@ -4023,7 +2586,6 @@ whimAPI.onSkillsChanged(() => {
 
 // ── Skill Schedule Helpers ──────────────────────────────
 
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const DAY_NAMES_FULL = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 function formatTime12Hour(time: string | null): string {
@@ -4052,244 +2614,62 @@ function formatScheduleLabel(frequency: string, time: string | null, day: number
 }
 
 function formatRelativeDate(isoDate: string): string {
-  const date = new Date(isoDate);
-  const now = new Date();
-  const diffMs = date.getTime() - now.getTime();
-  const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-  if (diffHours < 1) return 'soon';
-  if (diffHours < 24) return `in ${diffHours}h`;
-  const diffDays = Math.round(diffHours / 24);
-  if (diffDays === 1) return 'tomorrow';
-  if (diffDays < 7) return `in ${diffDays}d`;
-  return date.toLocaleDateString();
+  return formatScheduleDate(isoDate);
 }
 
-let activeSchedulePickerSkillId: string | null = null;
-
-const WHIM_REPORT_CANVAS_ID = 'whim-report';
-
 function openSchedulePicker(skillId: string): void {
-  // Close any existing picker
   closeSchedulePicker();
-  activeSchedulePickerSkillId = skillId;
-
   const skill = cachedSkills.find(s => s.id === skillId);
-  if (!skill) return;
-
-  const reportsOn = !!skill.canvas;
-  const template = skill.canvas_template || null;
-  // A skill that ships its own template offers a choice; one that does not
-  // would render a select with a single option, so it does not get one.
-  const templateOptions = template
-    ? `
-        <label>Layout</label>
-        <select id="schedule-canvas-template">
-          <option value="${WHIM_REPORT_CANVAS_ID}" ${skill.canvas !== template.id ? 'selected' : ''}>Built-in report</option>
-          <option value="${escapeHtml(template.id)}" ${skill.canvas === template.id ? 'selected' : ''}>${escapeHtml(template.displayName)}</option>
-        </select>`
-    : '';
-
-  const overlay = document.createElement('div');
-  overlay.id = 'schedule-picker-overlay';
-  overlay.className = 'schedule-picker-overlay';
-  overlay.innerHTML = `
-    <div class="schedule-picker" onclick="event.stopPropagation()">
-      <div class="schedule-picker-header">
-        <span>Schedule: ${escapeHtml(skill.name)}</span>
-        <button class="schedule-picker-close" onclick="closeSchedulePicker()">✕</button>
-      </div>
-      <div class="schedule-picker-body">
-        <label>Frequency</label>
-        <select id="schedule-frequency">
-          <option value="">Off</option>
-          <option value="daily" ${skill.schedule === 'daily' ? 'selected' : ''}>Daily</option>
-          <option value="weekdays" ${skill.schedule === 'weekdays' ? 'selected' : ''}>Weekdays</option>
-          <option value="weekly" ${skill.schedule === 'weekly' ? 'selected' : ''}>Weekly</option>
-          <option value="biweekly" ${skill.schedule === 'biweekly' ? 'selected' : ''}>Every 2 weeks</option>
-          <option value="monthly" ${skill.schedule === 'monthly' ? 'selected' : ''}>Monthly</option>
-        </select>
-
-        <label>Time</label>
-        <input type="time" id="schedule-time" value="${skill.schedule_time || '09:00'}" />
-
-        <div id="schedule-day-row" style="${skill.schedule === 'weekly' || skill.schedule === 'biweekly' ? '' : 'display:none'}">
-          <label>Day</label>
-          <select id="schedule-day">
-            ${DAY_NAMES.map((name, i) => `<option value="${i}" ${(skill.schedule_day ?? 1) === i ? 'selected' : ''}>${name}</option>`).join('')}
-          </select>
-        </div>
-
-        <div class="schedule-section">
-          <label class="schedule-check">
-            <input type="checkbox" id="schedule-canvas" ${reportsOn ? 'checked' : ''} />
-            <span>Publish a report</span>
-          </label>
-          <div class="schedule-hint">The run writes a page you can open later from the space, the tray, or a notification.</div>
-          <div id="schedule-canvas-options" style="${reportsOn ? '' : 'display:none'}">
-            ${templateOptions}
-            <label>Space</label>
-            <select id="schedule-space-mode">
-              <option value="reuse" ${skill.space_mode !== 'new' ? 'selected' : ''}>Refresh one space</option>
-              <option value="new" ${skill.space_mode === 'new' ? 'selected' : ''}>New space each run</option>
-            </select>
-          </div>
-        </div>
-
-        ${skill.next_run_at ? `<div class="schedule-next-run">Next run: ${formatRelativeDate(skill.next_run_at)}</div>` : ''}
-        ${skill.schedule ? (skill.last_run_at ? `<div class="schedule-next-run">Last run: ${formatRelativeDate(skill.last_run_at)}</div>` : '<div class="schedule-next-run schedule-no-runs">Never run yet</div>') : ''}
-      </div>
-      <div class="schedule-picker-footer">
-        <button class="schedule-run-btn" onclick="runScheduledSkillNow()">▶ Run now</button>
-        <span class="schedule-footer-spacer"></span>
-        ${skill.schedule ? '<button class="schedule-clear-btn" onclick="clearSchedule()">Remove schedule</button>' : ''}
-        <button class="schedule-save-btn" onclick="saveSchedule()">Save</button>
-      </div>
-    </div>
-  `;
-
-  overlay.addEventListener('click', closeSchedulePicker);
-
+  if (!skill) {
+    showStatus('Skill not found', true);
+    return;
+  }
+  const previousFocus = document.activeElement;
+  const overlay = createSchedulePicker(skill, whimAPI, {
+    onClose: () => {
+      overlay.remove();
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
+    },
+    onSaved: (updatedSkill) => {
+      cachedSkills = cachedSkills.map(item => item.id === updatedSkill.id ? updatedSkill : item);
+      skillStore.setSkills(cachedSkills);
+      overlay.remove();
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
+      showStatus(updatedSkill.schedule ? '✓ Schedule saved' : '✓ Schedule removed');
+      setTimeout(hideStatus, 2000);
+      if (canvasSkillId) updateCanvasMenuContext(true);
+    },
+    onRunNow: () => { void runSkillNow(skillId); },
+  });
   document.body.appendChild(overlay);
-
-  // Toggle day row visibility when frequency changes
-  const freqSelect = document.getElementById('schedule-frequency') as HTMLSelectElement;
-  freqSelect.addEventListener('change', () => {
-    const dayRow = document.getElementById('schedule-day-row') as HTMLDivElement;
-    dayRow.style.display = (freqSelect.value === 'weekly' || freqSelect.value === 'biweekly') ? '' : 'none';
-  });
-
-  const canvasCheck = document.getElementById('schedule-canvas') as HTMLInputElement;
-  canvasCheck.addEventListener('change', () => {
-    const options = document.getElementById('schedule-canvas-options') as HTMLDivElement;
-    options.style.display = canvasCheck.checked ? '' : 'none';
-  });
 }
 
 function closeSchedulePicker(): void {
   const existing = document.getElementById('schedule-picker-overlay');
   if (existing) existing.remove();
-  activeSchedulePickerSkillId = null;
-}
-
-/**
- * Persist the report settings the picker is showing.
- *
- * Kept separate from the schedule write because reports are not a scheduling
- * concept: a skill with no schedule at all can still publish one when you run
- * it by hand, so turning "Off" the frequency must not turn reports off too.
- */
-async function saveCanvasSettingsFromPicker(skillId: string): Promise<void> {
-  const canvasCheck = document.getElementById('schedule-canvas') as HTMLInputElement | null;
-  if (!canvasCheck) return;
-
-  if (!canvasCheck.checked) {
-    await whimAPI.setSkillCanvas(skillId, null, null);
-    return;
-  }
-
-  const templateSelect = document.getElementById('schedule-canvas-template') as HTMLSelectElement | null;
-  const modeSelect = document.getElementById('schedule-space-mode') as HTMLSelectElement | null;
-  const canvas = templateSelect?.value || WHIM_REPORT_CANVAS_ID;
-  const spaceMode = modeSelect?.value === 'new' ? 'new' : 'reuse';
-  await whimAPI.setSkillCanvas(skillId, canvas, spaceMode);
-}
-
-async function saveSchedule(): Promise<void> {
-  if (!activeSchedulePickerSkillId) return;
-  const skillId = activeSchedulePickerSkillId;
-
-  const freqSelect = document.getElementById('schedule-frequency') as HTMLSelectElement;
-  const timeInput = document.getElementById('schedule-time') as HTMLInputElement;
-  const daySelect = document.getElementById('schedule-day') as HTMLSelectElement;
-
-  const frequency = freqSelect.value;
-  await saveCanvasSettingsFromPicker(skillId);
-
-  if (!frequency) {
-    await whimAPI.clearSkillSchedule(skillId);
-    closeSchedulePicker();
-    showStatus('✓ Saved');
-    setTimeout(hideStatus, 2000);
-    cachedSkills = await whimAPI.listSkills();
-    if (currentFilter === 'skills') renderSkillsList();
-    if (canvasSkillId) updateCanvasMenuContext(true);
-    return;
-  }
-
-  const time = timeInput.value || '09:00';
-  const day = (frequency === 'weekly' || frequency === 'biweekly') ? parseInt(daySelect.value, 10) : null;
-
-  await whimAPI.setSkillSchedule(skillId, frequency, time, day);
-  closeSchedulePicker();
-  showStatus('✓ Schedule saved');
-  setTimeout(hideStatus, 2000);
-  cachedSkills = await whimAPI.listSkills();
-  if (currentFilter === 'skills') renderSkillsList();
-  // Refresh the canvas overflow menu label if we're viewing this skill
-  if (canvasSkillId) updateCanvasMenuContext(true);
-}
-
-/** Save what the picker is showing, then run the skill straight away. */
-async function runScheduledSkillNow(): Promise<void> {
-  if (!activeSchedulePickerSkillId) return;
-  const skillId = activeSchedulePickerSkillId;
-  await saveCanvasSettingsFromPicker(skillId);
-  cachedSkills = await whimAPI.listSkills();
-  await runSkillNow(skillId);
-}
-
-async function clearSchedule(): Promise<void> {
-  if (!activeSchedulePickerSkillId) return;
-
-  await whimAPI.clearSkillSchedule(activeSchedulePickerSkillId);
-  closeSchedulePicker();
-  showStatus('✓ Schedule removed');
-  setTimeout(hideStatus, 2000);
-  cachedSkills = await whimAPI.listSkills();
-  if (currentFilter === 'skills') renderSkillsList();
-  if (canvasSkillId) updateCanvasMenuContext(true);
 }
 
 (window as any).closeSchedulePicker = closeSchedulePicker;
-(window as any).saveSchedule = saveSchedule;
-(window as any).clearSchedule = clearSchedule;
-(window as any).runScheduledSkillNow = runScheduledSkillNow;
 
 async function renderAgentsList(filterQuery?: string): Promise<void> {
   const gen = ++renderGeneration;
   displayedSpaces = [];
-  countEl.textContent = String(spaces.filter(i => i.status !== 'done').length);
+  countEl.textContent = String(spaceStore.getState().page?.counts.open ?? spaces.filter(i => i.status !== 'done').length);
 
   // React owns the agents list DOM (AgentsList component reads from
   // agentStore + spaceStore + personaStore). We still need to fetch the
   // agents into the store and keep legacy module-level state
   // (renderedAgents, agentApprovals, agentYoloState) in sync for the
   // remaining non-list callers in this file.
-  let allAgents: Array<{ agentId: string; sessionId: string; status: string; summary: string; selectedText: string; quotedText?: string; spaceId: string; createdAt?: string; pendingApprovalId?: string | null; pendingPermissionKind?: string | null; source?: 'sdk' | 'cli' | 'cca'; personaHandle?: string | null; sandboxed?: boolean; yoloMode?: boolean }> = [];
-
-  try {
-    allAgents = await whimAPI.listAllAgents();
-  } catch {
-    // Fallback: iterate spaces
-    for (const space of spaces) {
-      try {
-        const agents = await whimAPI.listAgents(space.id);
-        for (const agent of agents) {
-          allAgents.push({ ...agent, spaceId: space.id });
-        }
-      } catch { /* skip */ }
-    }
-  }
+  await loadAgentsSnapshot(bridgeApi, { invalidate: true });
+  const allAgents = agentStore.getState().agents;
 
   // Bail if user switched away from agents while loading.
   if (gen !== renderGeneration) return;
 
-  // Push the snapshot to agentStore so React re-renders.
-  agentStore.setAgents(allAgents as unknown as Parameters<typeof agentStore.setAgents>[0]);
-
   // Client-side filtering when in search mode (legacy renderedAgents).
   let filteredAgents = allAgents;
-  if (filterQuery) {
+  if (filterQuery && !agentStore.getState().page) {
     const q = filterQuery.toLowerCase();
     filteredAgents = allAgents.filter(a =>
       (a.selectedText || '').toLowerCase().includes(q) ||
@@ -4298,24 +2678,6 @@ async function renderAgentsList(filterQuery?: string): Promise<void> {
   }
   renderedAgents = filteredAgents;
   selectedIndex = -1;
-
-  // Populate approvals + yolo state maps from the API payload.
-  for (const agent of allAgents) {
-    if (agent.status === 'waiting-approval' && agent.pendingApprovalId) {
-      const approval = {
-        requestId: agent.pendingApprovalId,
-        permissionKind: agent.pendingPermissionKind || 'permission',
-        intention: (agent as any).pendingIntention || undefined,
-        path: (agent as any).pendingPath || undefined,
-      };
-      agentApprovals.set(agent.agentId, approval);
-      agentStore.setApproval(agent.agentId, { agentId: agent.agentId, ...approval });
-    }
-    if ((agent as any).yoloMode) {
-      agentYoloState.set(agent.agentId, true);
-      agentStore.setYoloMode(agent.agentId, true);
-    }
-  }
 
   // Subscribe to chat events for live agents so steps + approvals flow.
   for (const agent of allAgents) {
@@ -4391,14 +2753,23 @@ function formatDueDate(due_at_utc: string | null, due_at: string | null): { text
   };
 }
 
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
+let captureFlight: Promise<void> | undefined;
+let voiceInputState: 'idle' | 'recording' | 'transcribing' = 'idle';
+async function submitCapture(): Promise<void> {
   if (searchMode) return;
+  const generation = getWorkspaceGeneration();
   const text = descInput.value.trim();
+  const submittedValue = descInput.value;
+  if (text && !currentWorkspacePath) {
+    showStatus('Select a workspace first; capture text has been kept.', true);
+    return;
+  }
+  if (text) await waitForCaptureStorage(bridgeApi, () => generation === getWorkspaceGeneration());
 
   if (text && await invokeSkillFromPrompt(descInput.value.trim())) {
     return;
   }
+  if (generation !== getWorkspaceGeneration()) return;
 
   // ── Workers tab: launch an agent ──────────────────────
   if (currentFilter === 'agents') {
@@ -4435,17 +2806,16 @@ form.addEventListener('submit', async (e) => {
     showStatus(personaHandleArg ? `⚡ Launching @${personaHandleArg}...` : '⚡ Launching agent...');
 
     const result = await whimAPI.quickLaunchAgent(promptText, personaHandleArg);
+    if (generation !== getWorkspaceGeneration()) return;
     if ('error' in result && result.error) {
       if (result.error === 'no_workspace') {
-        showStatus('Select a workspace directory first');
-        const ws = await whimAPI.selectWorkspace();
-        if (ws.selected) updateWorkspaceDisplay(ws.path!);
+        showStatus('Select a workspace first; capture text has been kept.', true);
       } else {
         showStatus(`Failed: ${result.error}`, true);
       }
       return;
     }
-    descInput.value = '';
+    if (descInput.value === submittedValue) descInput.value = '';
     descInput.style.height = 'auto';
     selectedPersonaHandle = null;
     selectedSkillMentionId = null;
@@ -4462,17 +2832,16 @@ form.addEventListener('submit', async (e) => {
     if (!text) return; // require a description
     showStatus('✨ Creating skill...');
     const result = await whimAPI.createSkillFromPrompt(text);
+    if (generation !== getWorkspaceGeneration()) return;
     if ('error' in result && result.error) {
       if (result.error === 'no_workspace') {
-        showStatus('Select a workspace directory first');
-        const ws = await whimAPI.selectWorkspace();
-        if (ws.selected) updateWorkspaceDisplay(ws.path!);
+        showStatus('Select a workspace first; capture text has been kept.', true);
       } else {
         showStatus(`Failed: ${result.error}`, true);
       }
       return;
     }
-    descInput.value = '';
+    if (descInput.value === submittedValue) descInput.value = '';
     descInput.style.height = 'auto';
     descInput.focus();
     showStatus('✨ Creating skill...');
@@ -4483,8 +2852,6 @@ form.addEventListener('submit', async (e) => {
   // ── Spaces tab: create an space (original behavior) ──
   if (!text) return;
 
-  descInput.value = '';
-  descInput.style.height = 'auto';
   descInput.focus();
   searchResults = null;
   spaceStore.setSearchResults(null);
@@ -4492,43 +2859,45 @@ form.addEventListener('submit', async (e) => {
   // Create as space with body
   queryResult.classList.add('hidden');
   listEl.classList.remove('hidden');
-  const space = await whimAPI.create({ body: text }) as any;
-  if (space.error === 'no_workspace') {
-    showStatus('Select a workspace directory first');
-    const ws = await whimAPI.selectWorkspace();
-    if (ws.selected) {
-      updateWorkspaceDisplay(ws.path!);
-      const retryIntent = await whimAPI.create({ body: text }) as any;
-      if (retryIntent.error) {
-        showStatus('Failed to create space', true);
-        return;
-      }
-      processingSpaces.add(retryIntent.id);
-      agentStore.addProcessingIntent(retryIntent.id);
-      insertSpaceOptimistically(retryIntent);
-    } else {
-      hideStatus();
-      return;
-    }
+  const finishSave = startTiming('save.capture');
+  const space = await whimAPI.create({ body: text }).then(result => {
+    finishSave(!('error' in result));
+    return result;
+  }, error => { finishSave(false); throw error; });
+  if (generation !== getWorkspaceGeneration()) return;
+  if ('error' in space && space.error === 'no_workspace') {
+    showStatus('Select a workspace first; capture text has been kept.', true);
+    return;
+  } else if ('error' in space) {
+    showStatus('Failed to create space', true);
+    return;
   } else {
     processingSpaces.add(space.id);
     agentStore.addProcessingIntent(space.id);
     insertSpaceOptimistically(space);
   }
+  if (descInput.value === submittedValue) {
+    descInput.value = '';
+    descInput.style.height = 'auto';
+  }
   hideStatus();
+}
+
+form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (captureFlight) return;
+  const current = submitCapture();
+  captureFlight = current;
+  void current.catch(error => showStatus(error instanceof Error ? error.message : String(error), true))
+    .finally(() => { if (captureFlight === current) captureFlight = undefined; });
 });
 
 // Listen for background LLM processing completion
-whimAPI.onSpaceProcessed(async (id: string) => {
+whimAPI.onSpaceProcessed((id: string) => {
   processingSpaces.delete(id);
-  agentStore.removeProcessingIntent(id);
-  await animateRefinement(id);
 });
 
 whimAPI.onSpaceTitleUpdated(({ spaceId, title }) => {
-  const space = spaces.find(s => s.id === spaceId);
-  if (space) space.description = title;
-  spaceStore.updateSpaceTitle(spaceId, title);
   if (canvasSpaceId === spaceId) {
     setCanvasHeaderTitle(title);
   }
@@ -4545,9 +2914,8 @@ whimAPI.onRecurrenceResult((spaceId: string, result: RecurrenceResult) => {
 });
 
 // Listen for recurrence being applied (after undo window)
-whimAPI.onRecurrenceApplied(async (_intentId: string) => {
+whimAPI.onRecurrenceApplied((_intentId: string) => {
   hideStatus();
-  await loadSpaces();
 });
 
 // Listen for recall hints
@@ -4601,9 +2969,6 @@ async function launchSession(spaceId: string): Promise<void> {
 (window as any).launchSession = launchSession;
 
 // ── Workspace setting ───────────────────────────────────
-const workspacePathEl = document.getElementById('workspace-path') as HTMLSpanElement;
-const workspaceBtn = document.getElementById('workspace-btn') as HTMLButtonElement;
-const workspaceClearBtn = document.getElementById('workspace-clear-btn') as HTMLButtonElement;
 let currentWorkspacePath: string | null = null;
 
 /** Folder name of the active workspace, used to label the Spaces tab. */
@@ -4615,46 +2980,12 @@ function workspaceTabLabel(): string {
 
 function updateWorkspaceDisplay(path: string | null): void {
   currentWorkspacePath = path;
-  if (path) {
-    // Show last 2 path segments for brevity
-    const parts = path.replace(/\\/g, '/').split('/');
-    const short = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : path;
-    workspacePathEl.textContent = short;
-    workspacePathEl.title = path;
-    workspacePathEl.classList.add('clickable');
-    workspaceClearBtn.classList.remove('hidden');
-  } else {
-    workspacePathEl.textContent = 'Not set';
-    workspacePathEl.title = '';
-    workspacePathEl.classList.remove('clickable');
-    workspaceClearBtn.classList.add('hidden');
-  }
+  settingsController?.updateWorkspaceDisplay(path);
   renderWorkspaceTab();
 }
 
-workspaceBtn.addEventListener('click', async () => {
-  const result = await whimAPI.selectWorkspace();
-  if (result.selected) {
-    updateWorkspaceDisplay(result.path);
-  }
-});
-
-workspaceClearBtn.addEventListener('click', async () => {
-  await whimAPI.clearWorkspace();
-  updateWorkspaceDisplay(null);
-});
-
-workspacePathEl.addEventListener('click', () => {
-  const path = workspacePathEl.title;
-  if (path) {
-    whimAPI.openPath(path);
-  }
-});
-
 // ── Workspace profiles ──────────────────────────────────
 const brandLogo = document.getElementById('brand-logo') as HTMLElement | null;
-const profilesListEl = document.getElementById('profiles-list') as HTMLDivElement | null;
-const profileAddBtn = document.getElementById('profile-add-btn') as HTMLButtonElement | null;
 
 let profilesState: ProfilesState | null = null;
 
@@ -4748,108 +3079,6 @@ async function cycleProfileFromUI(): Promise<void> {
   // The profiles:changed broadcast updates the logo + tint.
 }
 
-/** Settings → Profiles list. Renders an editable row per saved profile. */
-function renderProfilesSettings(): void {
-  if (!profilesListEl) return;
-  profilesListEl.innerHTML = '';
-  const state = profilesState;
-  if (!state || state.profiles.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'settings-hint';
-    empty.textContent = 'No profiles yet. Add one to get started.';
-    profilesListEl.appendChild(empty);
-    return;
-  }
-
-  for (const profile of state.profiles) {
-    const isActive = profile.id === state.activeProfileId;
-    const row = document.createElement('div');
-    row.className = 'profile-row' + (isActive ? ' active' : '');
-
-    // Tint swatch — tap to generate a new reasonable color (no palette picker).
-    const swatch = document.createElement('button');
-    swatch.type = 'button';
-    swatch.className = 'profile-swatch';
-    swatch.title = 'Tap to change the tint color';
-    const applySwatch = (tint: string | null) => {
-      swatch.style.background = (tint && isValidTint(tint)) ? tint : '';
-      swatch.classList.toggle('no-tint', !(tint && isValidTint(tint)));
-    };
-    applySwatch(profile.tint);
-    swatch.addEventListener('click', async () => {
-      const next = generateTintColor(profile.tint ? (hueOf(profile.tint) ?? undefined) : undefined);
-      profile.tint = next;
-      applySwatch(next);
-      if (isActive) applyProfileTint(next);
-      await whimAPI.updateProfile(profile.id, { tint: next });
-    });
-    row.appendChild(swatch);
-
-    // Name override — placeholder shows the resolved default (git repo / folder) name.
-    const nameInput = document.createElement('input');
-    nameInput.type = 'text';
-    nameInput.className = 'profile-name-input';
-    nameInput.value = profile.name ?? '';
-    nameInput.placeholder = profile.displayName;
-    nameInput.spellcheck = false;
-    const commitName = async () => {
-      const value = nameInput.value.trim();
-      const next = value.length > 0 ? value : null;
-      if (next === profile.name) return;
-      profile.name = next;
-      await whimAPI.updateProfile(profile.id, { name: next });
-    };
-    nameInput.addEventListener('blur', () => { void commitName(); });
-    nameInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); nameInput.blur(); }
-    });
-    row.appendChild(nameInput);
-
-    // Path (muted, click to open in the file manager).
-    const pathEl = document.createElement('button');
-    pathEl.type = 'button';
-    pathEl.className = 'profile-path';
-    const parts = profile.path.replace(/\\/g, '/').split('/');
-    pathEl.textContent = parts.length > 2 ? '…/' + parts.slice(-2).join('/') : profile.path;
-    pathEl.title = profile.path;
-    pathEl.addEventListener('click', () => { whimAPI.openPath(profile.path); });
-    row.appendChild(pathEl);
-
-    // Switch button / active badge.
-    if (isActive) {
-      const badge = document.createElement('span');
-      badge.className = 'profile-active-badge';
-      badge.textContent = 'Active';
-      row.appendChild(badge);
-    } else {
-      const switchBtn = document.createElement('button');
-      switchBtn.type = 'button';
-      switchBtn.className = 'workspace-btn';
-      switchBtn.textContent = 'Switch';
-      switchBtn.addEventListener('click', async () => {
-        const res = await whimAPI.activateProfile(profile.id);
-        if (!res.ok && res.error === 'missing_path') {
-          showStatus('Profile folder not found', true);
-        }
-      });
-      row.appendChild(switchBtn);
-    }
-
-    // Remove.
-    const removeBtn = document.createElement('button');
-    removeBtn.type = 'button';
-    removeBtn.className = 'profile-remove-btn';
-    removeBtn.title = 'Remove profile';
-    removeBtn.textContent = '✕';
-    removeBtn.addEventListener('click', async () => {
-      await whimAPI.removeProfile(profile.id);
-    });
-    row.appendChild(removeBtn);
-
-    profilesListEl.appendChild(row);
-  }
-}
-
 /** Pull profile state from main and refresh the logo, tint, and settings list. */
 async function refreshProfiles(): Promise<void> {
   try {
@@ -4878,120 +3107,8 @@ function handleProfilesChanged(state: ProfilesState): void {
 if (brandLogo) {
   brandLogo.addEventListener('click', () => { void cycleProfileFromUI(); });
 }
-if (profileAddBtn) {
-  profileAddBtn.addEventListener('click', () => { void whimAPI.addProfile(); });
-}
 whimAPI.onProfilesChanged(handleProfilesChanged);
 void refreshProfiles();
-
-// ── CLI Path setting ────────────────────────────────────
-const cliPathInput = document.getElementById('cli-path-input') as HTMLInputElement;
-const cliPathClear = document.getElementById('cli-path-clear') as HTMLButtonElement;
-const cliPathDetected = document.getElementById('cli-path-detected') as HTMLSpanElement;
-
-/**
- * Synchronous-ish part of CLI path setup — just sets the input value and
- * paints a "checking…" detected-label placeholder. Cheap enough to run
- * eagerly on settings-window init so the General tab renders without
- * waiting on the CLI binary.
- */
-async function loadCliPathInputSync(): Promise<void> {
-  const override = await whimAPI.getSetting('cli_path');
-  cliPathInput.value = override || '';
-  cliPathClear.classList.toggle('hidden', !override);
-  cliPathDetected.textContent = 'Checking…';
-  cliPathDetected.title = '';
-  cliPathDetected.style.color = '';
-  if (cliMxcIndicator) {
-    cliMxcIndicator.textContent = 'checking…';
-    cliMxcIndicator.className = 'cli-mxc-indicator';
-  }
-}
-
-/**
- * Run the slow CLI subprocess probes (version check + MXC capability
- * check). Each spawns the CLI binary, so these can take ~200ms each on
- * cold disk caches. Settings-window init defers these to idle so the
- * General tab is interactive immediately.
- */
-async function runCliPathChecks(): Promise<void> {
-  await updateCliPathDetected();
-  await updateCliMxcIndicator();
-}
-
-function cliSourceLabel(source: string): string {
-  switch (source) {
-    case 'bundled': return 'Bundled native stdio';
-    case 'inprocess': return 'Bundled in-process (experimental)';
-    case 'auto': return 'Auto-detected';
-    case 'path': return 'Custom path';
-    case 'server': return 'Remote server';
-    default: return source;
-  }
-}
-
-async function updateCliPathDetected(): Promise<void> {
-  const info = await whimAPI.getCliRuntimeStatus();
-  cliPathDetected.style.color = '';
-
-  if (info.source === 'server') {
-    cliPathDetected.textContent = info.target ? `Remote server — ${info.target}` : 'Remote server (no URL set)';
-    cliPathDetected.title = info.target || '';
-    if (!info.target) cliPathDetected.style.color = 'var(--color-warning, #d29922)';
-    return;
-  }
-
-  if (!info.target) {
-    cliPathDetected.textContent = 'Not found';
-    cliPathDetected.title = '';
-    return;
-  }
-
-  cliPathDetected.title = info.target;
-  if (!info.compatible) {
-    cliPathDetected.textContent = `${cliSourceLabel(info.source)} (v${info.version || '?'} — update to ${info.minVersion}+) — ${info.target}`;
-    cliPathDetected.style.color = 'var(--color-warning, #d29922)';
-  } else {
-    const v = info.version ? ` (v${info.version})` : '';
-    cliPathDetected.textContent = `${cliSourceLabel(info.source)}${v} — ${info.target}`;
-  }
-}
-
-let cliPathDebounce: ReturnType<typeof setTimeout> | null = null;
-cliPathInput.addEventListener('input', () => {
-  if (cliPathDebounce) clearTimeout(cliPathDebounce);
-  cliPathDebounce = setTimeout(async () => {
-    const val = cliPathInput.value.trim();
-    const resolved = await whimAPI.setSetting('cli_path', val);
-    // Update input to show the resolved full path if it changed
-    if (resolved && resolved !== val) {
-      cliPathInput.value = resolved;
-    }
-    cliPathClear.classList.toggle('hidden', !cliPathInput.value);
-    await updateCliPathDetected();
-    await updateCliMxcIndicator();
-  }, 500);
-});
-
-cliPathClear.addEventListener('click', async () => {
-  cliPathInput.value = '';
-  await whimAPI.setSetting('cli_path', '');
-  cliPathClear.classList.add('hidden');
-  await updateCliPathDetected();
-  await updateCliMxcIndicator();
-});
-
-// ── Runtime source selector ─────────────────────────────
-const cliSourceSelect = document.getElementById('cli-source-select') as HTMLSelectElement | null;
-const cliPathField = document.getElementById('cli-path-field') as HTMLElement | null;
-const cliPathCustomRow = document.getElementById('cli-path-custom-row') as HTMLElement | null;
-const cliDiscoveredSelect = document.getElementById('cli-discovered-select') as HTMLSelectElement | null;
-const cliServerFields = document.getElementById('cli-server-fields') as HTMLElement | null;
-const cliInProcessWarning = document.getElementById('cli-inprocess-warning') as HTMLElement | null;
-const cliServerUrlInput = document.getElementById('cli-server-url-input') as HTMLInputElement | null;
-const cliServerTokenInput = document.getElementById('cli-server-token-input') as HTMLInputElement | null;
-const cliTestBtn = document.getElementById('cli-test-btn') as HTMLButtonElement | null;
-const cliRuntimeStatus = document.getElementById('cli-runtime-status') as HTMLSpanElement | null;
 
 const CLI_CUSTOM_OPTION = '__custom__';
 
@@ -5047,674 +3164,6 @@ async function populateCliSelect(
   return clis;
 }
 
-function applyCliSourceVisibility(source: string): void {
-  if (cliPathField) cliPathField.hidden = source !== 'path';
-  if (cliPathCustomRow) {
-    cliPathCustomRow.hidden = source !== 'path' || cliDiscoveredSelect?.value !== CLI_CUSTOM_OPTION;
-  }
-  if (cliServerFields) cliServerFields.hidden = source !== 'server';
-  if (cliInProcessWarning) cliInProcessWarning.hidden = source !== 'inprocess';
-}
-
-async function loadRuntimeSourceSettings(): Promise<void> {
-  if (!cliSourceSelect) return;
-  const source = (await whimAPI.getSetting('cli_source')) || 'bundled';
-  cliSourceSelect.value = source;
-  if (cliServerUrlInput) cliServerUrlInput.value = (await whimAPI.getSetting('cli_server_url')) || '';
-  if (cliServerTokenInput) cliServerTokenInput.value = (await whimAPI.getSetting('cli_server_token')) || '';
-  // Discovery version-probes candidate binaries, so only run it when the
-  // custom-path picker is actually visible.
-  if (cliDiscoveredSelect && source === 'path') {
-    await populateCliSelect(cliDiscoveredSelect, cliPathInput.value.trim(), true);
-  }
-  applyCliSourceVisibility(source);
-}
-
-cliDiscoveredSelect?.addEventListener('change', async () => {
-  const value = cliDiscoveredSelect.value;
-  if (cliPathCustomRow) cliPathCustomRow.hidden = value !== CLI_CUSTOM_OPTION;
-  if (value === CLI_CUSTOM_OPTION) {
-    cliPathInput.focus();
-    return;
-  }
-  cliPathInput.value = value;
-  cliPathClear.classList.toggle('hidden', !value);
-  await whimAPI.setSetting('cli_path', value);
-  await updateCliPathDetected();
-  await updateCliMxcIndicator();
-});
-
-cliSourceSelect?.addEventListener('change', async () => {
-  const source = cliSourceSelect.value;
-  if (source === 'path' && cliDiscoveredSelect) {
-    await populateCliSelect(cliDiscoveredSelect, cliPathInput.value.trim(), true);
-  }
-  applyCliSourceVisibility(source);
-  if (cliRuntimeStatus) cliRuntimeStatus.textContent = '—';
-  await whimAPI.setSetting('cli_source', source);
-  await updateCliPathDetected();
-  await updateCliMxcIndicator();
-});
-
-let cliServerUrlDebounce: ReturnType<typeof setTimeout> | null = null;
-cliServerUrlInput?.addEventListener('input', () => {
-  if (cliServerUrlDebounce) clearTimeout(cliServerUrlDebounce);
-  cliServerUrlDebounce = setTimeout(async () => {
-    await whimAPI.setSetting('cli_server_url', cliServerUrlInput.value.trim());
-    await updateCliPathDetected();
-  }, 500);
-});
-
-let cliServerTokenDebounce: ReturnType<typeof setTimeout> | null = null;
-cliServerTokenInput?.addEventListener('input', () => {
-  if (cliServerTokenDebounce) clearTimeout(cliServerTokenDebounce);
-  cliServerTokenDebounce = setTimeout(async () => {
-    await whimAPI.setSetting('cli_server_token', cliServerTokenInput.value);
-  }, 500);
-});
-
-cliTestBtn?.addEventListener('click', async () => {
-  if (!cliRuntimeStatus) return;
-  cliTestBtn.disabled = true;
-  cliRuntimeStatus.textContent = 'Testing…';
-  cliRuntimeStatus.style.color = '';
-  try {
-    const res = await whimAPI.testCliConnection();
-    if (res.ok) {
-      const v = res.version ? ` v${res.version}` : '';
-      cliRuntimeStatus.textContent = `✓ Connected — ${cliSourceLabel(res.source)}${v}`;
-      cliRuntimeStatus.style.color = 'var(--color-success, #3fb950)';
-    } else {
-      cliRuntimeStatus.textContent = `✗ ${res.error || 'Connection failed'}`;
-      cliRuntimeStatus.style.color = 'var(--color-danger, #f85149)';
-    }
-  } catch {
-    cliRuntimeStatus.textContent = '✗ Connection failed';
-    cliRuntimeStatus.style.color = 'var(--color-danger, #f85149)';
-  } finally {
-    cliTestBtn.disabled = false;
-  }
-});
-
-// ── MXC capability indicator ────────────────────────────
-const cliMxcIndicator = document.getElementById('cli-mxc-indicator') as HTMLSpanElement | null;
-
-async function updateCliMxcIndicator(): Promise<void> {
-  if (!cliMxcIndicator) return;
-  try {
-    const runtime = await whimAPI.getCliRuntimeStatus();
-    if (runtime.source === 'bundled' || runtime.source === 'inprocess' || runtime.source === 'server') {
-      cliMxcIndicator.textContent = runtime.source === 'server'
-        ? 'managed by the remote runtime'
-        : 'native SDK sandbox; CLI MXC probe does not apply';
-      cliMxcIndicator.className = 'cli-mxc-indicator';
-      return;
-    }
-    const r = await whimAPI.checkCliMxcCapable();
-    if (r.mxcCapable) {
-      cliMxcIndicator.textContent = '✓ runtime sandbox supported';
-      cliMxcIndicator.className = 'cli-mxc-indicator ok';
-    } else {
-      cliMxcIndicator.textContent = '⚠ not detected — sandboxed personas will fall back to host-side path enforcement only';
-      cliMxcIndicator.className = 'cli-mxc-indicator warn';
-    }
-  } catch {
-    cliMxcIndicator.textContent = '?';
-    cliMxcIndicator.className = 'cli-mxc-indicator';
-  }
-}
-
-// ── Auto-hide side pane setting ──────────────────────────
-const autoHideSidePaneCb = document.getElementById('auto-hide-side-pane-cb') as HTMLInputElement | null;
-
-async function loadAutoHideSetting(): Promise<void> {
-  if (!autoHideSidePaneCb) return;
-  const val = await whimAPI.getSetting('auto_hide_side_pane');
-  autoHideSidePaneCb.checked = val !== false; // default true
-}
-
-if (autoHideSidePaneCb) {
-  autoHideSidePaneCb.addEventListener('change', () => {
-    whimAPI.setSetting('auto_hide_side_pane', String(autoHideSidePaneCb.checked));
-  });
-}
-
-const autoRemoteCb = document.getElementById('auto-remote-cb') as HTMLInputElement | null;
-
-async function loadAutoRemoteSetting(): Promise<void> {
-  if (!autoRemoteCb) return;
-  const val = await whimAPI.getSetting('remoteAutoEnable');
-  autoRemoteCb.checked = val === true || val === 'true';
-}
-
-if (autoRemoteCb) {
-  autoRemoteCb.addEventListener('change', () => {
-    whimAPI.setSetting('remoteAutoEnable', String(autoRemoteCb.checked));
-  });
-}
-
-// ── Remote Web Access setting ───────────────────────────
-const webRemoteEnabledCb = document.getElementById('web-remote-enabled-cb') as HTMLInputElement | null;
-const webRemotePortInput = document.getElementById('web-remote-port-input') as HTMLInputElement | null;
-const webRemoteSaveBtn = document.getElementById('web-remote-save-btn') as HTMLButtonElement | null;
-const webRemoteRegenerateBtn = document.getElementById('web-remote-regenerate-btn') as HTMLButtonElement | null;
-const webRemoteTokenInput = document.getElementById('web-remote-token-input') as HTMLInputElement | null;
-const webRemoteInterfaceList = document.getElementById('web-remote-interface-list') as HTMLDivElement | null;
-const webRemoteUrlList = document.getElementById('web-remote-url-list') as HTMLDivElement | null;
-const webRemoteQr = document.getElementById('web-remote-qr') as HTMLImageElement | null;
-const webRemoteStatus = document.getElementById('web-remote-status') as HTMLDivElement | null;
-const webRemoteTlsMode = document.getElementById('web-remote-tls-mode') as HTMLSelectElement | null;
-const webRemoteTlsCustom = document.getElementById('web-remote-tls-custom') as HTMLDivElement | null;
-const webRemoteTlsCert = document.getElementById('web-remote-tls-cert') as HTMLInputElement | null;
-const webRemoteTlsKey = document.getElementById('web-remote-tls-key') as HTMLInputElement | null;
-const webRemoteTlsStatus = document.getElementById('web-remote-tls-status') as HTMLDivElement | null;
-const webRemoteAllowedHosts = document.getElementById('web-remote-allowed-hosts') as HTMLInputElement | null;
-const webRemoteDeviceList = document.getElementById('web-remote-device-list') as HTMLDivElement | null;
-const webRemoteActivityList = document.getElementById('web-remote-activity-list') as HTMLDivElement | null;
-
-function setWebRemoteStatus(message: string, error = false): void {
-  if (!webRemoteStatus) return;
-  webRemoteStatus.textContent = message;
-  webRemoteStatus.classList.toggle('web-remote-error', error);
-}
-
-const SCOPE_WARNINGS: Record<InterfaceScope, string> = {
-  loopback: 'Only reachable from this machine.',
-  private: 'Reachable by any device on this local network.',
-  vpn: 'Reachable by devices on this VPN or tunnel.',
-  public: 'Warning: this address may be reachable from the public internet.',
-};
-
-const BINDING_STATE_LABELS: Record<WebRemoteBindingStatus['state'], string> = {
-  listening: 'Listening',
-  pending: 'Waiting for interface',
-  failed: 'Failed',
-};
-
-/**
- * Selections are keyed by a stable string so the checkbox list can round-trip
- * them without smuggling raw addresses through the DOM. Addresses change; the
- * user's intent shouldn't.
- */
-function selectionKey(selection: WebRemoteBindSelection): string {
-  switch (selection.kind) {
-    case 'interface': return `i:${selection.interfaceName}:${selection.family}`;
-    case 'address': return `a:${selection.address}`;
-    case 'all': return `*:${selection.family}`;
-  }
-}
-
-let webRemoteSelectionIndex = new Map<string, WebRemoteBindSelection>();
-
-function selectedWebRemoteSelections(): WebRemoteBindSelection[] {
-  if (!webRemoteInterfaceList) return [];
-  return Array.from(webRemoteInterfaceList.querySelectorAll<HTMLInputElement>('input[type="checkbox"]:checked'))
-    .map(input => webRemoteSelectionIndex.get(input.value))
-    .filter((selection): selection is WebRemoteBindSelection => selection !== undefined);
-}
-
-/**
- * Build the option list from the union of live interfaces and saved selections,
- * so an interface that is currently down still shows up (checked, pending)
- * rather than silently vanishing from the user's configuration.
- */
-function renderWebRemoteInterfaces(state: WebRemoteState): void {
-  if (!webRemoteInterfaceList) return;
-  webRemoteInterfaceList.innerHTML = '';
-  webRemoteSelectionIndex = new Map();
-
-  const bindingByKey = new Map(state.bindings.map(binding => [selectionKey(binding.selection), binding]));
-  const selectedKeys = new Set(state.selections.map(selectionKey));
-
-  type Option = { key: string; selection: WebRemoteBindSelection; label: string; scope: InterfaceScope };
-  const options: Option[] = [];
-  const seen = new Set<string>();
-
-  const push = (selection: WebRemoteBindSelection, label: string, scope: InterfaceScope) => {
-    const key = selectionKey(selection);
-    if (seen.has(key)) return;
-    seen.add(key);
-    options.push({ key, selection, label, scope });
-  };
-
-  for (const iface of state.interfaces) {
-    if (iface.family !== 'IPv4') continue;
-    const selection: WebRemoteBindSelection = iface.scope === 'loopback'
-      ? { kind: 'address', address: iface.address }
-      : { kind: 'interface', interfaceName: iface.name, family: iface.family };
-    push(selection, iface.label, iface.scope);
-  }
-
-  for (const selection of state.selections) {
-    const binding = bindingByKey.get(selectionKey(selection));
-    push(selection, binding?.label ?? describeSelection(selection), binding?.scope ?? 'private');
-  }
-
-  push({ kind: 'all', family: 'IPv4' }, 'All IPv4 interfaces (0.0.0.0)', 'public');
-
-  if (options.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'settings-hint';
-    empty.textContent = 'No network interfaces detected.';
-    webRemoteInterfaceList.appendChild(empty);
-    return;
-  }
-
-  for (const option of options) {
-    webRemoteSelectionIndex.set(option.key, option.selection);
-
-    const label = document.createElement('label');
-    label.className = 'settings-checkbox-label web-remote-interface-option';
-
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.value = option.key;
-    checkbox.checked = selectedKeys.has(option.key);
-    label.appendChild(checkbox);
-
-    const text = document.createElement('span');
-    text.textContent = option.label;
-    text.title = SCOPE_WARNINGS[option.scope];
-    label.appendChild(text);
-
-    const binding = bindingByKey.get(option.key);
-    if (binding && state.enabled) {
-      const status = document.createElement('span');
-      status.className = `web-remote-binding-state web-remote-binding-${binding.state}`;
-      status.textContent = binding.state === 'listening' && binding.addresses.length > 0
-        ? `${BINDING_STATE_LABELS[binding.state]} on ${binding.addresses.join(', ')}:${state.port}`
-        : `${BINDING_STATE_LABELS[binding.state]} — ${binding.detail}`;
-      label.appendChild(status);
-    }
-
-    webRemoteInterfaceList.appendChild(label);
-  }
-}
-
-function describeSelection(selection: WebRemoteBindSelection): string {
-  switch (selection.kind) {
-    case 'interface': return `${selection.interfaceName} (${selection.family}, not currently available)`;
-    case 'address': return selection.address;
-    case 'all': return `All ${selection.family} interfaces`;
-  }
-}
-
-function renderWebRemoteTls(state: WebRemoteState): void {
-  if (webRemoteTlsMode) webRemoteTlsMode.value = state.tls.mode;
-  webRemoteTlsCustom?.classList.toggle('hidden', state.tls.mode !== 'custom');
-
-  if (!webRemoteTlsStatus) return;
-  const loopbackOnly = state.selections.every(selection =>
-    selection.kind === 'address' && (selection.address === '127.0.0.1' || selection.address === '::1'));
-
-  if (state.tls.error) {
-    webRemoteTlsStatus.textContent = `Certificate error: ${state.tls.error}`;
-  } else if (state.tls.active) {
-    webRemoteTlsStatus.textContent = state.tls.fingerprint
-      ? `HTTPS is on. Certificate fingerprint (SHA-256): ${state.tls.fingerprint}`
-      : 'HTTPS is on.';
-  } else if (state.tls.mode === 'auto' && loopbackOnly) {
-    webRemoteTlsStatus.textContent = 'Loopback only, so plain HTTP is used — localhost is already a secure origin.';
-  } else if (state.tls.mode === 'off') {
-    webRemoteTlsStatus.textContent = 'HTTPS is off. The microphone, clipboard and home-screen install will not work in the browser.';
-  } else {
-    webRemoteTlsStatus.textContent = 'HTTPS is not active yet.';
-  }
-}
-
-function renderWebRemoteDevices(state: WebRemoteState): void {
-  if (!webRemoteDeviceList) return;
-  webRemoteDeviceList.innerHTML = '';
-
-  if (state.devices.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'settings-hint';
-    empty.textContent = 'No paired browsers yet.';
-    webRemoteDeviceList.appendChild(empty);
-    return;
-  }
-
-  for (const device of state.devices) {
-    const row = document.createElement('div');
-    row.className = 'web-remote-device';
-
-    const name = document.createElement('span');
-    name.textContent = device.label;
-    row.appendChild(name);
-
-    const meta = document.createElement('span');
-    meta.className = 'web-remote-device-meta';
-    meta.textContent = `last seen ${new Date(device.lastSeenAt).toLocaleString()}`
-      + (device.lastAddress ? ` from ${device.lastAddress}` : '');
-    row.appendChild(meta);
-
-    const revoke = document.createElement('button');
-    revoke.className = 'workspace-btn';
-    revoke.type = 'button';
-    revoke.textContent = 'Revoke';
-    revoke.addEventListener('click', async () => {
-      renderWebRemoteState(await whimAPI.revokeWebRemoteDevice(device.id));
-    });
-    row.appendChild(revoke);
-
-    webRemoteDeviceList.appendChild(row);
-  }
-}
-
-/**
- * A single `lastError` string told you nothing about what had actually
- * happened over the connection. This is the smallest thing that lets you
- * answer "what has been talking to my machine?".
- */
-function renderWebRemoteActivity(state: WebRemoteState): void {
-  if (!webRemoteActivityList) return;
-  webRemoteActivityList.innerHTML = '';
-
-  if (state.activity.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'settings-hint';
-    empty.textContent = 'No requests yet.';
-    webRemoteActivityList.appendChild(empty);
-    return;
-  }
-
-  for (const entry of state.activity) {
-    const row = document.createElement('div');
-    row.className = `web-remote-activity ${entry.outcome}`;
-
-    const when = document.createElement('span');
-    when.className = 'web-remote-activity-time';
-    when.textContent = new Date(entry.at).toLocaleTimeString();
-    row.appendChild(when);
-
-    const what = document.createElement('span');
-    what.className = 'web-remote-activity-what';
-    what.textContent = entry.channel ? entry.channel : `${entry.method} ${entry.path}`;
-    row.appendChild(what);
-
-    const who = document.createElement('span');
-    who.className = 'web-remote-activity-who';
-    who.textContent = `${entry.identity} · ${entry.remoteAddress}`;
-    row.appendChild(who);
-
-    const status = document.createElement('span');
-    status.className = 'web-remote-activity-status';
-    status.textContent = `${entry.status} · ${entry.durationMs}ms`;
-    row.appendChild(status);
-
-    webRemoteActivityList.appendChild(row);
-  }
-}
-
-function renderWebRemoteState(state: WebRemoteState): void {
-  if (webRemoteEnabledCb) webRemoteEnabledCb.checked = state.enabled;
-  if (webRemotePortInput) webRemotePortInput.value = String(state.port);
-  if (webRemoteTokenInput) webRemoteTokenInput.value = state.token;
-  if (webRemoteTlsCert) webRemoteTlsCert.value = webRemoteTlsCert.value || '';
-  if (webRemoteAllowedHosts) webRemoteAllowedHosts.value = state.allowedHosts.join(', ');
-  renderWebRemoteInterfaces(state);
-  renderWebRemoteTls(state);
-  renderWebRemoteDevices(state);
-  renderWebRemoteActivity(state);
-
-  if (webRemoteUrlList) {
-    webRemoteUrlList.innerHTML = '';
-    for (const url of state.urls) {
-      const row = document.createElement('div');
-      row.className = 'web-remote-url';
-      row.textContent = url;
-      webRemoteUrlList.appendChild(row);
-    }
-  }
-
-  if (webRemoteQr) {
-    if (state.qrDataUrl && state.enabled) {
-      webRemoteQr.src = state.qrDataUrl;
-      webRemoteQr.classList.remove('hidden');
-    } else {
-      webRemoteQr.removeAttribute('src');
-      webRemoteQr.classList.add('hidden');
-    }
-  }
-
-  if (!state.enabled) {
-    setWebRemoteStatus('Remote web access is off.');
-  } else if (state.running) {
-    setWebRemoteStatus("Remote web access is running. Scan the QR code to open whim on your phone.");
-  } else if (state.bindings.some(binding => binding.state === 'listening')) {
-    // Partially bound: serving on what's up, still waiting on the rest.
-    const waiting = state.bindings.filter(binding => binding.state !== 'listening');
-    setWebRemoteStatus(
-      `Running, but ${waiting.length} selected interface${waiting.length === 1 ? '' : 's'} not yet bound: `
-        + waiting.map(binding => `${binding.label} — ${binding.detail}`).join('; '),
-      true,
-    );
-  } else {
-    setWebRemoteStatus(state.error || 'Remote web access is enabled but not running.', true);
-  }
-}
-
-async function loadWebRemoteSetting(): Promise<void> {
-  if (!webRemoteEnabledCb) return;
-  try {
-    renderWebRemoteState(await whimAPI.getWebRemoteState());
-  } catch (err: any) {
-    setWebRemoteStatus(err?.message || 'Failed to load remote web settings.', true);
-  }
-}
-
-if (webRemoteEnabledCb) {
-  webRemoteEnabledCb.addEventListener('change', async () => {
-    setWebRemoteStatus(webRemoteEnabledCb.checked ? 'Starting remote web access…' : 'Stopping remote web access…');
-    try {
-      renderWebRemoteState(await whimAPI.setWebRemoteEnabled(webRemoteEnabledCb.checked));
-    } catch (err: any) {
-      setWebRemoteStatus(err?.message || 'Failed to update remote web access.', true);
-      await loadWebRemoteSetting();
-    }
-  });
-}
-
-if (webRemoteSaveBtn) {
-  webRemoteSaveBtn.addEventListener('click', async () => {
-    const port = Number(webRemotePortInput?.value || 0);
-    const selections = selectedWebRemoteSelections();
-    if (selections.length === 0) {
-      setWebRemoteStatus('Select at least one network interface.', true);
-      return;
-    }
-    setWebRemoteStatus('Saving remote web settings…');
-    const result = await whimAPI.setWebRemoteConfig({
-      port,
-      selections,
-      tlsMode: (webRemoteTlsMode?.value as WebRemoteTlsMode | undefined) ?? undefined,
-      tlsCertPath: webRemoteTlsCert?.value.trim(),
-      tlsKeyPath: webRemoteTlsKey?.value.trim(),
-      allowedHosts: (webRemoteAllowedHosts?.value ?? '')
-        .split(',')
-        .map(host => host.trim())
-        .filter(Boolean),
-    });
-    if ('error' in result) {
-      setWebRemoteStatus(result.error, true);
-      return;
-    }
-    renderWebRemoteState(result);
-  });
-}
-
-if (webRemoteRegenerateBtn) {
-  webRemoteRegenerateBtn.addEventListener('click', async () => {
-    setWebRemoteStatus('Regenerating token and signing out every paired browser…');
-    renderWebRemoteState(await whimAPI.regenerateWebRemoteToken());
-  });
-}
-
-if (webRemoteTlsMode) {
-  webRemoteTlsMode.addEventListener('change', () => {
-    webRemoteTlsCustom?.classList.toggle('hidden', webRemoteTlsMode.value !== 'custom');
-  });
-}
-
-// ── Comment trigger setting ──────────────────────────────
-const commentHoverCb = document.getElementById('comment-hover-cb') as HTMLInputElement | null;
-
-async function loadCommentTriggerSetting(): Promise<void> {
-  if (!commentHoverCb) return;
-  const val = await whimAPI.getSetting('comment_trigger');
-  commentHoverCb.checked = val === 'hover-or-caret';
-}
-
-if (commentHoverCb) {
-  commentHoverCb.addEventListener('change', () => {
-    whimAPI.setSetting('comment_trigger', commentHoverCb.checked ? 'hover-or-caret' : 'caret');
-  });
-}
-
-// ── Update settings (Settings → General → Updates) ───────
-const updateVersionEl = document.getElementById('update-current-version');
-const updateLineEl = document.getElementById('update-settings-line');
-const updateCheckBtn = document.getElementById('update-check-btn') as HTMLButtonElement | null;
-const updateOpenLogBtn = document.getElementById('update-open-log-btn') as HTMLButtonElement | null;
-const autoDownloadUpdatesCb = document.getElementById('auto-download-updates-cb') as HTMLInputElement | null;
-
-function formatCheckedAt(ts?: number): string {
-  if (!ts) return '';
-  try {
-    return new Date(ts).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-  } catch {
-    return '';
-  }
-}
-
-function renderUpdateSettings(state: UpdateState): void {
-  if (updateVersionEl) {
-    updateVersionEl.textContent = state.currentVersion ? `whim v${state.currentVersion}` : 'whim';
-  }
-  if (updateCheckBtn) {
-    updateCheckBtn.disabled = state.status === 'checking' || state.status === 'downloading';
-  }
-  if (!updateLineEl) return;
-
-  updateLineEl.classList.remove('update-settings-line--error');
-  const checked = state.lastCheckedAt ? ` · last checked ${formatCheckedAt(state.lastCheckedAt)}` : '';
-
-  switch (state.status) {
-    case 'disabled':
-      updateLineEl.textContent = 'Auto-updates run only in the installed app, not in dev builds.';
-      break;
-    case 'checking':
-      updateLineEl.textContent = 'Checking for updates…';
-      break;
-    case 'available':
-      updateLineEl.textContent = `Update available${state.version ? ` (v${state.version})` : ''}.`;
-      break;
-    case 'downloading':
-      updateLineEl.textContent = `Downloading update${state.version ? ` (v${state.version})` : ''}… ${state.progress ?? 0}%`;
-      break;
-    case 'downloaded':
-      updateLineEl.textContent = `Update ready${state.version ? ` (v${state.version})` : ''} — restart to apply.`;
-      break;
-    case 'up-to-date':
-      updateLineEl.textContent = `You're on the latest version${checked}.`;
-      break;
-    case 'error':
-      updateLineEl.textContent = `Update check failed${state.error ? `: ${state.error}` : ''}.`;
-      updateLineEl.classList.add('update-settings-line--error');
-      break;
-    case 'idle':
-    default:
-      updateLineEl.textContent = state.lastCheckedAt ? `You're on the latest version${checked}.` : 'Ready.';
-      break;
-  }
-}
-
-async function loadUpdateSettings(): Promise<void> {
-  if (autoDownloadUpdatesCb) {
-    const val = await whimAPI.getSetting('auto_download_updates');
-    autoDownloadUpdatesCb.checked = val !== false; // default true
-  }
-  try {
-    renderUpdateSettings(await bridgeApi.getUpdateState());
-  } catch {
-    /* updater not ready yet — the live subscription will fill this in */
-  }
-}
-
-if (updateCheckBtn) {
-  updateCheckBtn.addEventListener('click', () => {
-    if (updateLineEl) updateLineEl.textContent = 'Checking for updates…';
-    updateCheckBtn.disabled = true;
-    bridgeApi.checkForUpdate();
-  });
-}
-
-if (updateOpenLogBtn) {
-  updateOpenLogBtn.addEventListener('click', async () => {
-    const res = await bridgeApi.openUpdateLog();
-    if (res && 'error' in res && updateLineEl) {
-      updateLineEl.textContent = `Couldn't open log: ${res.error}`;
-      updateLineEl.classList.add('update-settings-line--error');
-    }
-  });
-}
-
-if (autoDownloadUpdatesCb) {
-  autoDownloadUpdatesCb.addEventListener('change', () => {
-    whimAPI.setSetting('auto_download_updates', String(autoDownloadUpdatesCb.checked));
-  });
-}
-
-// Live-update the Updates panel as the main process broadcasts state changes.
-bridgeApi.onUpdateStateChanged((state) => {
-  renderUpdateSettings(state);
-});
-
-// ── Settings tabs ───────────────────────────────────────
-const SETTINGS_TAB_KEY = 'whim.settingsTab';
-const SETTINGS_TAB_TITLES: Record<string, string> = {
-  general: 'General',
-  environment: 'Environment',
-  remote: 'Remote',
-  tools: 'Tools',
-  personas: 'Agents',
-  hotkeys: 'Hotkeys',
-};
-function initSettingsTabs(): void {
-  const tabs = document.querySelectorAll<HTMLButtonElement>('.settings-tab-btn');
-  const panels = document.querySelectorAll<HTMLElement>('.settings-tab-panel');
-  const titleEl = document.getElementById('settings-active-title');
-  if (!tabs.length || !panels.length) return;
-  const stored = localStorage.getItem(SETTINGS_TAB_KEY);
-  const activate = (name: string) => {
-    let matched = false;
-    tabs.forEach(t => {
-      const isActive = t.dataset.tab === name;
-      t.classList.toggle('active', isActive);
-      if (isActive) matched = true;
-    });
-    panels.forEach(p => {
-      p.classList.toggle('active', p.dataset.tab === name);
-    });
-    if (matched) {
-      if (titleEl) titleEl.textContent = SETTINGS_TAB_TITLES[name] ?? 'Settings';
-      try { localStorage.setItem(SETTINGS_TAB_KEY, name); } catch { /* ignore */ }
-    }
-  };
-  tabs.forEach(t => {
-    t.addEventListener('click', () => {
-      if (t.dataset.tab) activate(t.dataset.tab);
-    });
-  });
-  if (stored) {
-    activate(stored);
-  }
-  // Fallback: if no tab is active (e.g. stored tab was removed), activate general
-  const anyActive = Array.from(tabs).some(t => t.classList.contains('active'));
-  if (!anyActive) activate('general');
-}
-initSettingsTabs();
-
 // ── Hotkeys tab ────────────────────────────────────────
 const HOTKEY_LABELS: Record<string, string> = {
   toggleWindow: 'Toggle Window',
@@ -5727,13 +3176,6 @@ const HOTKEY_LABELS: Record<string, string> = {
   navigateDown: 'Navigate Down',
   openSubmit: 'Open / Submit',
   stopRecording: 'Stop Recording',
-};
-
-const HOTKEY_CATEGORIES: Record<string, string[]> = {
-  'Global': ['toggleWindow'],
-  'Canvas': ['canvasPinToTop', 'canvasNewPage'],
-  'Actions': ['popOutWindow', 'toggleSearch'],
-  'Navigation': ['close', 'navigateUp', 'navigateDown', 'openSubmit', 'stopRecording'],
 };
 
 const DEFAULT_HOTKEYS: Record<string, string> = {
@@ -5751,12 +3193,8 @@ const DEFAULT_HOTKEYS: Record<string, string> = {
 
 // Current hotkeys loaded from config — renderer-side cache
 let currentHotkeys: Record<string, string> = { ...DEFAULT_HOTKEYS };
-let hotkeyRecordingKey: string | null = null;
-let hotkeyFeedback: { key: string; message: string } | null = null;
-let hotkeyFeedbackTimer: number | null = null;
 
 const hotkeyPlatform = navigator.platform;
-const hotkeyCleanupByElement = new WeakMap<HTMLElement, () => void>();
 
 function findConflict(accel: string, excludeKey: string): string | null {
   for (const [k, v] of Object.entries(currentHotkeys)) {
@@ -5765,177 +3203,6 @@ function findConflict(accel: string, excludeKey: string): string | null {
     }
   }
   return null;
-}
-
-function setHotkeyFeedback(key: string, message: string): void {
-  hotkeyFeedback = { key, message };
-  if (hotkeyFeedbackTimer !== null) {
-    window.clearTimeout(hotkeyFeedbackTimer);
-  }
-  hotkeyFeedbackTimer = window.setTimeout(() => {
-    if (hotkeyFeedback?.key === key && hotkeyFeedback.message === message) {
-      hotkeyFeedback = null;
-      hotkeyFeedbackTimer = null;
-      renderHotkeysTab();
-    }
-  }, 3000);
-}
-
-const hotkeysList = document.getElementById('hotkeys-list') as HTMLDivElement;
-const hotkeysResetAll = document.getElementById('hotkeys-reset-all') as HTMLButtonElement;
-
-function clearHotkeyFeedback(): void {
-  hotkeyFeedback = null;
-  if (hotkeyFeedbackTimer !== null) {
-    window.clearTimeout(hotkeyFeedbackTimer);
-    hotkeyFeedbackTimer = null;
-  }
-}
-
-function renderHotkeysTab(): void {
-  hotkeysList.innerHTML = '';
-  for (const [category, keys] of Object.entries(HOTKEY_CATEGORIES)) {
-    const titleEl = document.createElement('div');
-    titleEl.className = 'hotkey-group-title';
-    titleEl.textContent = category;
-    hotkeysList.appendChild(titleEl);
-
-    for (const key of keys) {
-      const row = document.createElement('div');
-      row.className = 'hotkey-row';
-      row.dataset.hotkeyKey = key;
-
-      const label = document.createElement('div');
-      label.className = 'hotkey-label';
-      label.textContent = HOTKEY_LABELS[key] || key;
-
-      const binding = document.createElement('button');
-      binding.className = 'hotkey-binding';
-      binding.type = 'button';
-      const accel = currentHotkeys[key] || DEFAULT_HOTKEYS[key];
-      binding.textContent = formatAccelerator(accel, hotkeyPlatform);
-      if (accel !== DEFAULT_HOTKEYS[key]) {
-        binding.classList.add('modified');
-      }
-      binding.title = 'Click to change';
-      binding.setAttribute('aria-label', `Change ${HOTKEY_LABELS[key] || key} hotkey`);
-
-      binding.addEventListener('click', () => {
-        startHotkeyRecording(key, binding);
-      });
-
-      const resetBtn = document.createElement('button');
-      resetBtn.className = 'hotkey-reset-btn';
-      resetBtn.textContent = '↩';
-      resetBtn.title = 'Reset to default';
-      if (accel === DEFAULT_HOTKEYS[key]) {
-        resetBtn.style.visibility = 'hidden';
-      }
-      resetBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        await whimAPI.resetHotkeys(key);
-        currentHotkeys[key] = DEFAULT_HOTKEYS[key];
-        renderHotkeysTab();
-      });
-
-      row.appendChild(label);
-      row.appendChild(binding);
-      row.appendChild(resetBtn);
-      if (hotkeyFeedback?.key === key) {
-        const feedbackEl = document.createElement('span');
-        feedbackEl.className = 'hotkey-conflict';
-        feedbackEl.textContent = `⚠ ${hotkeyFeedback.message}`;
-        row.appendChild(feedbackEl);
-      }
-      hotkeysList.appendChild(row);
-    }
-  }
-}
-
-function startHotkeyRecording(key: string, bindingEl: HTMLElement): void {
-  // Cancel any previous recording
-  stopRecording_hotkey();
-  clearHotkeyFeedback();
-
-  hotkeyRecordingKey = key;
-  bindingEl.classList.add('recording');
-  bindingEl.textContent = 'Press shortcut…';
-
-  const handler = async (e: KeyboardEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    e.stopImmediatePropagation();
-
-    if (e.key === 'Escape') {
-      stopRecording_hotkey();
-      renderHotkeysTab();
-      return;
-    }
-
-    const accel = keyboardEventToAccelerator(e, hotkeyPlatform);
-    if (!accel) {
-      const modifiers = modifierEventToAccelerator(e, hotkeyPlatform);
-      bindingEl.textContent = modifiers
-        ? `${formatAccelerator(modifiers, hotkeyPlatform)}…`
-        : 'Press shortcut…';
-      return;
-    }
-
-    const conflict = findConflict(accel, key);
-    if (conflict) {
-      bindingEl.parentElement?.querySelectorAll('.hotkey-conflict').forEach(el => el.remove());
-      bindingEl.classList.remove('recording');
-      bindingEl.textContent = formatAccelerator(accel, hotkeyPlatform);
-      // Show conflict warning — block the save, let user try again
-      const conflictEl = document.createElement('span');
-      conflictEl.className = 'hotkey-conflict';
-      conflictEl.textContent = `⚠ Conflicts with "${conflict}" — press a different combo`;
-      bindingEl.parentElement?.appendChild(conflictEl);
-      setTimeout(() => {
-        conflictEl.remove();
-        // Re-enter recording so user can try again
-        bindingEl.classList.add('recording');
-        bindingEl.textContent = 'Press shortcut…';
-      }, 1500);
-      return;
-    }
-
-    document.removeEventListener('keydown', handler, true);
-    await saveHotkeyAndStop(key, accel);
-  };
-
-  document.addEventListener('keydown', handler, true);
-
-  // Store cleanup reference
-  hotkeyCleanupByElement.set(bindingEl, () => {
-    document.removeEventListener('keydown', handler, true);
-  });
-}
-
-async function saveHotkeyAndStop(key: string, accel: string): Promise<void> {
-  const result = await whimAPI.setHotkey(key, accel);
-  if (result.error) {
-    setHotkeyFeedback(key, result.error);
-  } else {
-    clearHotkeyFeedback();
-    currentHotkeys[key] = accel;
-  }
-  hotkeyRecordingKey = null;
-  renderHotkeysTab();
-}
-
-function stopRecording_hotkey(): void {
-  if (hotkeyRecordingKey) {
-    const bindingEl = hotkeysList.querySelector(
-      `[data-hotkey-key="${hotkeyRecordingKey}"] .hotkey-binding`
-    ) as HTMLElement | null;
-    if (bindingEl) {
-      bindingEl.classList.remove('recording');
-      hotkeyCleanupByElement.get(bindingEl)?.();
-      hotkeyCleanupByElement.delete(bindingEl);
-    }
-    hotkeyRecordingKey = null;
-  }
 }
 
 async function loadHotkeys(): Promise<void> {
@@ -5948,12 +3215,6 @@ async function loadHotkeys(): Promise<void> {
   renderHotkeysTab();
   syncToggleHotkeyLabels();
 }
-
-hotkeysResetAll.addEventListener('click', async () => {
-  await whimAPI.resetHotkeys();
-  currentHotkeys = { ...DEFAULT_HOTKEYS };
-  renderHotkeysTab();
-});
 
 // Load hotkeys on init, and follow changes made from any other window
 // (e.g. the settings popout) so renderer-level shortcuts don't go stale.
@@ -5968,201 +3229,6 @@ function matchesHotkey(e: KeyboardEvent, hotkeyName: string): boolean {
   const accel = currentHotkeys[hotkeyName];
   if (!accel) return false;
   return eventMatchesAccelerator(e, accel, hotkeyPlatform);
-}
-
-// ── Sandbox policy form helpers ─────────────────────────
-
-function pathListToTextarea(paths: string[]): string {
-  return (paths || []).join('\n');
-}
-
-function textareaToPathList(text: string): string[] {
-  return text.split(/\r?\n/).map(s => s.trim()).filter(s => s.length > 0).slice(0, 64);
-}
-
-/**
- * Render an editable sandbox-policy form into `container`. Returns a
- * `getPolicy()` accessor that reads the current values back as a SandboxPolicy.
- */
-function renderSandboxPolicyForm(
-  container: HTMLElement,
-  initial: SandboxPolicy,
-  opts?: { idPrefix?: string },
-): { getPolicy: () => SandboxPolicy; setPolicy: (p: SandboxPolicy) => void } {
-  const id = (s: string) => `${opts?.idPrefix ?? 'sandbox'}-${s}`;
-  container.innerHTML = '';
-
-  function checkbox(name: string, label: string, checked: boolean, hint?: string): HTMLInputElement {
-    const lbl = document.createElement('label');
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.id = id(name);
-    cb.checked = checked;
-    lbl.appendChild(cb);
-    const span = document.createElement('span');
-    span.textContent = label;
-    lbl.appendChild(span);
-    container.appendChild(lbl);
-    if (hint) {
-      const h = document.createElement('div');
-      h.className = 'sandbox-field-hint';
-      h.textContent = hint;
-      container.appendChild(h);
-    }
-    return cb;
-  }
-
-  function pathTextarea(name: string, label: string, value: string[], hint?: string): HTMLTextAreaElement {
-    const title = document.createElement('div');
-    title.className = 'sandbox-section-title';
-    title.textContent = label;
-    container.appendChild(title);
-    if (hint) {
-      const h = document.createElement('div');
-      h.className = 'sandbox-field-hint';
-      h.textContent = hint;
-      container.appendChild(h);
-    }
-    const ta = document.createElement('textarea');
-    ta.id = id(name);
-    ta.value = pathListToTextarea(value);
-    ta.placeholder = 'One path per line';
-    ta.spellcheck = false;
-    container.appendChild(ta);
-    return ta;
-  }
-
-  // Filesystem section
-  const fsTitle = document.createElement('div');
-  fsTitle.className = 'sandbox-section-title';
-  fsTitle.textContent = 'Filesystem';
-  container.appendChild(fsTitle);
-
-  const scopeBox = checkbox(
-    'scope',
-    'Read & write inside the space folder',
-    initial.scopeToSpaceFolder,
-    'When checked, the agent can read and write anywhere inside its space folder. Recommended ON.',
-  );
-  const rwArea = pathTextarea('rw', 'Extra read-write paths', initial.extraReadwritePaths,
-    'Optional. Each line is an absolute path the agent may read AND write.');
-  const roArea = pathTextarea('ro', 'Extra read-only paths', initial.extraReadonlyPaths,
-    'Optional. Each line is an absolute path the agent may read only.');
-  const denyArea = pathTextarea('deny', 'Denied paths', initial.extraDeniedPaths,
-    'Optional. Each line is an absolute path the agent must never access (overrides RW/RO).');
-
-  // Tool surface section
-  const toolsTitle = document.createElement('div');
-  toolsTitle.className = 'sandbox-section-title';
-  toolsTitle.textContent = 'Tool surface';
-  container.appendChild(toolsTitle);
-
-  const mcpBox = checkbox(
-    'mcp',
-    'Allow MCP servers',
-    initial.allowMcpServers,
-    'When unchecked, sandboxed agents launch with MCP servers hidden. Default OFF.',
-  );
-  const wfBox = checkbox(
-    'web-fetch',
-    'Allow web_fetch tool',
-    initial.allowWebFetch,
-    'When unchecked, sandboxed agents launch without the web_fetch tool. Default OFF.',
-  );
-
-  // Network section
-  const netTitle = document.createElement('div');
-  netTitle.className = 'sandbox-section-title';
-  netTitle.textContent = 'Network (applies to shell sandbox)';
-  container.appendChild(netTitle);
-
-  const outBox = checkbox(
-    'allow-out',
-    'Allow outbound network',
-    initial.allowOutbound,
-    'When checked, shell commands inside the sandbox may reach the internet (e.g. git fetch). Default OFF.',
-  );
-  const localBox = checkbox(
-    'allow-local',
-    'Allow local network',
-    initial.allowLocalNetwork,
-    'When checked, shell commands may reach localhost / LAN. Default OFF.',
-  );
-
-  // Enforcement section — lets the user pick between defense-in-depth (host
-  // guards on top of MXC) and MXC-only (test mode that disables host guards
-  // so denials come from MXC's AppContainer alone).
-  const enforceTitle = document.createElement('div');
-  enforceTitle.className = 'sandbox-section-title';
-  enforceTitle.textContent = 'Enforcement';
-  container.appendChild(enforceTitle);
-
-  const enforceWrap = document.createElement('label');
-  const enforceLbl = document.createElement('span');
-  enforceLbl.textContent = 'Enforcement mode';
-  enforceWrap.appendChild(enforceLbl);
-  const enforceSelect = document.createElement('select');
-  enforceSelect.id = id('enforcement');
-  const optBoth = document.createElement('option');
-  optBoth.value = 'both';
-  optBoth.textContent = 'Both: host guards + MXC (Recommended)';
-  enforceSelect.appendChild(optBoth);
-  const optMxc = document.createElement('option');
-  optMxc.value = 'mxc-only';
-  optMxc.textContent = 'MXC only (test mode — host guards disabled)';
-  enforceSelect.appendChild(optMxc);
-  enforceSelect.value = initial.enforcementMode === 'mxc-only' ? 'mxc-only' : 'both';
-  enforceWrap.appendChild(enforceSelect);
-  container.appendChild(enforceWrap);
-
-  const enforceHint = document.createElement('div');
-  enforceHint.className = 'sandbox-field-hint';
-  enforceHint.textContent =
-    'Both: host-side read-only classifier + path-policy hook deny most things before MXC sees them. ' +
-    'MXC only: skip those host guards so MXC AppContainer is the sole enforcer for shell commands. ' +
-    'Use MXC-only to verify MXC is actually doing the work — note that path-bearing SDK tools ' +
-    '(view/edit/create/glob/grep) are NOT covered by MXC and become unrestricted in this mode.';
-  container.appendChild(enforceHint);
-
-  const enforceWarn = document.createElement('div');
-  enforceWarn.className = 'sandbox-field-hint';
-  enforceWarn.style.color = '#c0392b';
-  enforceWarn.style.fontWeight = '600';
-  enforceWarn.textContent = '⚠ MXC-only is a test mode. Use only to verify MXC enforcement; less safe than Both.';
-  enforceWarn.style.display = enforceSelect.value === 'mxc-only' ? '' : 'none';
-  container.appendChild(enforceWarn);
-  enforceSelect.addEventListener('change', () => {
-    enforceWarn.style.display = enforceSelect.value === 'mxc-only' ? '' : 'none';
-  });
-
-  function getPolicy(): SandboxPolicy {
-    return {
-      scopeToSpaceFolder: scopeBox.checked,
-      extraReadwritePaths: textareaToPathList(rwArea.value),
-      extraReadonlyPaths: textareaToPathList(roArea.value),
-      extraDeniedPaths: textareaToPathList(denyArea.value),
-      allowMcpServers: mcpBox.checked,
-      allowWebFetch: wfBox.checked,
-      allowOutbound: outBox.checked,
-      allowLocalNetwork: localBox.checked,
-      enforcementMode: enforceSelect.value === 'mxc-only' ? 'mxc-only' : 'both',
-    };
-  }
-
-  function setPolicy(p: SandboxPolicy): void {
-    scopeBox.checked = p.scopeToSpaceFolder;
-    rwArea.value = pathListToTextarea(p.extraReadwritePaths);
-    roArea.value = pathListToTextarea(p.extraReadonlyPaths);
-    denyArea.value = pathListToTextarea(p.extraDeniedPaths);
-    mcpBox.checked = p.allowMcpServers;
-    wfBox.checked = p.allowWebFetch;
-    outBox.checked = p.allowOutbound;
-    localBox.checked = p.allowLocalNetwork;
-    enforceSelect.value = p.enforcementMode === 'mxc-only' ? 'mxc-only' : 'both';
-    enforceWarn.style.display = enforceSelect.value === 'mxc-only' ? '' : 'none';
-  }
-
-  return { getPolicy, setPolicy };
 }
 
 // ── Default sandbox policy form (now managed through @agent editor) ──
@@ -6240,7 +3306,7 @@ function toggleBody(el: HTMLElement): void {
 (window as any).toggleBody = toggleBody;
 
 async function editBody(spaceId: string): Promise<void> {
-  const space = spaces.find(i => i.id === spaceId);
+  const space = await whimAPI.getSpace(spaceId);
   if (!space || !space.body) return;
 
   const itemEl = listEl.querySelector(`[data-id="${spaceId}"]`);
@@ -6290,7 +3356,7 @@ async function editBody(spaceId: string): Promise<void> {
 
 // ── Attachments ─────────────────────────────────────────
 async function addAttachment(spaceId: string): Promise<void> {
-  const space = spaces.find(i => i.id === spaceId);
+  const space = await whimAPI.getSpace(spaceId);
   if (!space) return;
 
   const itemEl = listEl.querySelector(`[data-id="${spaceId}"]`);
@@ -6342,7 +3408,7 @@ async function addAttachment(spaceId: string): Promise<void> {
 }
 
 async function removeAttachment(spaceId: string, index: number): Promise<void> {
-  const space = spaces.find(i => i.id === spaceId);
+  const space = await whimAPI.getSpace(spaceId);
   if (!space) return;
   const attachments = [...(space.attachments || [])];
   attachments.splice(index, 1);
@@ -6389,7 +3455,7 @@ function updateFocusBanner(): void {
   // guard which still applies to legacy state.
   if (!focusedSpaceId) return;
   const space = spaces.find(i => i.id === focusedSpaceId);
-  if (!space || space.status === 'done') {
+  if (space?.status === 'done') {
     clearFocus();
   }
 }
@@ -6404,11 +3470,19 @@ focusDone.addEventListener('click', async () => {
 focusClear.addEventListener('click', clearFocus);
 
 async function loadFocusState(): Promise<void> {
+  const generation = getWorkspaceGeneration();
   const saved = await whimAPI.getSetting('focused_intent');
+  if (generation !== getWorkspaceGeneration()) return;
   if (saved) {
     focusedSpaceId = saved;
     spaceStore.setFocusedSpace(saved);
-    updateFocusBanner();
+    const focused = await whimAPI.getSpace(saved);
+    if (generation !== getWorkspaceGeneration() || focusedSpaceId !== saved) return;
+    spaceStore.setFocusedSummary(focused);
+    if (!focused || focused.status === 'done') { clearFocus(); return; }
+    // The initial/hidden list may not have hydrated yet. Its next snapshot
+    // checks the saved target rather than clearing it against an empty cache.
+    if (spaceStore.getState().hydrated) updateFocusBanner();
   }
 }
 
@@ -6432,7 +3506,10 @@ timelineBtn?.addEventListener('click', showTimeline);
 timelineBack.addEventListener('click', hideTimeline);
 
 async function loadTimeline(): Promise<void> {
-  const events = await whimAPI.listEvents(200);
+  const generation = getWorkspaceGeneration();
+  await loadHistorySnapshot(bridgeApi);
+  if (generation !== getWorkspaceGeneration()) return;
+  const events = historyStore.getState().events;
 
   if (events.length === 0) {
     timelineContent.innerHTML = `
@@ -6525,8 +3602,7 @@ async function unarchiveIntent(id: string): Promise<void> {
 (window as any).unarchiveIntent = unarchiveIntent;
 
 // ── Canvas view ─────────────────────────────────────────
-import { mountCanvas, unmountCanvas, getCanvasContent, saveCanvas as saveCanvasEditor, updateCanvasPresence, updateCanvasAgentThreadStatuses, updateCanvasAgentInteractions, updateCanvasDecorations, updateCanvasAgentUsers, addCanvasCommentReply, updateCanvasFrontmatter, toggleCanvasMode, getCanvasEditorMode, replaceCanvasContent, appendCanvasLink, replaceCanvasText, getCanvasSelectedText, focusCanvasEditor } from './canvas/mount.tsx';
-import { mountCanvasWorkerPanel, unmountCanvasWorkerPanel, isCanvasChatPaneOpen, closeCanvasChatPane } from './canvas/worker-panel-mount.tsx';
+import { loadCanvasFeature, mountCanvas, unmountCanvas, getCanvasContent, saveCanvas as saveCanvasEditor, updateCanvasPresence, updateCanvasAgentThreadStatuses, updateCanvasAgentInteractions, updateCanvasDecorations, updateCanvasAgentUsers, addCanvasCommentReply, updateCanvasFrontmatter, toggleCanvasMode, getCanvasEditorMode, replaceCanvasContent, appendCanvasLink, replaceCanvasText, getCanvasSelectedText, focusCanvasEditor, mountCanvasWorkerPanel, unmountCanvasWorkerPanel, isCanvasChatPaneOpen, closeCanvasChatPane } from './canvas/lazy-mount';
 import type { CanvasAgentInteraction, CanvasPresence, CanvasUser, CanvasDecoration, CanvasThreadAgentStatus } from './canvas/types';
 import type { MentionEvent } from './canvas/MarkdownCanvas';
 import { normalizeMentionLaunchText } from './canvas/editor/mentions';
@@ -7246,7 +4322,9 @@ function showCanvasInputDialog(label: string, onSubmit: (value: string) => void)
 }
 
 async function openCanvas(spaceId: string, expanded = false): Promise<void> {
-  const space = spaces.find(i => i.id === spaceId);
+  const generation = getWorkspaceGeneration();
+  const space = spaces.find(i => i.id === spaceId) ?? await whimAPI.getSpace(spaceId);
+  if (generation !== getWorkspaceGeneration()) return;
   if (!space) return;
 
   // The desktop main window hands canvases to a dedicated window; the popout
@@ -7255,6 +4333,8 @@ async function openCanvas(spaceId: string, expanded = false): Promise<void> {
     whimAPI.openCanvasWindow({ kind: 'space', id: spaceId, title: space.description });
     return;
   }
+  await loadCanvasFeature();
+  if (generation !== getWorkspaceGeneration()) return;
 
   // Inline, the canvas shares the window with the spaces list, so it has to
   // take the space over rather than appear behind it — `revealCanvasView`
@@ -7291,7 +4371,7 @@ async function openCanvas(spaceId: string, expanded = false): Promise<void> {
   const [result, currentTheme, canvasPersonas] = await Promise.all([
     whimAPI.readCanvas(spaceId),
     Promise.resolve(getResolvedTheme()),
-    whimAPI.listPersonas().then(p => p || []),
+    readCanvasPersonas(),
     loadSkills(),
   ]);
 
@@ -7319,7 +4399,6 @@ async function openCanvas(spaceId: string, expanded = false): Promise<void> {
       setCanvasHeaderTitle(title);
       const current = spaces.find(s => s.id === spaceId);
       if (current && current.description !== title) {
-        current.description = title;
         spaceStore.updateSpaceTitle(spaceId, title);
       }
     },
@@ -7380,6 +4459,7 @@ async function openCanvas(spaceId: string, expanded = false): Promise<void> {
 }
 
 async function openPage(spaceId: string, pageName: string): Promise<void> {
+  await loadCanvasFeature();
   canvasSpaceId = null;
   canvasSkillId = null;
   canvasPageSpaceId = spaceId;
@@ -7403,7 +4483,7 @@ async function openPage(spaceId: string, pageName: string): Promise<void> {
 
   const [result, canvasPersonas] = await Promise.all([
     whimAPI.readPage(spaceId, pageName),
-    whimAPI.listPersonas().then(p => p || []),
+    readCanvasPersonas(),
   ]);
   if (result.error) return;
   setCanvasHeaderTitle(deriveMarkdownTitle(result.content || '', pageName));
@@ -7434,6 +4514,7 @@ async function openPage(spaceId: string, pageName: string): Promise<void> {
 }
 
 async function openWorkspaceFile(filePath: string, title: string): Promise<void> {
+  await loadCanvasFeature();
   canvasSpaceId = null;
   canvasSkillId = null;
   canvasPageSpaceId = null;
@@ -7477,6 +4558,8 @@ async function saveCanvas(): Promise<void> {
 }
 
 async function closeCanvas(): Promise<void> {
+  canvasRoot.inert = true;
+  try {
   const wasPreviewActive = previewActive;
   const savedContent = previewSavedContent;
   const spaceId = canvasSpaceId;
@@ -7506,6 +4589,10 @@ async function closeCanvas(): Promise<void> {
 
   if (!closeResult.success) {
     canvasSaveStatus.textContent = '✗ close save failed — canvas kept open';
+    return;
+  }
+  if (!wasPreviewActive && getCanvasContent() !== finalContent) {
+    canvasSaveStatus.textContent = 'Document changed while closing; newer edits kept open.';
     return;
   }
 
@@ -7558,6 +4645,7 @@ async function closeCanvas(): Promise<void> {
   hideInlineCanvas();
   canvasClosing = false;
   await loadSpaces();
+  } finally { canvasRoot.inert = false; }
 }
 
 // Guard against double-save in beforeunload
@@ -7789,7 +4877,7 @@ async function exitPreview(): Promise<void> {
   const spaceId = canvasSpaceId!;
   await unmountCanvas();
   const currentTheme = getResolvedTheme();
-  const canvasPersonas = await whimAPI.listPersonas().then(p => p || []);
+  const canvasPersonas = await readCanvasPersonas();
   const parsedSaved = parseFrontmatter<Record<string, unknown>>(savedContent || '');
   setCanvasHeaderTitle(deriveMarkdownTitle(savedContent || '', canvasTitle.textContent || 'Untitled'));
   mountCanvas(canvasRoot, {
@@ -7802,7 +4890,6 @@ async function exitPreview(): Promise<void> {
       setCanvasHeaderTitle(title);
       const current = spaces.find(s => s.id === spaceId);
       if (current && current.description !== title) {
-        current.description = title;
         spaceStore.updateSpaceTitle(spaceId, title);
       }
     },
@@ -7921,6 +5008,8 @@ export type CanvasTarget = {
 };
 
 async function saveAndUnmountCurrent(): Promise<boolean> {
+  canvasRoot.inert = true;
+  try {
   const saveResult = await saveCanvasEditor();
   if (!saveResult.success) {
     canvasSaveStatus.textContent = '✗ save failed — current canvas kept open';
@@ -7942,6 +5031,10 @@ async function saveAndUnmountCurrent(): Promise<boolean> {
     canvasSaveStatus.textContent = '✗ close save failed — current canvas kept open';
     return false;
   }
+  if (getCanvasContent() !== finalContent) {
+    canvasSaveStatus.textContent = 'Document changed while saving; newer edits kept open.';
+    return false;
+  }
   await unmountCanvas(false);
   canvasSkillId = null;
   canvasFilePath = null;
@@ -7951,6 +5044,7 @@ async function saveAndUnmountCurrent(): Promise<boolean> {
   resetCanvasAgentMaps();
   syncCanvasAgentThreadStatuses();
   return true;
+  } finally { canvasRoot.inert = false; }
 }
 
 async function openCanvasTarget(target: CanvasTarget): Promise<void> {
@@ -7960,7 +5054,7 @@ async function openCanvasTarget(target: CanvasTarget): Promise<void> {
   }
 
   if (target.kind === 'skill') {
-    cachedSkills = await whimAPI.listSkills();
+    await loadSkills();
     await openSkillEditor(target.id);
   } else if (target.kind === 'page') {
     await openPage(target.spaceId!, target.page!);
@@ -7970,13 +5064,13 @@ async function openCanvasTarget(target: CanvasTarget): Promise<void> {
     // Populate space data so openCanvas() can find it
     const targetTitle = target.title?.trim();
     if (!spaces.find(i => i.id === target.id)) {
-      spaces.push({
+      spaceStore.upsertSpace({
         id: target.id,
         description: targetTitle || 'Untitled',
-        body: null, raw_text: null, client: null,
+        client: null,
         due_at: null, due_at_utc: null, recurrence: null,
         completed_at: null, folder: null, session_id: null,
-        attachments: [],
+        source_skill_id: null,
         status: 'captured',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -8000,12 +5094,36 @@ if (!canvasPopsOut) {
 }
 
 // ── Agent Chat View ────────────────────────────────────
-import { mountChat, unmountChat } from './chat/mount.tsx';
+import { loadChatFeature, mountChat, unmountChat } from './chat/lazy-mount';
 
 const chatView = document.getElementById('chat-view') as HTMLDivElement;
 const chatRoot = document.getElementById('chat-root') as HTMLDivElement;
+let chatOpenRequest = 0;
 
 async function openAgentChat(agentId: string | undefined, agentPrompt: string, agentStatus: string, agentSource?: 'sdk' | 'cli' | 'cca', spaceId?: string): Promise<void> {
+  const request = ++chatOpenRequest;
+  const generation = getWorkspaceGeneration();
+  let detail: Awaited<ReturnType<typeof whimAPI.getAgent>> = null;
+  try {
+    await loadChatFeature();
+    if (agentId) detail = await whimAPI.getAgent(agentId);
+  } catch (error) {
+    if (request === chatOpenRequest && generation === getWorkspaceGeneration()) {
+      showStatus(error instanceof Error ? error.message : 'Could not load worker details', true);
+    }
+    return;
+  }
+  if (request !== chatOpenRequest || generation !== getWorkspaceGeneration()) return;
+  if (agentId && !detail) {
+    showStatus('This worker is no longer available', true);
+    return;
+  }
+  if (detail) {
+    agentPrompt = detail.selectedText;
+    agentStatus = detail.status;
+    agentSource = detail.source;
+    spaceId = detail.spaceId;
+  }
   // Hide other views, show chat inline
   mainView.classList.add('hidden');
   hideSettings();
@@ -8017,7 +5135,7 @@ async function openAgentChat(agentId: string | undefined, agentPrompt: string, a
   const approval = agentId ? agentApprovals.get(agentId) : undefined;
 
   // Look up sandbox + yolo state from the most recent agent list data
-  const agentData = renderedAgents?.find((a: any) => a.agentId === agentId);
+  const agentData = detail ?? renderedAgents?.find((a: any) => a.agentId === agentId);
   const sandboxed = (agentData as any)?.sandboxed === true;
   const yolo = (agentData as any)?.yoloMode === true;
 
@@ -8033,16 +5151,12 @@ async function openAgentChat(agentId: string | undefined, agentPrompt: string, a
     pendingPermissionKind: approval?.permissionKind,
     onClose: () => closeAgentChat(),
     onOpenCli: (id: string) => whimAPI.openAgentCli(id),
-    onOpenCanvas: spaceId ? (id: string) => {
-      const space = spaces.find(i => i.id === id);
-      if (space) {
-        whimAPI.openCanvasWindow({ kind: 'space', id, title: space.description });
-      }
-    } : undefined,
+    onOpenCanvas: spaceId ? (id: string) => { void openCanvas(id); } : undefined,
   });
 }
 
 function closeAgentChat(): void {
+  ++chatOpenRequest;
   unmountChat();
 
   chatView.classList.add('hidden');
@@ -8433,10 +5547,9 @@ function clearAgentDecorations(): void {
 
 // ── Global agent status/approval listeners ─────────────
 whimAPI.onAgentStatusChanged((data: any) => {
-  scheduleAgentListRefresh();
-  scheduleAgentSpacesRefresh();
   // Clear steps if agent restarted
-  if (data.status === 'running' && !agentSteps.has(data.agentId)) {
+  if (data.status === 'running' && !agentSteps.has(data.agentId)
+    && agentStore.getState().agents.some(agent => agent.agentId === data.agentId)) {
     agentSteps.set(data.agentId, []);
   }
   // Clear approval and badge when agent is no longer waiting
@@ -8560,11 +5673,6 @@ whimAPI.onAgentElicitationResolved((data) => {
   });
 });
 
-whimAPI.onAgentCompleted(() => {
-  scheduleAgentListRefresh();
-  scheduleAgentSpacesRefresh();
-});
-
 whimAPI.onAgentYoloChanged((data: { agentId: string; enabled: boolean }) => {
   agentYoloState.set(data.agentId, data.enabled);
   // Update the yolo button if visible
@@ -8611,18 +5719,15 @@ whimAPI.onAgentRemoteChanged((data: { agentId: string; enabled: boolean; remoteS
  * stays in the store so the user can still Allow / Disable for that call.
  */
 async function openPersonaEditorForSandbox(personaHandle: string): Promise<void> {
-  if (personas.length === 0) {
-    try { await loadPersonas(); } catch { /* fall through; lookup may fail */ }
-  }
+  const controls = await loadSettingsControls();
+  await controls.loadPersonas();
   const persona = personas.find(p => p.handle === personaHandle);
-  if (persona) {
-    setFilter('agents');
-    selectAgent(persona.id);
-    setTimeout(() => {
-      const sandboxSection = document.querySelector('.persona-sandbox-row') as HTMLElement | null;
-      sandboxSection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 50);
-  }
+  if (!persona) throw new Error('Agent persona not found');
+  settingsOverlay.classList.remove('hidden');
+  settingsModalOpen = true;
+  document.querySelector<HTMLButtonElement>('.settings-tab-btn[data-tab="personas"]')?.click();
+  controls.selectAgent(persona.id);
+  document.querySelector<HTMLElement>('.persona-sandbox-row')?.scrollIntoView({ block: 'start' });
 }
 
 whimAPI.onAgentSandboxBlocked((data: any) => {
@@ -8664,11 +5769,41 @@ loadPinState();
 loadRemoteState();
 
 // Flush canvas saves when the window is about to close (app quit, reload)
+async function flushLocalDrafts(): Promise<void> {
+  if (isRecording || voiceInputState === 'transcribing') throw new Error('Finish voice capture before closing.');
+  if (captureFlight) await captureFlight;
+  if (!isCanvasMode && !isSettingsMode && !searchMode && descInput.value.trim()) {
+    // A draft is saved as text, never executed as an agent/skill during quit.
+    const draft = descInput.value;
+    const generation = getWorkspaceGeneration();
+    const result = await whimAPI.create({ body: draft });
+    if (!result || 'error' in result) throw new Error('Capture draft could not be saved; text retained.');
+    if (generation !== getWorkspaceGeneration()) throw new Error('Workspace changed while saving capture.');
+    insertSpaceOptimistically(result);
+    if (descInput.value !== draft) throw new Error('Capture changed while saving; newer text retained.');
+    descInput.value = '';
+  }
+  await settingsLoading;
+  await settingsController?.flush();
+  await settingWrites.flush();
+  settingsDrafts.assertClean();
+  const result = await saveCanvasEditor();
+  if (!result.success) throw new Error(result.error || 'Editor could not save; local text retained.');
+}
+
+installSaveLifecycle(bridgeApi, flushLocalDrafts, error => {
+  showStatus(error, true);
+  canvasSaveStatus.textContent = error;
+}, locked => { document.body.inert = locked; });
+
 window.addEventListener('beforeunload', (event) => {
   if (canvasClosing) return;
-  if (!canvasSkillId && !canvasPageSpaceId && !canvasSpaceId && !canvasFilePath) return;
+  const settingsDirty = settingsDrafts.hasDirty() || settingsController?.hasDirty();
+  if (!canvasDirty && !captureFlight && (!descInput.value.trim() || searchMode) && !settingsDirty) return;
   event.preventDefault();
-  void closeCanvas();
+  event.returnValue = '';
+  // Browsers cannot await asynchronous work during unload. Keep the standard
+  // leave-page guard; explicit in-app navigation uses the durable handshake.
 });
 
 document.addEventListener('keydown', (e) => {
@@ -8701,7 +5836,7 @@ document.addEventListener('keydown', (e) => {
       const agentItems = listEl.querySelectorAll('.agent-card');
       if (matchesHotkey(e, 'navigateDown') && selectedIndex >= 0) {
         e.preventDefault();
-        if (selectedIndex < agentItems.length - 1) {
+        if (selectedIndex < renderedAgents.length - 1) {
           selectedIndex++;
           updateAgentSelection();
         }
@@ -8836,8 +5971,6 @@ whimAPI.onWindowShown((data) => {
   descInput.focus();
   descInput.select();
   hideStatus();
-  // Refresh active session state when window reappears
-  loadSpaces();
   refreshGitSync();
 
   // Slide in from the appropriate edge
@@ -8848,6 +5981,7 @@ whimAPI.onWindowShown((data) => {
     appEl.classList.remove('app-hidden-left', 'app-hidden-right', 'app-no-transition');
     windowVisualState = 'visible';
   }
+  void refreshVisibleCollections();
 });
 
 whimAPI.onWindowToggle((data) => {
@@ -9087,6 +6221,7 @@ function startTourHotkeyRecording(): void {
 async function showTourView(returnTo: 'welcome' | 'main' = 'welcome'): Promise<void> {
   if (isCanvasMode || isSettingsMode) return;
   tourActive = true;
+  void refreshVisibleCollections();
   tourReturnTo = returnTo;
   tourStep = 'hotkey';
   tourDone.hide = false;
@@ -9156,7 +6291,7 @@ async function finishTour(): Promise<void> {
     mainView.classList.remove('hidden');
     descInput.focus();
     // The tour suppressed the usual on-show refresh, so catch the list up.
-    void loadSpaces();
+    void refreshVisibleCollections();
     refreshGitSync();
   }
 }
@@ -9435,8 +6570,8 @@ welcomeStartBtn.addEventListener('click', async () => {
   }
 
   hideWelcomeView();
-  loadSpaces();
-  loadSkills();
+  void refreshVisibleCollections();
+  void loadSkills();
   refreshGitSync();
   void maybeShowFirstRunHelp();
 });
@@ -9530,6 +6665,13 @@ function mountReactLists(): void {
     focusBannerHost,
     mainList: {
       spacesActions: {
+        onVisibleSpacesChange: (visible) => {
+          const selectedId = displayedSpaces[selectedIndex]?.id;
+          spaceRowsOwnedByReact = true;
+          displayedSpaces = visible;
+          selectedIndex = selectedId ? visible.findIndex(space => space.id === selectedId) : -1;
+          spaceStore.setSelectedIndex(selectedIndex);
+        },
         onSpaceClick: (id) => (window as any).openCanvas?.(id, true),
         onToggleStatus: (id) => (window as any).toggleStatus?.(id),
         onDelete: (id) => (window as any).deleteSpace?.(id),
@@ -9598,6 +6740,10 @@ function mountReactLists(): void {
         onSkillClick: (id) => { void openSkillEditor(id); },
         onRunNow: (id) => (window as any).runSkillNow?.(id),
         onSchedule: (id) => (window as any).openSchedulePicker?.(id),
+        onOpenResult: (spaceId: string) => {
+          void openInvokedSkillCanvas({ id: spaceId, description: spaces.find(space => space.id === spaceId)?.description })
+            .catch(error => showStatus(`Failed: ${error instanceof Error ? error.message : String(error)}`, true));
+        },
         onCreateSpace: (id) => (window as any).createSpaceFromSkill?.(id),
         onOpenFolder: (id) => (window as any).openSkillFolder?.(id),
         onDelete: (id) => (window as any).deleteSkill?.(id),
@@ -9618,26 +6764,104 @@ function mountReactLists(): void {
   });
 }
 
-/*
- * Each input is read independently: over the web remote one of the three can
- * be refused, and a `Promise.all` turned that into a page that never started.
- * See boot-guard.ts.
- */
-Promise.all([
-  bootValue(() => whimAPI.getSetting('workspace_root'), null, 'workspace_root'),
-  bootValue(() => whimAPI.getSetting('model'), null, 'model'),
-  bootValue(() => whimAPI.getCliRuntimeStatus(), UNKNOWN_CLI_RUNTIME, 'cli runtime status'),
-]).then(async ([ws, model, cli]) => {
-  // Install the IPC -> store bridge once at boot. The bridge runs alongside
-  // the legacy IPC handlers during the migration (Phase 6).
-  installIpcBridge(bridgeApi);
+// Store subscriptions keep imperative action/keyboard consumers current even
+// when a payload or bridge refresh (rather than a legacy load call) changed it.
+let mirroredSpaces = spaceStore.getState().spaces;
+let spacesHydrated = spaceStore.getState().hydrated;
+let mirroredAgents = agentStore.getState().agents;
+let mirroredSessions = agentStore.getState().activeSessionSpaces;
+spaceStore.subscribe(() => {
+  const snapshot = spaceStore.getState();
+  focusedSpaceId = snapshot.focusedSpaceId;
+  if (mirroredSpaces === snapshot.spaces && spacesHydrated === snapshot.hydrated) return;
+  mirroredSpaces = snapshot.spaces;
+  spacesHydrated = snapshot.hydrated;
+  spaces = [...snapshot.spaces];
+  searchResults = snapshot.searchResults;
+  countEl.textContent = String(snapshot.page?.counts.open ?? spaces.filter(space => space.status !== 'done').length);
+  if (currentFilter === 'open') {
+    const selectedId = displayedSpaces[selectedIndex]?.id;
+    displayedSpaces = snapshot.searchResults ?? spaces.filter(space => space.status !== 'done');
+    selectedIndex = selectedId ? displayedSpaces.findIndex(space => space.id === selectedId) : -1;
+    updateSelection();
+  }
+  if (snapshot.hydrated) updateFocusBanner();
+});
+agentStore.subscribe(() => {
+  const snapshot = agentStore.getState();
+  if (mirroredSessions !== snapshot.activeSessionSpaces) {
+    mirroredSessions = snapshot.activeSessionSpaces;
+    activeSessionSpaces = new Set(snapshot.activeSessionSpaces);
+  }
+  if (mirroredAgents !== snapshot.agents) {
+    mirroredAgents = snapshot.agents;
+    const visibleIds = new Set(snapshot.agents.map(agent => agent.agentId));
+    for (const [id, unsubscribe] of agentChatUnsubs) {
+      if (!visibleIds.has(id)) {
+        unsubscribe();
+        agentChatUnsubs.delete(id);
+        agentSteps.delete(id);
+      }
+    }
+    agentsBySpace = agentStore.getAgentsBySpace();
+    const selectedId = currentFilter === 'agents' ? renderedAgents[selectedIndex]?.agentId : undefined;
+    const query = searchMode ? activeSearchQuery.toLowerCase() : '';
+    renderedAgents = snapshot.agents.filter(agent => snapshot.page || !query
+      || agent.selectedText.toLowerCase().includes(query) || agent.summary.toLowerCase().includes(query));
+    if (currentFilter === 'agents') {
+      selectedIndex = selectedId ? renderedAgents.findIndex(agent => agent.agentId === selectedId) : -1;
+      updateAgentSelection();
+      if (!document.hidden && !isCanvasMode && !isSettingsMode) {
+        for (const agent of snapshot.agents) {
+          if (agent.status === 'running' || agent.status === 'waiting-approval') subscribeAgentChat(agent.agentId);
+        }
+      }
+    }
+  }
+  agentApprovals.clear();
+  for (const [id, approval] of snapshot.approvals) agentApprovals.set(id, approval);
+  agentYoloState.clear();
+  for (const [id, enabled] of snapshot.yoloMode) agentYoloState.set(id, enabled);
+  updateWorkersBadge();
+});
+skillStore.subscribe(() => { cachedSkills = [...skillStore.getState().skills]; });
+personaStore.subscribe(() => {
+  const snapshot = personaStore.getState();
+  personas = [...snapshot.personas];
+  if (snapshot.hydrated && !isCanvasMode && !isSettingsMode) {
+    // Preserve main-window @agent initialization, but never persist an empty
+    // fallback after a failed or deferred persona read.
+    ensureDefaultAgent();
+    personaStore.setPersonas(personas);
+  }
+});
 
-  const setupRequired = !ws || !model || !cli.target || !cli.compatible;
+installIpcBridge(bridgeApi, {
+  isListVisible: () => !isCanvasMode && !isSettingsMode && !document.hidden
+    && !settingsModalOpen && !tourActive
+    && (windowVisualState === 'visible' || windowVisualState === 'sliding-in'),
+});
+
+const bootWorkspaceGeneration = getWorkspaceGeneration();
+mountReactLists();
+finishShellTiming();
+const finishCaptureTiming = startTiming('startup.capture');
+whimAPI.getSetting('workspace_root').then(async ws => {
+  if (bootWorkspaceGeneration !== getWorkspaceGeneration()) {
+    mountReactLists();
+    return;
+  }
+  const setupRequired = !ws;
+  updateWorkspaceDisplay(ws);
   if (setupRequired && !isCanvasMode && !isSettingsMode) {
     // Brand-new install: teach the hotkey and the tray icon *before* the setup
     // form, so the user can never lose the window without knowing how to get
     // it back. Returning users (tour already done) go straight to setup.
     const quickStartDone = await whimAPI.getSetting('quick_start_completed');
+    if (bootWorkspaceGeneration !== getWorkspaceGeneration()) {
+      mountReactLists();
+      return;
+    }
     if (quickStartDone) {
       showWelcomeView();
     } else {
@@ -9646,11 +6870,11 @@ Promise.all([
     // Still mount React so the lists are ready when a workspace is selected;
     // they render empty states while no workspace is configured.
     mountReactLists();
-  } else if (!isSettingsMode) {
-    // Mount AFTER the first snapshot lands so React's first paint sees real
-    // data instead of an empty-state flash for workspaces with content.
-    await loadSpaces();
-    mountReactLists();
+  } else if (!isSettingsMode && !isCanvasMode) {
+    await waitForCaptureStorage(bridgeApi, () => bootWorkspaceGeneration === getWorkspaceGeneration());
+    finishCaptureTiming();
+    // Capture is usable before collection hydration and optional services.
+    await loadSpacesSnapshot(bridgeApi);
     refreshGitSync();
     void loadCanvasArtifactsSnapshot(bridgeApi);
   }
@@ -9659,19 +6883,20 @@ Promise.all([
   // an unguarded call added to this block later would otherwise reproduce the
   // exact failure this catch exists to end: a page that renders nothing and
   // says nothing. Mounting is idempotent, so recovering here is safe.
-  console.error('[boot] startup failed; mounting the interface anyway', err);
-  mountReactLists();
+  finishCaptureTiming(false);
+  console.error('[boot] startup failed', err);
+  showStatus(err instanceof Error ? err.message : 'Storage could not start; text is kept.', true);
 });
 
 // Load personas in the main window so the @-mention dropdown on the Workers
 // tab has data.  (Settings popout has its own loadPersonas() call.)
 if (!isCanvasMode && !isSettingsMode) {
-  loadPersonas().catch(() => { /* leaves personas[] empty */ });
+  void loadPersonasSnapshot(bridgeApi);
 }
 
 // Refresh the space list when the canvas popout window is closed
 whimAPI.onCanvasWindowClosed(() => {
-  if (!isCanvasMode) loadSpaces();
+  if (!isCanvasMode && !isSettingsMode) void loadSpaces();
 });
 
 // Listen for theme changes broadcast from other windows
@@ -9685,6 +6910,25 @@ if (!isCanvasMode && !isSettingsMode) {
 
 // Reload all data when workspace changes (select or clear)
 whimAPI.onWorkspaceChanged((path: string | null) => {
+  renderGeneration += 1;
+  if (searchTimeout) clearTimeout(searchTimeout);
+  unsubscribeAllAgentChats();
+  agentSteps.clear();
+  agentApprovals.clear();
+  agentYoloState.clear();
+  agentRemoteState.clear();
+  processingSpaces.clear();
+  if (searchMode) {
+    descInput.classList.remove('search-mode');
+    descInput.value = '';
+    descInput.style.height = 'auto';
+    descInput.placeholder = getPlaceholderForFilter(currentFilter);
+    inputHints.classList.remove('hidden');
+  }
+  searchResults = null;
+  searchMode = false;
+  activeSearchQuery = '';
+  selectedIndex = -1;
   if (isCanvasMode || isSettingsMode) {
     // In canvas/settings window, close it — the workspace changed underneath
     window.close();
@@ -9693,16 +6937,12 @@ whimAPI.onWorkspaceChanged((path: string | null) => {
   updateWorkspaceDisplay(path);
   hideSettings();
   if (path) {
-    loadSpaces();
-    loadSkills();
+    void loadFocusState();
     refreshGitSync();
   } else {
     // Workspace cleared — show welcome view
     spaces = [];
     cachedSkills = [];
-    spaceStore.setSpaces([]);
-    skillStore.setSkills([]);
-    personaStore.setPersonas([]);
     render();
     showWelcomeView();
     gitSyncAvailable = false;
@@ -9815,9 +7055,8 @@ if (isCanvasMode) {
     }
   });
 
-  // Also load full spaces and skills in background for metadata
-  whimAPI.list().then(list => { spaces = list; });
-  whimAPI.listSkills().then(list => { cachedSkills = list; });
+  // Target metadata is supplied by onLoadCanvasTarget; a prewarmed popout
+  // must not hydrate the main window's collections.
 }
 
 // ── Settings popout window mode ─────────────────────────
@@ -9837,54 +7076,111 @@ if (isSettingsMode) {
     applyTheme(normalizeChoice(theme));
   });
 
-  // Fire all settings data loads in parallel so the slow ones (listModels
-  // network call, MCP fs reads) overlap. Use allSettled so one failure
-  // doesn't break sibling loads.
-  // Note: loadCliPathInputSync() paints the input + "checking…" labels
-  // immediately; the actual CLI subprocess probes (checkCliVersion +
-  // checkCliMxcCapable, each spawns the CLI binary) are deferred below
-  // so the General tab is interactive without waiting on them.
-  const loadAllSettings = () => Promise.allSettled([
-    loadModels(),
-    loadWorkspaceSetting(),
-    loadThemeSetting(),
-    loadAutoHideSetting(),
-    loadAutoRemoteSetting(),
-    loadWebRemoteSetting(),
-    loadCommentTriggerSetting(),
-    loadUpdateSettings(),
-    loadPersonas(),
-    loadRuntimes(),
-    loadExportDestinations(),
-    loadCliPathInputSync(),
-    loadRuntimeSourceSettings(),
-    loadMcpServers(),
-    loadCliTools(),
-    loadHotkeys(),
-    refreshProfiles(),
-  ]);
-
-  loadAllSettings();
-
-  // Defer the CLI subprocess probes to idle so they don't block first
-  // paint. requestIdleCallback isn't on the WebKit type lib by default,
-  // so fall back to setTimeout when unavailable.
-  const runChecks = () => runCliPathChecks();
-  const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback;
-  if (typeof ric === 'function') {
-    ric(runChecks, { timeout: 2000 });
-  } else {
-    setTimeout(runChecks, 0);
-  }
+  const settings = loadSettingsControls();
+  void settings.catch(reportSettingsSaveError);
 
   // The settings window is hidden (not destroyed) on close and pre-warmed at
   // app start, so without this its controls would keep showing whatever was
   // loaded when the process started. Main re-sends this every time the window
   // is shown.
   whimAPI.onSettingsRefresh(() => {
-    void loadAllSettings().then(runChecks);
+    if (settingsDrafts.hasDirty()) {
+      showStatus('Settings edits kept open. Save or cancel them before refreshing.', true);
+      return;
+    }
+    void settings.then(controller => controller.refresh()).catch(reportSettingsSaveError);
   });
 
-  // Close button closes the window
-  settingsClose.addEventListener('click', () => window.close());
+}
+
+// ES modules and their static dependencies may finish after navigation events.
+// Native target delivery waits until all shell subscriptions are installed.
+bridgeApi.rendererReady();
+
+export interface SettingsHost {
+  settingsOverlay: HTMLDivElement;
+  closeSettings: typeof closeSettings;
+  hideSettings: typeof hideSettings;
+  currentWorkspacePath: string | null;
+  loadThemeSetting: typeof loadThemeSetting;
+  refreshProfiles: typeof refreshProfiles;
+  loadHotkeys: typeof loadHotkeys;
+  whimAPI: typeof whimAPI;
+  showStatus: typeof showStatus;
+  hideStatus: typeof hideStatus;
+  normalizeChoice: typeof normalizeChoice;
+  applyTheme: typeof applyTheme;
+  updateWorkspaceDisplay: typeof updateWorkspaceDisplay;
+  getWorkspaceGeneration: typeof getWorkspaceGeneration;
+  loadPersonasSnapshot: typeof loadPersonasSnapshot;
+  bridgeApi: typeof bridgeApi;
+  personas: typeof personas;
+  personaStore: typeof personaStore;
+  ensureDefaultAgent: typeof ensureDefaultAgent;
+  DEFAULT_AGENT_HANDLE: string;
+  settingsDrafts: typeof settingsDrafts;
+  DEFAULT_SANDBOX_POLICY: typeof DEFAULT_SANDBOX_POLICY;
+  settingWrites: typeof settingWrites;
+  profilesState: ProfilesState | null;
+  isValidTint: typeof isValidTint;
+  generateTintColor: typeof generateTintColor;
+  hueOf: typeof hueOf;
+  applyProfileTint: typeof applyProfileTint;
+  DebouncedSave: typeof DebouncedSave;
+  CLI_CUSTOM_OPTION: string;
+  populateCliSelect: typeof populateCliSelect;
+  HOTKEY_LABELS: typeof HOTKEY_LABELS;
+  currentHotkeys: typeof currentHotkeys;
+  DEFAULT_HOTKEYS: typeof DEFAULT_HOTKEYS;
+  formatAccelerator: typeof formatAccelerator;
+  hotkeyPlatform: typeof hotkeyPlatform;
+  keyboardEventToAccelerator: typeof keyboardEventToAccelerator;
+  modifierEventToAccelerator: typeof modifierEventToAccelerator;
+  findConflict: typeof findConflict;
+}
+export type { ThemeChoice };
+export type { ExportDestination };
+export type { ExportFormat };
+export type { UpdateState };
+function settingsHost(): SettingsHost {
+  return {
+    settingsOverlay, closeSettings, hideSettings,
+    get currentWorkspacePath() { return currentWorkspacePath; },
+    loadThemeSetting, refreshProfiles, loadHotkeys,
+    get whimAPI() { return whimAPI; },
+    get showStatus() { return showStatus; },
+    get hideStatus() { return hideStatus; },
+    get normalizeChoice() { return normalizeChoice; },
+    get applyTheme() { return applyTheme; },
+    get updateWorkspaceDisplay() { return updateWorkspaceDisplay; },
+    get getWorkspaceGeneration() { return getWorkspaceGeneration; },
+    get loadPersonasSnapshot() { return loadPersonasSnapshot; },
+    get bridgeApi() { return bridgeApi; },
+    get personas() { return personas; },
+    set personas(value) { personas = value; },
+    get personaStore() { return personaStore; },
+    get ensureDefaultAgent() { return ensureDefaultAgent; },
+    get DEFAULT_AGENT_HANDLE() { return DEFAULT_AGENT_HANDLE; },
+    get settingsDrafts() { return settingsDrafts; },
+    get DEFAULT_SANDBOX_POLICY() { return DEFAULT_SANDBOX_POLICY; },
+    get settingWrites() { return settingWrites; },
+    get profilesState() { return profilesState; },
+    set profilesState(value) { profilesState = value; },
+    get isValidTint() { return isValidTint; },
+    get generateTintColor() { return generateTintColor; },
+    get hueOf() { return hueOf; },
+    get applyProfileTint() { return applyProfileTint; },
+    get DebouncedSave() { return DebouncedSave; },
+    get CLI_CUSTOM_OPTION() { return CLI_CUSTOM_OPTION; },
+    get populateCliSelect() { return populateCliSelect; },
+    get HOTKEY_LABELS() { return HOTKEY_LABELS; },
+    get currentHotkeys() { return currentHotkeys; },
+    set currentHotkeys(value) { currentHotkeys = value; },
+    get DEFAULT_HOTKEYS() { return DEFAULT_HOTKEYS; },
+    get formatAccelerator() { return formatAccelerator; },
+    get hotkeyPlatform() { return hotkeyPlatform; },
+    get keyboardEventToAccelerator() { return keyboardEventToAccelerator; },
+    get modifierEventToAccelerator() { return modifierEventToAccelerator; },
+    get findConflict() { return findConflict; },
+  };
 }

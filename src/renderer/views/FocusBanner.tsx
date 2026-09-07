@@ -15,8 +15,7 @@ export interface FocusBannerProps {
  * stays consistent with the legacy markup.
  */
 export function FocusBanner({ onComplete, onClear }: FocusBannerProps): React.ReactElement {
-  const { spaces, focusedSpaceId } = useStore(spaceStore);
-  const focused = focusedSpaceId ? spaces.find(s => s.id === focusedSpaceId) : null;
+  const { focusedSummary: focused } = useStore(spaceStore);
 
   if (!focused) {
     return <div className="focus-banner hidden" />;

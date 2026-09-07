@@ -12,13 +12,14 @@ import { InMemoryFsProvider } from './in-memory-fs-provider';
 import type { AgentRecord } from './agent-registry';
 import { AgentNotifier } from './agent-notifier';
 import { AgentPersistence } from './agent-persistence';
+import { observeSession } from './session-events';
 import { InteractionBroker } from './interaction-broker';
 import type { SubagentTracker } from '../subagent-service';
 import { getCustomTools, type CustomToolsContext } from '../tools';
-import { appendSpaceActivity } from '../space-eventlog';
+import { appendSpaceActivity } from '../storage';
 import { buildSandboxLaunchSetup } from './sandbox-launch';
-import { SANDBOX_WORKSPACE_SYSTEM_PROMPT } from './sandbox-policies';
-import { listSpaces, updateCanvasContent, listSkills } from '../database';
+import { SANDBOX_WORKSPACE_SYSTEM_PROMPT, checkPathScope } from './sandbox-policies';
+import { listSpaces, updateCanvasContent, listSkills, getSpace } from '../storage';
 import { getWorkspaceRepo } from '../cloud-agent';
 import { parseFrontmatter } from '../frontmatter';
 import { resolveRunCanvasConfig } from '../canvas/canvas-launch';
@@ -30,6 +31,40 @@ import {
 } from '../canvas/canvas-lifecycle';
 import { endCanvasRun, reportCanvasRun } from '../canvas/canvas-outcome';
 import { notifyCanvasRun } from '../canvas/canvas-notifier';
+import {
+  createScheduledResultContext,
+  createPublishScheduledResultTool,
+  scheduledPermissionDecision,
+  finishScheduledResult,
+  markScheduledInteractionBlocked,
+} from '../services/scheduled-result';
+import { completeScheduledRun } from '../storage';
+import { deriveMarkdownTitle } from '../../shared/markdown-title';
+
+/** Persist the outcome before clearing the occurrence's unattended privileges. */
+export async function finishScheduledAgent(record: AgentRecord, error?: string, legacyPublished?: boolean): Promise<AgentRecord['status']> {
+  try {
+    if (record.scheduledResult) {
+      const result = (await finishScheduledResult(record.scheduledResult, error));
+      record.summary = result.summary;
+      if (result.status === 'failed' || result.status === 'needs-connection') record.status = 'failed';
+    } else if (record.scheduledOccurrence && !record.scheduledOccurrence.invocation.manual) {
+      const { workspaceRoot, invocation } = record.scheduledOccurrence;
+      (await completeScheduledRun(workspaceRoot, invocation.scheduleId, invocation.runId, {
+        status: error || legacyPublished === false ? 'failed' : 'ready',
+        summary: error || (legacyPublished === false ? NO_REPORT_SUMMARY : 'Completed'),
+        spaceId: record.spaceId,
+      }));
+    }
+  } catch (failure) {
+    record.status = 'failed';
+    record.summary = `Could not save the scheduled outcome: ${failure instanceof Error ? failure.message : String(failure)}`;
+    console.error(`[scheduler] ${record.agentId}: ${record.summary}`);
+  }
+  delete record.scheduledResult;
+  delete record.scheduledOccurrence;
+  return record.status;
+}
 
 /**
  * Tell the user about a canvas run that has finished, once.
@@ -38,10 +73,10 @@ import { notifyCanvasRun } from '../canvas/canvas-notifier';
  * reports success as soon as a run starts, which says nothing about whether a
  * report was ever produced.
  */
-function reportFinishedCanvasRun(
+async function reportFinishedCanvasRun(
   agentId: string,
   spaceId: string | null | undefined,
-): 'published' | 'no-output' | null {
+): Promise<'published' | 'no-output' | null> {
   const result = reportCanvasRun(agentId);
   if (!result) return null;
 
@@ -53,8 +88,7 @@ function reportFinishedCanvasRun(
 
   let label: string | undefined;
   try {
-    const { getSpace } = require('../database');
-    label = spaceId ? getSpace(spaceId)?.description ?? undefined : undefined;
+    label = spaceId ? (await getSpace(spaceId))?.description ?? undefined : undefined;
   } catch { /* DB may be unavailable during shutdown */ }
 
   notifyCanvasRun(result, label);
@@ -152,6 +186,10 @@ const PERSISTED_CHAT_EVENT_TYPES = new Set<string>([
   'session.warning',
   'session.idle',
   'session.start',
+  'permission.requested',
+  'permission.completed',
+  'elicitation.requested',
+  'elicitation.completed',
   // Not a transcript milestone — the token counts behind the Activity view.
   // They ride along here rather than in a table of their own because this
   // path is already written through the durable event log, so the numbers
@@ -218,7 +256,7 @@ async function failInitialLaunch(
     record.phase = 'active';
     record.summary = `Initial launch failed and the cloud worker could not be stopped: ${message}. Retry abort before deleting it.`;
     broker.clearPendingInteractions(record);
-    if (!record.ephemeral) persistence.updateStatus(record);
+    if (!record.ephemeral) (await persistence.updateStatus(record));
     notifier.notifyRenderer('agent:status-changed', {
       agentId: record.agentId,
       status: record.status,
@@ -236,8 +274,9 @@ async function failInitialLaunch(
   record.aborted = true;
   record.status = 'failed';
   record.summary = `Error: ${message}`;
+  (await finishScheduledAgent(record, message));
   broker.clearPendingInteractions(record);
-  if (!record.ephemeral) persistence.updateStatus(record);
+  if (!record.ephemeral) (await persistence.updateStatus(record));
   notifier.notifyRenderer('agent:status-changed', {
     agentId: record.agentId,
     status: 'failed',
@@ -323,8 +362,8 @@ function createCustomToolsContext(agentId: string, enableWhimTools = false): Cus
     broker,
     enableWhimTools: true,
     registry,
-    getSpaces: () =>
-      listSpaces().map((space) => ({
+    getSpaces: async () =>
+      (await listSpaces()).map((space) => ({
         id: space.id,
         description: space.description,
         body: space.body,
@@ -337,7 +376,7 @@ function createCustomToolsContext(agentId: string, enableWhimTools = false): Cus
 
       record.yoloMode = enabled;
       console.log(`[agent-service] yolo mode ${enabled ? 'enabled' : 'disabled'} for agent=${targetAgentId}`);
-      persistence.updateYolo(record, enabled);
+      (await persistence.updateYolo(record, enabled));
       notifier.notifyRenderer('agent:yolo-changed', { agentId: targetAgentId, enabled });
 
       if (enabled && record.pendingApprovals.size > 0) {
@@ -348,8 +387,8 @@ function createCustomToolsContext(agentId: string, enableWhimTools = false): Cus
 
       return { ok: true };
     },
-    sendChatMessage: async (targetAgentId: string, prompt: string) => sendChatMessage(targetAgentId, prompt),
-    getAgentHistory: async (targetAgentId: string) => getAgentHistory(targetAgentId),
+    sendChatMessage: async (targetAgentId: string, prompt: string) => (await sendChatMessage(targetAgentId, prompt)),
+    getAgentHistory: async (targetAgentId: string) => (await getAgentHistory(targetAgentId)),
   };
 }
 
@@ -367,16 +406,16 @@ export function buildCliToolsPrompt(): string {
  * `skillDirectories` + `disabledSkills` config for createSession.
  * Returns undefined if no skills are linked (avoids auto-loading).
  */
-export function resolveLinkedSkillConfig(
+export async function resolveLinkedSkillConfig(
   canvasContent: string,
   workspaceRoot: string,
-): { skillDirectories: string[]; disabledSkills: string[] } | undefined {
+): Promise<{ skillDirectories: string[]; disabledSkills: string[] } | undefined> {
   const { frontmatter } = parseFrontmatter(canvasContent);
   const linkedIds: string[] = Array.isArray(frontmatter.skills) ? frontmatter.skills : [];
   if (linkedIds.length === 0) return undefined;
 
   const skillsDir = path.join(workspaceRoot, '.agents', 'skills');
-  const allSkills = listSkills();
+  const allSkills = (await listSkills());
   const linkedSet = new Set(linkedIds);
   const disabledSkills = allSkills
     .filter(s => !linkedSet.has(s.id))
@@ -411,7 +450,7 @@ export async function launchAgent(
   } catch { /* file may not exist yet */ }
 
   // Resolve linked skills from canvas frontmatter
-  const skillConfig = resolveLinkedSkillConfig(canvasContentRaw, workspaceRoot);
+  const skillConfig = (await resolveLinkedSkillConfig(canvasContentRaw, workspaceRoot));
 
   try {
     const mcpServers = getAllMcpServers();
@@ -454,7 +493,7 @@ export async function launchAgent(
     registry.set(agentId, record);
 
     // Persist to DB (both canvas_agents for backward compat + agent_sessions as central registry)
-    persistence.createCanvasAgentRecord({
+    (await persistence.createCanvasAgentRecord({
       id: agentId,
       space_id: spaceId,
       selected_text: selectedText,
@@ -463,9 +502,9 @@ export async function launchAgent(
       status: 'running',
       created_at: now,
       updated_at: now,
-    });
+    }));
 
-    persistence.createAgentSessionRecord({
+    (await persistence.createAgentSessionRecord({
       id: agentId,
       session_id: sessionId,
       space_id: spaceId,
@@ -479,7 +518,7 @@ export async function launchAgent(
       run_location: 'local',
       created_at: now,
       updated_at: now,
-    });
+    }));
 
     // Set up event listeners
     setupAgentEventListeners(session, record);
@@ -492,11 +531,11 @@ export async function launchAgent(
     }
 
     // Log to per-space activity log
-    logIntentActivity(record, 'agent.launched', {
+    (await logIntentActivity(record, 'agent.launched', {
       sessionId,
       prompt: truncate(selectedText, 200),
       cwd: workingDir,
-    });
+    }));
 
     await sendInitialPrompt(session, record, {
       prompt: selectedText,
@@ -557,7 +596,6 @@ export async function launchQuickAgent(
     //   - non-sandboxed → regular interactive handler
     const useHostPathAwareHandler = isSandboxed && enforcementMode === 'both';
     const useMxcOnlyAutoApprove = isSandboxed && enforcementMode === 'mxc-only';
-
     // When a persona is supplied, prepend its instructions to the system message
     // and use its preferred model.  Persona handles are matched against the
     // 'personas' config; cloud routing happens in the IPC handler so this path
@@ -664,7 +702,7 @@ export async function launchQuickAgent(
     }
 
     if (!isEphemeral) {
-      persistence.createAgentSessionRecord({
+      (await persistence.createAgentSessionRecord({
         id: agentId,
         session_id: sessionId,
         space_id: null,
@@ -679,7 +717,7 @@ export async function launchQuickAgent(
         yolo_mode: record.yoloMode === true,
         created_at: now,
         updated_at: now,
-      });
+      }));
     }
 
     setupAgentEventListeners(session, record);
@@ -752,17 +790,24 @@ export async function launchDocumentAgent(
   if (persona?.runLocation === 'cca') {
     return { error: 'CCA preferred agents are not supported for canvas runs yet' };
   }
+  const isScheduledResult = !!options.scheduledRun && options.scheduledRun.output !== 'legacy';
+  if (isScheduledResult && persona?.runLocation === 'cloud') {
+    return { error: 'Scheduled canvas results currently require a local agent.' };
+  }
   const isCloudSandbox = persona?.runLocation === 'cloud';
   const runPrompt = options.promptOverride?.trim()
     || (typeof parsedDocument.frontmatter.instructions === 'string' && parsedDocument.frontmatter.instructions.trim())
     || 'Execute the instructions in the document. Ask me if you need any clarification.';
 
   // Resolve linked skills from canvas frontmatter
-  const skillConfig = resolveLinkedSkillConfig(documentContent, workspaceRoot);
+  const skillConfig = (await resolveLinkedSkillConfig(documentContent, workspaceRoot));
 
   try {
     const cliToolsPrompt = buildCliToolsPrompt();
-    const findRecord = (sid: string) => registry.findBySessionId(sid);
+    const findRecord = (sid: string) => {
+      const record = registry.get(agentId);
+      return record?.sessionId === sid ? record : undefined;
+    };
     const customToolsContext = createCustomToolsContext(agentId);
     const sandboxSetup = persona
       ? buildSandboxLaunchSetup({
@@ -776,9 +821,22 @@ export async function launchDocumentAgent(
       : null;
     const isSandboxed = sandboxSetup?.isSandboxed === true;
     const sandboxConfigs = sandboxSetup?.sandboxConfigs ?? null;
-    const mcpServers = sandboxSetup ? sandboxSetup.mcpServers : getAllMcpServers();
-    const customTools = sandboxSetup ? sandboxSetup.customTools : getCustomTools(customToolsContext);
+    const availableMcpServers = sandboxSetup ? sandboxSetup.mcpServers : getAllMcpServers();
+    const scheduledContext = isScheduledResult && options.scheduledRun
+      ? await createScheduledResultContext({ workspaceRoot, workingDir, spaceId, invocation: options.scheduledRun })
+      : undefined;
+    const mcpServers = scheduledContext
+      ? Object.fromEntries(Object.entries(availableMcpServers)
+        .filter(([name]) => options.scheduledRun!.readOnlyServers.includes(name)))
+      : availableMcpServers;
+    const customTools = scheduledContext
+      ? [createPublishScheduledResultTool(scheduledContext)]
+      : sandboxSetup ? sandboxSetup.customTools : getCustomTools(customToolsContext);
     const sandboxState = sandboxSetup?.sandboxState;
+    if (scheduledContext && sandboxState
+      && checkPathScope(canvasPath, sandboxState.policy, true).decision !== 'allow-rw') {
+      return { error: 'The selected agent sandbox does not allow writing the result canvas.' };
+    }
     const hooks = sandboxSetup?.hooks;
     const enforcementMode = sandboxSetup?.enforcementMode ?? 'both';
     const useHostPathAwareHandler = isSandboxed && enforcementMode === 'both';
@@ -791,7 +849,9 @@ export async function launchDocumentAgent(
       spaceId,
       agentId,
     });
-    const baseSystemPrompt = `${personaPreamble}The user has pressed "Run" on their space document. Execute all instructions in the document below. The full document is also available as canvas.md in your working directory.
+    const baseSystemPrompt = `${personaPreamble}${scheduledContext
+      ? 'This is an unattended scheduled task. Produce the result directly on the space canvas using publish_scheduled_result. Do not ask questions or wait for approvals.'
+      : 'The user has pressed "Run" on their space document. Execute all instructions in the document below.'} The full document is also available as canvas.md in your working directory.
 
 Invocation instructions:
 
@@ -804,27 +864,60 @@ Document:
 ---
 ${documentContent}
 ---
-${cliToolsPrompt}`;
+${scheduledContext ? '' : cliToolsPrompt}`;
     const systemPrompt = isSandboxed && enforcementMode === 'both'
       ? `${baseSystemPrompt}${SANDBOX_WORKSPACE_SYSTEM_PROMPT}`
       : baseSystemPrompt;
 
+    const normalPermissionHandler = useHostPathAwareHandler
+      ? broker.createPathAwareSandboxPermissionHandler(findRecord)
+      : useMxcOnlyAutoApprove
+        ? broker.createMxcOnlyPermissionHandler(findRecord)
+        : broker.createPermissionHandler(findRecord);
+    const normalUserInputHandler = broker.createUserInputHandler(findRecord);
+    const normalElicitationHandler = broker.createElicitationHandler(findRecord);
     const session = await client.createSession({
       workingDirectory: workingDir,
       streaming: true,
       ...(sandboxConfigs ? { configDir: sandboxConfigs.onDir } : {}),
       mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
       tools: customTools,
+      ...(scheduledContext ? {
+        availableTools: [
+          'builtin:view', 'builtin:glob', 'builtin:grep', 'builtin:rg',
+          'builtin:skill', 'builtin:tool_search_tool',
+          'mcp:*', 'custom:publish_scheduled_result',
+        ],
+      } : {}),
       ...(persona?.model ? { model: persona.model } : {}),
       ...(hooks ? { hooks } : {}),
       ...(cloudOpts ? { cloud: cloudOpts } : {}),
-      onPermissionRequest: useHostPathAwareHandler
-        ? broker.createPathAwareSandboxPermissionHandler(findRecord)
-        : useMxcOnlyAutoApprove
-          ? broker.createMxcOnlyPermissionHandler(findRecord)
-          : broker.createPermissionHandler(findRecord),
-      onUserInputRequest: broker.createUserInputHandler(findRecord),
-      onElicitationRequest: broker.createElicitationHandler(findRecord),
+      onPermissionRequest: async (request, invocation) => {
+        const livingRecord = findRecord(invocation.sessionId);
+        const active = livingRecord?.scheduledResult ?? (!livingRecord ? scheduledContext : undefined);
+        if (active && livingRecord?.sandbox && request.kind === 'read'
+          && checkPathScope(path.resolve(workingDir, request.path), livingRecord.sandbox.policy, false).decision === 'deny') {
+          markScheduledInteractionBlocked(active, `Sandbox denied read: ${request.path}`);
+          return { kind: 'reject' };
+        }
+        return active
+          ? scheduledPermissionDecision(active, request)
+          : (await normalPermissionHandler(request, invocation));
+      },
+      onUserInputRequest: (request, invocation) => {
+        const livingRecord = findRecord(invocation.sessionId);
+        const active = livingRecord?.scheduledResult ?? (!livingRecord ? scheduledContext : undefined);
+        if (!active) return normalUserInputHandler(request, invocation);
+        markScheduledInteractionBlocked(active, `Input required: ${request.question}`);
+        return { answer: 'The user is unavailable. Save a partial result explaining what is missing.', wasFreeform: true };
+      },
+      onElicitationRequest: (context) => {
+        const livingRecord = findRecord(context.sessionId);
+        const active = livingRecord?.scheduledResult ?? (!livingRecord ? scheduledContext : undefined);
+        if (!active) return normalElicitationHandler(context);
+        markScheduledInteractionBlocked(active, `Connection or input required: ${context.message}`);
+        return { action: 'cancel' };
+      },
       ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
       ...(canvasConfig?.session ?? {}),
       systemMessage: {
@@ -850,7 +943,11 @@ ${cliToolsPrompt}`;
 
     const sessionId = (session as any).sessionId || agentId;
     const now = new Date().toISOString();
-    const summary = persona ? `Executing document as @${persona.handle}...` : 'Executing document...';
+    const summary = scheduledContext ? 'Preparing the scheduled result...'
+      : persona ? `Executing document as @${persona.handle}...` : 'Executing document...';
+    const displayPrompt = scheduledContext
+      ? `Scheduled skill: ${deriveMarkdownTitle(documentContent)}`
+      : documentContent;
 
     const record: AgentRecord = {
       agentId,
@@ -858,7 +955,7 @@ ${cliToolsPrompt}`;
       session,
       phase: 'starting',
       spaceId,
-      selectedText: documentContent,
+      selectedText: displayPrompt,
       anchor: { quote: '', prefix: '', suffix: '' },
       status: 'running',
       pendingApprovalId: null,
@@ -867,32 +964,34 @@ ${cliToolsPrompt}`;
       summary,
       runLocation: isCloudSandbox ? 'cloud' : 'local',
       ...(sandboxState ? { sandbox: sandboxState } : {}),
-      ...(persona?.yolo ? { yoloMode: true } : {}),
+      ...(!scheduledContext && persona?.yolo ? { yoloMode: true } : {}),
       ...(persona?.handle ? { personaHandle: persona.handle } : {}),
       ...(canvasConfig?.run.scheduled ? { autoApproveCanvasTools: true } : {}),
       canvasSnapshot: { path: canvasPath, hashBefore: canvasHashBefore },
+      ...(scheduledContext ? { scheduledResult: scheduledContext } : {}),
+      ...(options.scheduledRun ? { scheduledOccurrence: { workspaceRoot, invocation: options.scheduledRun } } : {}),
     };
     registry.set(agentId, record);
-    if (persona?.yolo) {
+    if (!scheduledContext && persona?.yolo) {
       notifier.notifyRenderer('agent:yolo-changed', { agentId, enabled: true });
     }
 
-    persistence.createCanvasAgentRecord({
+    (await persistence.createCanvasAgentRecord({
       id: agentId,
       space_id: spaceId,
-      selected_text: truncate(documentContent, 500),
+      selected_text: truncate(displayPrompt, 500),
       session_id: sessionId,
       pid: null,
       status: 'running',
       created_at: now,
       updated_at: now,
-    });
+    }));
 
-    persistence.createAgentSessionRecord({
+    (await persistence.createAgentSessionRecord({
       id: agentId,
       session_id: sessionId,
       space_id: spaceId,
-      prompt: truncate(documentContent, 500),
+      prompt: truncate(displayPrompt, 500),
       status: 'running',
       summary,
       working_dir: workingDir,
@@ -903,7 +1002,7 @@ ${cliToolsPrompt}`;
       yolo_mode: record.yoloMode === true,
       created_at: now,
       updated_at: now,
-    });
+    }));
     notifier.notifyRenderer('agent:status-changed', {
       agentId,
       status: 'running',
@@ -921,10 +1020,10 @@ ${cliToolsPrompt}`;
     }
 
     // Log to per-space activity log
-    logIntentActivity(record, 'document.executed', {
+    (await logIntentActivity(record, 'document.executed', {
       sessionId,
       cwd: workingDir,
-    });
+    }));
 
     await sendInitialPrompt(session, record, {
       prompt: runPrompt,
@@ -944,7 +1043,7 @@ export async function sendChatMessage(
   agentId: string,
   prompt: string,
   attachments?: Array<{ type: 'file'; path: string; displayName?: string }>,
-): Promise<{ error?: string; restarted?: boolean }> {
+): Promise<{ error?: string; restarted?: boolean; messageId?: string }> {
   let record = registry.get(agentId);
   let restarted = false;
 
@@ -984,7 +1083,7 @@ export async function sendChatMessage(
 
   // Reactivate completed agents for multi-turn
   record.status = 'running';
-  persistence.updateStatus(record);
+  (await persistence.updateStatus(record));
   notifier.notifyRenderer('agent:status-changed', {
     agentId, status: 'running', summary: record.summary,
   });
@@ -1005,11 +1104,11 @@ export async function sendChatMessage(
       ...a,
       displayName: a.displayName ?? path.basename(a.path),
     }));
-    await record.session.send({
+    const messageId = await record.session.send({
       prompt,
       ...(normalizedAttachments ? { attachments: normalizedAttachments } : {}),
     });
-    return { ...(restarted ? { restarted: true } : {}) };
+    return { messageId, ...(restarted ? { restarted: true } : {}) };
   } catch (err: any) {
     return { error: err.message || 'Failed to send message' };
   }
@@ -1054,7 +1153,7 @@ export async function disableSandboxForSession(agentId: string): Promise<void> {
 
     record.sandbox.state = 'off';
     record.status = 'running';
-    persistence.updateStatus(record);
+    (await persistence.updateStatus(record));
 
     notifier.notifyRenderer(`chat:event:${agentId}`, {
       type: 'sandbox.disabled',
@@ -1115,8 +1214,11 @@ function commentContextFromPersisted(
 /** Attempt to resume a historical agent by restoring its SDK session.
  *  Returns 'resumed' if the original session was restored, 'restarted' if a
  *  new session was created because the original expired, or false on failure. */
-async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restarted' | false> {
-  const persisted = persistence.getSession(agentId);
+export async function resumeAgentSession(
+  agentId: string,
+  options: { allowRestart?: boolean } = {},
+): Promise<'resumed' | 'restarted' | false> {
+  const persisted = (await persistence.getSession(agentId));
   if (!persisted) return false;
 
   const client = getCopilotClient();
@@ -1244,6 +1346,8 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
 
     return 'resumed';
   } catch (err) {
+    // Reading history must not replace an unavailable session with an empty one.
+    if (options.allowRestart === false) throw err;
     console.warn('[agent-service] resumeSession failed, attempting fresh session fallback:', err);
 
     // CLI sessions must be resumed via CLI — no SDK fallback path.
@@ -1258,7 +1362,7 @@ async function resumeAgentSession(agentId: string): Promise<'resumed' | 'restart
     // Cloud-worker orphaning is not a concern here — if we reached this
     // catch it means the remote side was unreachable, so there is no
     // live worker to orphan.
-    return restartExpiredSession(agentId, persisted, workingDir);
+    return (await restartExpiredSession(agentId, persisted, workingDir));
   }
 }
 
@@ -1268,7 +1372,7 @@ export function isCloudSessionGone(error: unknown): boolean {
 }
 
 export async function abortRestoredCloudAgent(agentId: string): Promise<'aborted' | 'missing' | 'retry'> {
-  const persisted = persistence.getSession(agentId);
+  const persisted = (await persistence.getSession(agentId));
   if (!persisted || persisted.source !== 'sdk' || persisted.run_location !== 'cloud') return 'retry';
 
   const client = getCopilotClient();
@@ -1421,7 +1525,7 @@ async function restartExpiredSession(
           const canvasContent = fs.readFileSync(canvasPath, 'utf-8');
           // workingDir is workspace/spaceFolder — go up one level for workspace root
           const workspaceRoot = path.dirname(workingDir);
-          skillConfig = resolveLinkedSkillConfig(canvasContent, workspaceRoot);
+          skillConfig = (await resolveLinkedSkillConfig(canvasContent, workspaceRoot));
         }
       } catch { /* proceed without skills */ }
     }
@@ -1443,7 +1547,7 @@ async function restartExpiredSession(
     // persisted transcript when available; fall back to prompt+summary
     // when the transcript is empty (e.g. agent crashed before producing
     // a single chat event).
-    const transcriptEvents = persistence.listChatEvents(agentId);
+    const transcriptEvents = (await persistence.listChatEvents(agentId));
     const transcriptReplay = buildTranscriptReplayContent(transcriptEvents);
     const continuationPreamble = transcriptReplay
       ? `Note: This is a continuation of a previous session that became unreachable. ` +
@@ -1513,7 +1617,7 @@ async function restartExpiredSession(
     registry.set(agentId, record);
 
     // Update DB with new session_id
-    persistence.updateSessionId(agentId, newSessionId);
+    (await persistence.updateSessionId(agentId, newSessionId));
 
     setupAgentEventListeners(session, record);
     console.info(`[agent-service] Restarted expired session for agent ${agentId} (new session: ${newSessionId})${transcriptReplay ? ` with ${transcriptEvents.length}-event transcript replay` : ''}`);
@@ -1549,7 +1653,7 @@ export async function getAgentHistory(agentId: string): Promise<{ events: any[];
   // Resume if not already in memory
   let record = registry.get(agentId);
   if (!record) {
-    const persisted = persistence.getSession(agentId);
+    const persisted = (await persistence.getSession(agentId));
     if (!persisted) return { error: 'Agent session not found in database' };
 
     const result = await resumeAgentSession(agentId);
@@ -1560,7 +1664,7 @@ export async function getAgentHistory(agentId: string): Promise<{ events: any[];
       // exists, the renderer can keep the conversation usable; the
       // separate `transcript: true` flag tells it the events come from
       // host storage (not the SDK session, which is gone).
-      const transcript = persistence.listChatEvents(agentId);
+      const transcript = (await persistence.listChatEvents(agentId));
       if (transcript.length > 0) {
         const events = transcript.map(toSdkEventShape);
         console.info(`[agent-service] getAgentHistory: serving persisted transcript for ${agentId} (${events.length} events) — session unrecoverable`);
@@ -1584,7 +1688,7 @@ export async function getAgentHistory(agentId: string): Promise<{ events: any[];
 
   try {
     if (!record.session) {
-      const transcript = persistence.listChatEvents(agentId);
+      const transcript = (await persistence.listChatEvents(agentId));
       if (transcript.length > 0) {
         const events = transcript.map(toSdkEventShape);
         return { events, transcript: true, ...(restarted ? { restarted: true } : {}) };
@@ -1598,7 +1702,7 @@ export async function getAgentHistory(agentId: string): Promise<{ events: any[];
     // SDK getEvents failure shouldn't blank the UI — try the persisted
     // transcript as a last resort.  Same reasoning as the resume-failure
     // path above.
-    const transcript = persistence.listChatEvents(agentId);
+    const transcript = (await persistence.listChatEvents(agentId));
     if (transcript.length > 0) {
       const events = transcript.map(toSdkEventShape);
       return { events, transcript: true, ...(restarted ? { restarted: true } : {}) };
@@ -1627,31 +1731,47 @@ function toSdkEventShape(row: import('../../shared/types').AgentChatEvent): any 
 // ── Event Listener Setup ──────────────────────────────────────
 
 /** Resolve workspace + spaceFolder for activity logging. Returns null if unavailable. */
-function resolveSpaceActivityContext(record: AgentRecord): { workspaceRoot: string; spaceFolder: string } | null {
+async function resolveSpaceActivityContext(record: AgentRecord): Promise<{ workspaceRoot: string; spaceFolder: string } | null> {
   if (!record.spaceId || record.spaceId === '__workspace__') return null;
   const workspace = getConfigValue('workspace');
   if (!workspace) return null;
   try {
-    const { getSpace } = require('../database');
-    const space = getSpace(record.spaceId);
+    const space = (await getSpace(record.spaceId));
     if (!space?.folder) return null;
     return { workspaceRoot: workspace, spaceFolder: space.folder };
   } catch { return null; }
 }
 
 /** Append to the per-space activity log (non-fatal on failure). */
-function logIntentActivity(record: AgentRecord, type: string, data: Record<string, any>): void {
+async function logIntentActivity(record: AgentRecord, type: string, data: Record<string, any>): Promise<void> {
   if (record.ephemeral) return;
-  const ctx = resolveSpaceActivityContext(record);
+  const ctx = (await resolveSpaceActivityContext(record));
   if (!ctx) return;
-  appendSpaceActivity(ctx.workspaceRoot, ctx.spaceFolder, type, { agentId: record.agentId, ...data });
+  try {
+    await appendSpaceActivity(ctx.workspaceRoot, ctx.spaceFolder, type, { agentId: record.agentId, ...data });
+  } catch (error) {
+    console.error('[agent-service] Diagnostic activity log append failed:', error);
+  }
 }
 
 export function setupAgentEventListeners(session: CopilotSession, record: AgentRecord): void {
   const agentId = record.agentId;
   const chatChannel = `chat:event:${agentId}`;
+  const captured = new WeakMap<object, Promise<number | undefined>>();
+  const persistEvent = (event: any): Promise<number | undefined> => {
+    if (!event || typeof event !== 'object' || !PERSISTED_CHAT_EVENT_TYPES.has(event.type)) return Promise.resolve(undefined);
+    const existing = captured.get(event);
+    if (existing) return existing;
+    const data = event.data ?? event;
+    const operation = persistence.appendChatEvent(record, {
+      event_id: typeof event.id === 'string' ? event.id : typeof data.id === 'string' ? data.id : null,
+      type: event.type, timestamp: event.timestamp ?? new Date().toISOString(), payload: JSON.stringify(data),
+    });
+    captured.set(event, operation);
+    return operation;
+  };
 
-  session.on((event: any) => {
+  observeSession(session, async (event: any) => {
     if (record.aborted) return;
     // Persist meaningful events to the chat transcript so we can replay
     // them into a fresh session if the original session is unreachable
@@ -1662,20 +1782,12 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     try {
       const t = event?.type;
       if (typeof t === 'string' && PERSISTED_CHAT_EVENT_TYPES.has(t)) {
-        const data = event?.data ?? event;
-        const eventIdRaw = data?.id ?? event?.id;
-        const eventId = typeof eventIdRaw === 'string' ? eventIdRaw : null;
-        let payload: string;
-        try { payload = JSON.stringify(data); }
-        catch { payload = JSON.stringify({ _serializationError: true, type: t }); }
-        persistence.appendChatEvent(record, {
-          event_id: eventId,
-          type: t,
-          timestamp: new Date().toISOString(),
-          payload,
-        });
+        await persistEvent(event);
       }
-    } catch { /* persistence is best-effort */ }
+    } catch (error) {
+      console.error('[chat] Durable transcript append failed:', error);
+      notifier.notifyRenderer(chatChannel, { type: 'session.error', message: 'Conversation history could not be saved. Keep this window open and retry.' });
+    }
 
     // Canvas instances are shared state: the agent opens and closes them while
     // the user closes windows, so both directions have to be reconciled or the
@@ -1688,46 +1800,50 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   });
 
   // SDK events wrap payloads in event.data; fall back to top-level for compat
-  session.on('assistant.message_delta', (event: any) => {
+  observeSession(session, 'assistant.message_delta', (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     const delta = d.deltaContent ?? d.delta ?? '';
-    notifier.notifyRenderer(chatChannel, { type: 'assistant.message_delta', delta });
+    notifier.notifyRenderer(chatChannel, { type: 'assistant.message_delta', delta, messageId: d.messageId, eventId: event.id });
   });
 
-  session.on('assistant.message', (event: any) => {
+  observeSession(session, 'assistant.message', async (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     const content = d.content || d.message || '';
     record.summary = truncate(content || 'Agent responded', 100);
-    persistence.persistSummary(record);
+    (await persistence.persistSummary(record));
     notifier.notifyRenderer('agent:status-changed', {
       agentId, status: record.status, summary: record.summary,
     });
-    notifier.notifyRenderer(chatChannel, { type: 'assistant.message', content });
+    const sequence = await persistEvent(event);
+    notifier.notifyRenderer(chatChannel, { type: 'assistant.message', content, messageId: d.messageId, eventId: event.id, sequence });
   });
 
-  session.on('assistant.reasoning_delta', (event: any) => {
+  observeSession(session, 'assistant.reasoning_delta', (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     notifier.notifyRenderer(chatChannel, {
       type: 'assistant.reasoning_delta',
+      eventId: event.id,
       reasoningId: d.reasoningId ?? '',
       delta: d.deltaContent ?? d.delta ?? '',
     });
   });
 
-  session.on('assistant.reasoning', (event: any) => {
+  observeSession(session, 'assistant.reasoning', async (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     notifier.notifyRenderer(chatChannel, {
       type: 'assistant.reasoning',
+      eventId: event.id,
+      sequence: await persistEvent(event),
       reasoningId: d.reasoningId ?? '',
       content: d.content ?? '',
     });
   });
 
-  session.on('tool.execution_start', (event: any) => {
+  observeSession(session, 'tool.execution_start', async (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     record.summary = `Using ${d.toolName || 'tool'}...`;
@@ -1736,17 +1852,19 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     });
     notifier.notifyRenderer(chatChannel, {
       type: 'tool.start',
+      eventId: event.id,
+      sequence: await persistEvent(event),
       toolCallId: d.toolCallId ?? '',
       toolName: d.toolName ?? '',
       args: d.arguments ?? d.toolArgs ?? {},
     });
-    logIntentActivity(record, 'agent.tool_start', {
+    (await logIntentActivity(record, 'agent.tool_start', {
       toolName: d.toolName ?? '',
       toolCallId: d.toolCallId ?? '',
-    });
+    }));
   });
 
-  session.on('tool.execution_progress', (event: any) => {
+  observeSession(session, 'tool.execution_progress', (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     notifier.notifyRenderer(chatChannel, {
@@ -1756,7 +1874,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     });
   });
 
-  session.on('tool.execution_complete', (event: any) => {
+  observeSession(session, 'tool.execution_complete', async (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     // SDK result is { content, detailedContent? } — flatten to string
@@ -1771,20 +1889,22 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     }
     notifier.notifyRenderer(chatChannel, {
       type: 'tool.complete',
+      eventId: event.id,
+      sequence: await persistEvent(event),
       toolCallId: d.toolCallId ?? '',
       result,
       success,
       ...(errorMessage ? { error: errorMessage } : {}),
     });
-    logIntentActivity(record, 'agent.tool_complete', {
+    (await logIntentActivity(record, 'agent.tool_complete', {
       toolName: d.toolName ?? '',
       toolCallId: d.toolCallId ?? '',
       success,
       ...(errorMessage ? { error: errorMessage } : {}),
-    });
+    }));
   });
 
-  session.on('session.idle', () => {
+  observeSession(session, 'session.idle', async () => {
     if (record.aborted) return;
     // A newly-created session can emit an idle event before its initial prompt
     // has been submitted. Comment launches keep phase='starting' until send()
@@ -1793,10 +1913,18 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     if (record.status === 'running') {
       record.status = 'completed';
       record.summary = 'Completed';
-      persistence.updateStatus(record);
-      notifier.notifyRenderer('agent:completed', { agentId, summary: record.summary });
+      const canvasOutcome = (await reportFinishedCanvasRun(agentId, record.spaceId));
+      record.status = (await finishScheduledAgent(record, undefined, canvasOutcome === null ? undefined : canvasOutcome === 'published'));
+      (await persistence.updateStatus(record));
+      if (record.status === 'failed') {
+        notifier.notifyRenderer('agent:status-changed', {
+          agentId, status: record.status, summary: record.summary, spaceId: record.spaceId,
+        });
+      } else {
+        notifier.notifyRenderer('agent:completed', { agentId, summary: record.summary });
+      }
       notifier.notifyRenderer(chatChannel, { type: 'session.idle' });
-      logIntentActivity(record, 'agent.completed', { summary: record.summary });
+      (await logIntentActivity(record, 'agent.completed', { summary: record.summary }));
 
       // Clean up sub-agent state
       subagentTracker.clearParent(agentId);
@@ -1810,8 +1938,8 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
       // Handle comment agent auto-reply + presence cleanup
       if (record.commentContext) {
         // Dynamically import to avoid circular dependency
-        const { handleCommentAgentCompletion } = require('./comment-workflow');
-        handleCommentAgentCompletion(record);
+        const { handleCommentAgentCompletion } = await import('./comment-workflow');
+        await handleCommentAgentCompletion(record);
       }
 
       // Fallback canvas change detection for ALL agent types.
@@ -1822,7 +1950,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
           const newContent = fs.readFileSync(record.canvasSnapshot.path, 'utf-8');
           const currentHash = crypto.createHash('md5').update(newContent).digest('hex');
           if (record.canvasSnapshot.hashBefore && currentHash !== record.canvasSnapshot.hashBefore) {
-            updateCanvasContent(record.spaceId, newContent);
+            (await updateCanvasContent(record.spaceId, newContent));
             notifier.notifyRenderer('canvas:content-updated', {
               spaceId: record.spaceId,
               content: newContent,
@@ -1831,7 +1959,6 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
         } catch { /* non-fatal: file may not exist */ }
       }
 
-      const canvasOutcome = reportFinishedCanvasRun(agentId, record.spaceId);
       // The unattended run is over. Anything that happens next is somebody
       // typing, so the scheduled carve-out should no longer apply.
       record.autoApproveCanvasTools = false;
@@ -1840,9 +1967,9 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
       // says "Completed". Say what actually happened instead.
       if (canvasOutcome === 'no-output') {
         record.summary = NO_REPORT_SUMMARY;
-        persistence.updateStatus(record);
+        (await persistence.updateStatus(record));
         notifier.notifyRenderer('agent:completed', { agentId, summary: record.summary });
-        logIntentActivity(record, 'agent.completed', { summary: record.summary });
+        (await logIntentActivity(record, 'agent.completed', { summary: record.summary }));
       }
 
       // Ephemeral agents: remove from registry after a short delay so the
@@ -1853,12 +1980,13 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     }
   });
 
-  session.on('session.error', (event: any) => {
+  observeSession(session, 'session.error', async (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     record.status = 'failed';
     record.summary = `Error: ${d.message || 'Unknown error'}`;
-    persistence.updateStatus(record);
+    (await finishScheduledAgent(record, d.message || 'Unknown error'));
+    (await persistence.updateStatus(record));
     notifier.notifyRenderer('agent:status-changed', {
       agentId, status: 'failed', summary: record.summary,
     });
@@ -1866,7 +1994,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
       type: 'session.error',
       message: d.message || 'Unknown error',
     });
-    logIntentActivity(record, 'agent.failed', { error: d.message || 'Unknown error' });
+    (await logIntentActivity(record, 'agent.failed', { error: d.message || 'Unknown error' }));
 
     // Clean up presence on failure too
     if (record.commentContext) {
@@ -1881,7 +2009,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
 
     // A failed run may still have published before it broke; the user should
     // hear about work that survived rather than lose it to the failure.
-    reportFinishedCanvasRun(agentId, record.spaceId);
+    (await reportFinishedCanvasRun(agentId, record.spaceId));
 
     if (record.ephemeral) {
       setTimeout(() => { releaseCanvasInstances(agentId); endCanvasRun(agentId); registry.delete(agentId); }, 30_000);
@@ -1892,7 +2020,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   installSubagentSubscription(session, record);
 
   // Remote steering state changes
-  session.on('session.remote_steerable_changed' as any, (event: any) => {
+  observeSession(session, 'session.remote_steerable_changed', (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     const remoteSteerable = !!d.remoteSteerable;
@@ -1913,7 +2041,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
   // it when the user enables remote control explicitly. Either way, record
   // the URL so the renderer can surface a shareable link without the user
   // having to call enableRemoteControl first.
-  session.on('session.info' as any, (event: any) => {
+  observeSession(session, 'session.info', (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     if (d?.infoType !== 'remote' || !d?.url) return;
@@ -1943,20 +2071,20 @@ function installSubagentSubscription(session: CopilotSession, record: AgentRecor
   const parentAgentId = record.agentId;
   const chatChannel = `chat:event:${parentAgentId}`;
 
-  (session as any).on((event: any) => {
+  observeSession(session, async (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     const type = event.type ?? d.type;
 
     // --- Sub-agent lifecycle events ---
     if (type === 'subagent.started') {
-      subagentTracker.trackStarted(parentAgentId, {
+      (await subagentTracker.trackStarted(parentAgentId, {
         agentId: d.agentId,
         toolCallId: d.toolCallId ?? '',
         agentName: d.name ?? d.agentName ?? '',
         agentDisplayName: d.displayName ?? d.agentDisplayName ?? d.name ?? '',
         agentDescription: d.description ?? d.agentDescription ?? '',
-      });
+      }));
       notifier.notifyRenderer(chatChannel, {
         type: 'subagent.started',
         toolCallId: d.toolCallId ?? '',
@@ -1965,16 +2093,16 @@ function installSubagentSubscription(session: CopilotSession, record: AgentRecor
         description: d.description ?? d.agentDescription ?? '',
         agentId: d.agentId,
       });
-      logIntentActivity(record, 'subagent.started', {
+      (await logIntentActivity(record, 'subagent.started', {
         subagentId: d.agentId,
         name: d.name ?? d.agentName ?? '',
         description: d.description ?? d.agentDescription ?? '',
-      });
+      }));
       return;
     }
 
     if (type === 'subagent.completed') {
-      subagentTracker.trackCompleted(parentAgentId, {
+      (await subagentTracker.trackCompleted(parentAgentId, {
         agentId: d.agentId,
         toolCallId: d.toolCallId ?? '',
         agentName: d.name ?? d.agentName,
@@ -1983,7 +2111,7 @@ function installSubagentSubscription(session: CopilotSession, record: AgentRecor
         model: d.model,
         totalTokens: d.totalTokens,
         totalToolCalls: d.totalToolCalls,
-      });
+      }));
       notifier.notifyRenderer(chatChannel, {
         type: 'subagent.completed',
         toolCallId: d.toolCallId ?? '',
@@ -1994,18 +2122,18 @@ function installSubagentSubscription(session: CopilotSession, record: AgentRecor
         totalTokens: d.totalTokens,
         totalToolCalls: d.totalToolCalls,
       });
-      logIntentActivity(record, 'subagent.completed', {
+      (await logIntentActivity(record, 'subagent.completed', {
         subagentId: d.agentId,
         name: d.name ?? d.agentName ?? '',
         durationMs: d.durationMs,
         model: d.model,
         totalTokens: d.totalTokens,
-      });
+      }));
       return;
     }
 
     if (type === 'subagent.failed') {
-      subagentTracker.trackFailed(parentAgentId, {
+      (await subagentTracker.trackFailed(parentAgentId, {
         agentId: d.agentId,
         toolCallId: d.toolCallId ?? '',
         agentName: d.name ?? d.agentName,
@@ -2014,7 +2142,7 @@ function installSubagentSubscription(session: CopilotSession, record: AgentRecor
         model: d.model,
         totalTokens: d.totalTokens,
         totalToolCalls: d.totalToolCalls,
-      });
+      }));
       notifier.notifyRenderer(chatChannel, {
         type: 'subagent.failed',
         toolCallId: d.toolCallId ?? '',
@@ -2022,11 +2150,11 @@ function installSubagentSubscription(session: CopilotSession, record: AgentRecor
         error: d.error ?? 'Unknown error',
         agentId: d.agentId,
       });
-      logIntentActivity(record, 'subagent.failed', {
+      (await logIntentActivity(record, 'subagent.failed', {
         subagentId: d.agentId,
         name: d.name ?? d.agentName ?? '',
         error: d.error ?? 'Unknown error',
-      });
+      }));
       return;
     }
 
@@ -2043,22 +2171,22 @@ function installSubagentSubscription(session: CopilotSession, record: AgentRecor
       const intent = d.intent ?? d.content ?? '';
       subagentTracker.trackIntent(parentAgentId, subAgentId, intent);
     } else if (type === 'tool.execution_start') {
-      subagentTracker.trackToolStart(parentAgentId, subAgentId, {
+      (await subagentTracker.trackToolStart(parentAgentId, subAgentId, {
         toolCallId: d.toolCallId ?? '',
         toolName: d.toolName ?? '',
         args: d.arguments ?? d.toolArgs ?? {},
-      });
+      }));
     } else if (type === 'tool.execution_complete') {
       const rawResult = d.result;
       const result = typeof rawResult === 'string'
         ? rawResult
         : rawResult?.detailedContent ?? rawResult?.content ?? '';
-      subagentTracker.trackToolComplete(parentAgentId, subAgentId, {
+      (await subagentTracker.trackToolComplete(parentAgentId, subAgentId, {
         toolCallId: d.toolCallId ?? '',
         success: d.success !== false,
         result,
         error: d.error,
-      });
+      }));
     } else if (type === 'assistant.usage') {
       subagentTracker.trackUsage(
         parentAgentId,

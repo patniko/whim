@@ -41,7 +41,15 @@ vi.mock('./config', () => ({
   setSessionId: vi.fn(),
 }));
 
-vi.mock('./database', () => ({
+vi.mock('./storage', async () => ({
+  ...(await import('./workspace')),
+  ...(await import('./services/skill-schedule-store')),
+  ...(await import('./canvas/artifact-store')),
+  documentMatches: (await import('./storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   getSpace: vi.fn(),
   assignSpaceFolder: vi.fn(),
   setSpaceSessionId: vi.fn(),

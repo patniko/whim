@@ -1,17 +1,28 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { DocumentSave } from './lib/document-save';
 import { createRoot } from 'react-dom/client';
-import Markdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import type { AgentListAllItem, AgentPersona, GitSyncStatus, SpaceEvent } from '../shared/ipc-contract';
-import type { Space } from '../shared/types';
-import type { ChatEvent } from '../shared/chat-types';
+import { FeatureBoundary } from '../renderer/FeatureBoundary';
+const Markdown = lazy(() => import('./markdown'));
+import type { AgentListAllItem, AgentPersona, GitSyncStatus } from '../shared/ipc-contract';
+import type { SpaceSummary as Space, SpacePage, AgentPage, ActivityPage } from '../shared/paging';
+import { PageControls } from '../renderer/views/PageControls';
+import { VirtualRows } from '../renderer/views/VirtualRows';
+import type { ChatEvent, ApprovalMessage } from '../shared/chat-types';
 import { endSession, establishSession, hasSession, WebRemoteClient } from './lib/client';
 import type { WebRemoteEvent } from '../main/web/event-hub';
 import { agentGlyph, describeApproval, formatDueDate, humanizeToolName, statusLabel, timeAgo } from './lib/format';
-import { applyInteractionEvent, pruneInteractions, type InteractionMap, type PendingInteraction } from './lib/interactions';
+import { applyInteractionEvent, type InteractionMap, type PendingInteraction } from './lib/interactions';
 import { notificationState, notifyForEvent, registerServiceWorker, requestNotificationPermission, type NotificationPermissionState } from './lib/notifications';
-import { applyChatEvent, applyChatEvents, parseHistory, type Bubble } from './lib/transcript';
+import { applyChatEvent, applyChatEvents, parseHistory, historyBubbles, type Bubble } from './lib/transcript';
+import { createEventBatch } from '../renderer/chat/event-batch';
+import { acknowledgeUserMessage, mergeHistoryWithLocal, orderTranscript } from '../shared/chat-identity';
+import { RefreshCoordinator } from '../renderer/state/refresh-coordinator';
+import { observeRendererTasks, startTiming, getPerformanceTimings } from '../renderer/performance';
 
+observeRendererTasks();
+Object.defineProperty(window, '__whimPerformance', { value: getPerformanceTimings });
+const finishShell = startTiming('startup.shell');
+const finishCapture = startTiming('startup.capture');
 
 type Tab = 'spaces' | 'workers' | 'history';
 
@@ -31,11 +42,14 @@ interface HistoryCommit {
  * browser history, a `Referer` header, or localStorage.
  */
 function App() {
-  const [authState, setAuthState] = useState<'checking' | 'authed' | 'unauthed'>('checking');
+  useEffect(() => { finishShell(); }, []);
+  const [authState, setAuthState] = useState<'checking' | 'authed' | 'unauthed' | 'offline'>('checking');
   const [authError, setAuthError] = useState<string | null>(null);
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setAuthState('checking');
     const params = new URLSearchParams(window.location.search);
     const urlToken = params.get('token');
 
@@ -52,10 +66,31 @@ function App() {
       }
       const ok = await hasSession();
       if (!cancelled) setAuthState(ok ? 'authed' : 'unauthed');
-    })();
+    })().catch(error => {
+      if (!cancelled) {
+        setAuthError(error instanceof Error ? error.message : 'Connection failed.');
+        setAuthState('offline');
+      }
+    });
 
     return () => { cancelled = true; };
+  }, [connectionAttempt]);
+
+  useEffect(() => {
+    const reconnect = () => setConnectionAttempt(attempt => attempt + 1);
+    window.addEventListener('online', reconnect);
+    return () => window.removeEventListener('online', reconnect);
   }, []);
+
+  if (authState === 'offline') {
+    return <main className="login">
+      <div className="brand">whim</div>
+      <h1>Cannot reach Whim</h1>
+      <p>Reconnect to the desktop app, then retry. Your device pairing has not been removed.</p>
+      <p className="login-error" role="alert">{authError}</p>
+      <button type="button" onClick={() => setConnectionAttempt(attempt => attempt + 1)}>Retry connection</button>
+    </main>;
+  }
 
   if (authState === 'checking') {
     return <main className="login"><div className="brand">whim</div><p>Connecting…</p></main>;
@@ -124,18 +159,23 @@ function Login({ onLogin, error }: { onLogin: (token: string) => Promise<void>; 
 // ── Main app ───────────────────────────────────────────────
 
 function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnauthorized: () => void }) {
+  useEffect(() => { finishCapture(); }, []);
   const client = useMemo(() => new WebRemoteClient(), []);
   const [tab, setTab] = useState<Tab>('spaces');
-  const [spaces, setSpaces] = useState<Space[]>([]);
-  const [agents, setAgents] = useState<AgentListAllItem[]>([]);
+  const [spacePage, setSpacePage] = useState<SpacePage>({ items: [], total: 0, nextCursor: null, counts: { open: 0, closed: 0 } });
+  const [agentPage, setAgentPage] = useState<AgentPage>({ items: [], total: 0, nextCursor: null, counts: { running: 0, waiting: 0, completed: 0, failed: 0 } });
+  const spaces = spacePage.items;
+  const agents = agentPage.items;
+  const [activityPage, setActivityPage] = useState<ActivityPage>({ items: [], total: 0, nextCursor: null });
   const [personas, setPersonas] = useState<AgentPersona[]>([]);
-  const [events, setEvents] = useState<SpaceEvent[]>([]);
   const [git, setGit] = useState<GitSyncStatus | null>(null);
   // Questions an agent is blocked on that aren't carried by `agent:list-all`.
   const [interactions, setInteractions] = useState<InteractionMap>({});
   const [notifications, setNotifications] = useState<NotificationPermissionState>(() => notificationState());
   const [status, setStatus] = useState('connecting');
   const [error, setError] = useState<string | null>(null);
+  const [workspaceChanged, setWorkspaceChanged] = useState(false);
+  const workspaceBlocked = useRef(false);
 
   const [openSpaceId, setOpenSpaceId] = useState<string | null>(null);
   const [openAgentId, setOpenAgentId] = useState<string | null>(null);
@@ -143,40 +183,70 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
   // Live chat events are buffered per-agent so an open chat picks them up.
   const liveChat = useRef<{ agentId: string; cb: (e: ChatEvent) => void } | null>(null);
 
-  const refreshSpaces = useCallback(async () => { setSpaces(await client.invoke('space:list')); }, [client]);
-  const refreshAgents = useCallback(async () => { setAgents(await client.invoke('agent:list-all')); }, [client]);
-  const refreshEvents = useCallback(async () => { setEvents(await client.invoke('space:events', 200)); }, [client]);
+  const positions = useRef<{ spaces?: string; agents?: string; history?: string }>({});
+  const refreshes = useRef(new RefreshCoordinator(() => true));
+  const loadSpacePage = useCallback(async (cursor?: string) => {
+    positions.current.spaces = cursor;
+    refreshes.current.invalidate('spaces');
+    await refreshes.current.request('spaces', async isCurrent => {
+      const page = await client.invoke('space:list-page', { cursor, filter: 'open' });
+      if (isCurrent()) setSpacePage(page);
+    }, true);
+  }, [client]);
+  const loadAgentPage = useCallback(async (cursor?: string) => {
+    positions.current.agents = cursor;
+    refreshes.current.invalidate('agents');
+    await refreshes.current.request('agents', async isCurrent => {
+      const page = await client.invoke('agent:list-page', { cursor });
+      if (isCurrent()) setAgentPage(page);
+    }, true);
+  }, [client]);
+  const loadActivityPage = useCallback(async (cursor?: string) => {
+    positions.current.history = cursor;
+    refreshes.current.invalidate('history');
+    await refreshes.current.request('history', async isCurrent => {
+      const now = new Date();
+      const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+      const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay()).toISOString();
+      const page = await client.invoke('activity:list-page', { cursor, dayStart, weekStart });
+      if (isCurrent()) setActivityPage(page);
+    }, true);
+  }, [client]);
+  const refreshSpaces = useCallback(() => loadSpacePage(positions.current.spaces), [loadSpacePage]);
+  const refreshAgents = useCallback(() => loadAgentPage(positions.current.agents), [loadAgentPage]);
+  const refreshEvents = useCallback(() => loadActivityPage(positions.current.history), [loadActivityPage]);
   const refreshGit = useCallback(async () => {
     try { setGit(await client.invoke('workspace:git-status')); } catch { /* non-fatal */ }
   }, [client]);
 
   const refreshAll = useCallback(async () => {
+    if (workspaceBlocked.current) return;
     try {
       setError(null);
-      const [sp, ag, pe] = await Promise.all([
-        client.invoke('space:list'),
-        client.invoke('agent:list-all'),
+      const [, , pe] = await Promise.all([
+        refreshSpaces(),
+        refreshAgents(),
         client.invoke('personas:list'),
+        refreshEvents(),
+        refreshGit(),
       ]);
-      setSpaces(sp); setAgents(ag); setPersonas(pe);
-      setInteractions((prev) => pruneInteractions(prev, new Set(ag.map((a) => a.agentId))));
-      void refreshEvents();
-      void refreshGit();
+      setPersonas(pe);
     } catch (err: any) {
       setError(err?.message || 'Failed to load remote data');
     }
-  }, [client, refreshEvents, refreshGit]);
+  }, [client, refreshSpaces, refreshAgents, refreshEvents, refreshGit]);
 
   useEffect(() => {
     void refreshAll();
     // A resync is requested whenever the server could not replay the events we
     // missed, so the UI never silently keeps rendering stale state.
-    return client.connect(
+    const disconnect = client.connect(
       (event) => handleEvent(event),
       setStatus,
       onUnauthorized,
       () => { void refreshAll(); },
     );
+    return () => { refreshes.current.reset(); disconnect(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
 
@@ -191,13 +261,20 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
   }, [refreshAll]);
 
   function handleEvent(event: WebRemoteEvent) {
+    if (workspaceBlocked.current) return;
     const ch = event.channel;
+    if (ch === 'workspace:changed') {
+      workspaceBlocked.current = true;
+      setWorkspaceChanged(true);
+      refreshes.current.reset();
+      return;
+    }
     if (ch === 'chat:event') {
       const payload = event.payload as { agentId?: string } & ChatEvent;
       if (liveChat.current && payload.agentId === liveChat.current.agentId) {
         liveChat.current.cb(payload as ChatEvent);
       }
-      void refreshAgents();
+      if (payload.type === 'session.idle' || payload.type === 'session.error') refreshAfterEvent(refreshAgents(), refreshEvents());
       return;
     }
     if (ch.startsWith('agent:')) {
@@ -205,17 +282,32 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
       notifyForEvent(ch, event.payload);
     }
     if (ch === 'workspace:git-sync-changed') { setGit(event.payload as GitSyncStatus); return; }
-    if (ch === 'workspace:committed') { void refreshGit(); return; }
+    if (ch === 'workspace:committed') { void refreshAll(); return; }
     if (ch === 'canvas:content-updated') { window.dispatchEvent(new CustomEvent('whim:canvas-updated', { detail: event.payload })); return; }
-    if (ch.startsWith('agent:')) { void refreshAgents(); return; }
-    if (ch.startsWith('space:')) { void refreshSpaces(); void refreshEvents(); return; }
+    if (ch.startsWith('agent:')) { refreshAfterEvent(refreshAgents(), refreshEvents()); return; }
+    if (ch.startsWith('space:')) { refreshAfterEvent(refreshSpaces(), refreshEvents()); return; }
   }
 
-  const openSpace = spaces.find((s) => s.id === openSpaceId) || null;
-  const openAgent = agents.find((a) => a.agentId === openAgentId) || null;
-  const openSpaceAgents = openSpace
-    ? agents.filter((a) => a.spaceId === openSpace.id || a.spaceId.startsWith(`__page__${openSpace.id}/`))
-    : [];
+  function refreshAfterEvent(...updates: Promise<void>[]): void {
+    void Promise.all(updates).catch(error => setError(error instanceof Error ? error.message : 'Could not refresh remote data'));
+  }
+
+  const [openSpace, setOpenSpace] = useState<Space | null>(null);
+  const [openAgent, setOpenAgent] = useState<AgentListAllItem | null>(null);
+  useEffect(() => {
+    let active = true;
+    if (!openSpaceId) { setOpenSpace(null); return; }
+    void client.invoke('space:get', openSpaceId).then(value => { if (active) setOpenSpace(value); })
+      .catch(failure => { if (active) setError(String(failure)); });
+    return () => { active = false; };
+  }, [client, openSpaceId]);
+  useEffect(() => {
+    let active = true;
+    if (!openAgentId) { setOpenAgent(null); return; }
+    void client.invoke('agent:get', openAgentId).then(value => { if (active) setOpenAgent(value); })
+      .catch(failure => { if (active) setError(String(failure)); });
+    return () => { active = false; };
+  }, [client, openAgentId, agents]);
 
   return (
     <div className="app">
@@ -230,6 +322,10 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
       />
 
       {error && <div className="banner">{error}</div>}
+      {workspaceChanged && <div className="banner workspace-changed" role="alert">
+        The desktop workspace changed. Copy any unsaved drafts before reloading.{' '}
+        <button type="button" onClick={() => window.location.reload()}>Reload</button>
+      </div>}
 
       <nav className="tabs" aria-label="Sections">
         {(['spaces', 'workers', 'history'] as Tab[]).map((name) => (
@@ -244,6 +340,8 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
           <SpacesView
             client={client}
             spaces={spaces}
+            page={spacePage}
+            onPage={loadSpacePage}
             agents={agents}
             onRefresh={refreshSpaces}
             onOpenSpace={(id) => setOpenSpaceId(id)}
@@ -255,20 +353,23 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
             client={client}
             agents={agents}
             personas={personas}
+            page={agentPage}
+            onPage={loadAgentPage}
             onRefresh={refreshAgents}
             onOpenAgent={(id) => setOpenAgentId(id)}
           />
         )}
         {tab === 'history' && (
-          <HistoryView client={client} spaces={spaces} events={events} onRefresh={async () => { await refreshSpaces(); await refreshEvents(); }} onOpenSpace={(id) => setOpenSpaceId(id)} />
+          <HistoryView client={client} page={activityPage} onPage={loadActivityPage} onRefresh={async () => { await refreshSpaces(); await refreshEvents(); }} onOpenSpace={(id) => setOpenSpaceId(id)} />
         )}
       </main>
 
-      {openSpace && (
+      {openSpace && openSpace.id === openSpaceId && (
         <CanvasScreen
+          key={openSpace.id}
           client={client}
           space={openSpace}
-          agents={openSpaceAgents}
+          agentUpdates={agents}
           personas={personas}
           onClose={() => setOpenSpaceId(null)}
           onOpenAgent={(id) => setOpenAgentId(id)}
@@ -276,8 +377,9 @@ function RemoteApp({ onLogout, onUnauthorized }: { onLogout: () => void; onUnaut
         />
       )}
 
-      {openAgent && (
+      {openAgent && openAgent.agentId === openAgentId && (
         <ChatScreen
+          key={openAgent.agentId}
           client={client}
           agent={openAgent}
           interactions={interactions[openAgent.agentId] ?? []}
@@ -355,9 +457,11 @@ function Topbar({ status, git, client, notifications, onEnableNotifications, onS
 
 // ── Spaces ─────────────────────────────────────────────────
 
-function SpacesView({ client, spaces, agents, onRefresh, onOpenSpace, onOpenAgent }: {
+function SpacesView({ client, spaces, agents, page, onPage, onRefresh, onOpenSpace, onOpenAgent }: {
   client: WebRemoteClient;
   spaces: Space[];
+  page: SpacePage;
+  onPage: (cursor?: string) => Promise<void>;
   agents: AgentListAllItem[];
   onRefresh: () => Promise<void>;
   onOpenSpace: (id: string) => void;
@@ -367,6 +471,9 @@ function SpacesView({ client, spaces, agents, onRefresh, onOpenSpace, onOpenAgen
   const [saving, setSaving] = useState(false);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Space[] | null>(null);
+  const [searchPage, setSearchPage] = useState<SpacePage | null>(null);
+  const [searchError, setSearchError] = useState('');
+  const searchRevision = useRef(0);
 
   const agentsBySpace = useMemo(() => {
     const m = new Map<string, AgentListAllItem[]>();
@@ -395,10 +502,20 @@ function SpacesView({ client, spaces, agents, onRefresh, onOpenSpace, onOpenAgen
     }
   }
 
-  async function search(next: string) {
+  async function search(next: string, cursor?: string) {
+    const revision = ++searchRevision.current;
     setQuery(next);
-    if (!next.trim()) { setResults(null); return; }
-    setResults(await client.invoke('space:search', next.trim()));
+    if (!next.trim()) { setResults(null); setSearchPage(null); return; }
+    setSearchError('');
+    try {
+      const page = await client.invoke('space:list-page', { query: next, cursor, filter: 'all' });
+      if (revision !== searchRevision.current) return;
+      setResults(page.items);
+      setSearchPage(page);
+    } catch (failure) {
+      if (revision === searchRevision.current) setSearchError(String(failure));
+      throw failure;
+    }
   }
 
   async function toggleDone(space: Space) {
@@ -419,12 +536,15 @@ function SpacesView({ client, spaces, agents, onRefresh, onOpenSpace, onOpenAgen
         <button disabled={saving || !body.trim()}>{saving ? 'Capturing…' : 'Capture'}</button>
       </form>
 
-      <input className="search" value={query} onChange={(e) => void search(e.target.value)} placeholder="Search spaces" />
+      <input className="search" value={query} onChange={(e) => { void search(e.target.value).catch(error => console.error('[search]', error)); }} placeholder="Search spaces" />
+      {searchError && <p role="alert">{searchError}</p>}
+      <PageControls nextCursor={(searchPage ?? page).nextCursor} total={(searchPage ?? page).total}
+        count={list.length} scope={query} load={cursor => query ? search(query, cursor) : onPage(cursor)} />
 
       {list.length === 0 && <Empty icon="🎯" title={results ? 'No matching spaces' : 'No spaces yet'} detail={results ? 'Try another search.' : 'Capture an intent above to get started.'} />}
 
       <div className="space-list">
-        {list.map((space) => (
+        <VirtualRows rows={list} rowId={space => space.id} total={(searchPage ?? page).total} offset={(searchPage ?? page).offset} render={space => (
           <SpaceRow
             key={space.id}
             space={space}
@@ -434,7 +554,7 @@ function SpacesView({ client, spaces, agents, onRefresh, onOpenSpace, onOpenAgen
             onDelete={() => void remove(space)}
             onOpenAgent={onOpenAgent}
           />
-        ))}
+        )} />
       </div>
     </div>
   );
@@ -449,9 +569,9 @@ function SpaceRow({ space, agents, onOpen, onToggleDone, onDelete, onOpenAgent }
   onOpenAgent: (id: string) => void;
 }) {
   const due = formatDueDate(space.due_at_utc, space.due_at);
-  const running = agents.filter((a) => a.status === 'running').length;
-  const waiting = agents.some((a) => a.status === 'waiting-approval');
-  const failed = agents.some((a) => a.status === 'failed');
+  const running = space.agentCounts?.running ?? agents.filter((a) => a.status === 'running').length;
+  const waiting = space.agentCounts ? space.agentCounts.waiting > 0 : agents.some((a) => a.status === 'waiting-approval');
+  const failed = space.agentCounts ? space.agentCounts.failed > 0 : agents.some((a) => a.status === 'failed');
   const cls = ['space-item', space.status === 'done' ? 'done' : '', running > 0 ? 'has-running' : '', waiting ? 'has-waiting' : ''].filter(Boolean).join(' ');
 
   return (
@@ -460,7 +580,7 @@ function SpaceRow({ space, agents, onOpen, onToggleDone, onDelete, onOpenAgent }
         {space.status === 'done' ? '✓' : ''}
       </button>
       <div className="space-content">
-        <div className={`space-desc ${running > 0 ? 'agent-active' : ''}`}>{space.description || space.body || 'Untitled'}</div>
+        <div className={`space-desc ${running > 0 ? 'agent-active' : ''}`}>{space.description || 'Untitled'}</div>
         <div className="space-meta">
           {space.client && <span>👤 {space.client}</span>}
           {due.text && <span className={`due ${due.overdue ? 'overdue' : ''}`}>📅 {due.text}</span>}
@@ -493,10 +613,12 @@ function SpaceRow({ space, agents, onOpen, onToggleDone, onDelete, onOpenAgent }
 
 // ── Workers ────────────────────────────────────────────────
 
-function WorkersView({ client, agents, personas, onRefresh, onOpenAgent }: {
+function WorkersView({ client, agents, personas, page, onPage, onRefresh, onOpenAgent }: {
   client: WebRemoteClient;
   agents: AgentListAllItem[];
   personas: AgentPersona[];
+  page: AgentPage;
+  onPage: (cursor?: string) => Promise<void>;
   onRefresh: () => Promise<void>;
   onOpenAgent: (id: string) => void;
 }) {
@@ -519,9 +641,10 @@ function WorkersView({ client, agents, personas, onRefresh, onOpenAgent }: {
       {agents.length === 0 && <Empty icon="🤖" title="No workers" detail="Deploy an agent from a canvas or with + New." />}
 
       <div className="space-list">
-        {agents.map((agent) => (
+        <PageControls nextCursor={page.nextCursor} total={page.total} count={agents.length} scope="workers" load={onPage} />
+        <VirtualRows rows={agents} rowId={agent => agent.agentId} total={page.total} offset={page.offset} render={agent => (
           <WorkerCard key={agent.agentId} client={client} agent={agent} onRefresh={onRefresh} onOpen={() => onOpenAgent(agent.agentId)} />
-        ))}
+        )} />
       </div>
     </div>
   );
@@ -607,59 +730,45 @@ function QuickLaunch({ client, personas, onLaunched }: {
 
 // ── History ────────────────────────────────────────────────
 
-function HistoryView({ client, spaces, events, onRefresh, onOpenSpace }: {
+function HistoryView({ client, page, onPage, onRefresh, onOpenSpace }: {
   client: WebRemoteClient;
-  spaces: Space[];
-  events: SpaceEvent[];
+  page: ActivityPage;
+  onPage: (cursor?: string) => Promise<void>;
   onRefresh: () => Promise<void>;
   onOpenSpace: (id: string) => void;
 }) {
-  const closed = useMemo(() => spaces.filter((s) => s.status === 'done')
-    .sort((a, b) => (b.completed_at || b.updated_at).localeCompare(a.completed_at || a.updated_at)), [spaces]);
-
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const weekStart = todayStart - now.getDay() * 86400000;
-  let today = 0, week = 0;
-  for (const s of closed) {
-    const t = new Date(s.completed_at || s.updated_at).getTime();
-    if (t >= todayStart) today++;
-    if (t >= weekStart) week++;
-  }
-
   async function unarchive(id: string) {
     await client.invoke('space:unarchive', id);
     await onRefresh();
   }
-
-  if (closed.length === 0 && events.length === 0) {
-    return <Empty icon="✨" title="No activity yet" detail="Complete a space to see it here." />;
-  }
-
   return (
     <div className="stack">
-      <div className="activity-summary">
-        <div className="stat"><span className="stat-value">{today}</span> today</div>
+      {page.closedCounts && <div className="activity-summary">
+        <div className="stat"><span className="stat-value">{page.closedCounts.today}</span> today</div>
         <span className="stat-sep" />
-        <div className="stat"><span className="stat-value">{week}</span> this week</div>
+        <div className="stat"><span className="stat-value">{page.closedCounts.week}</span> this week</div>
         <span className="stat-sep" />
-        <div className="stat"><span className="stat-value">{closed.length}</span> total</div>
-      </div>
+        <div className="stat"><span className="stat-value">{page.closedCounts.total}</span> closed</div>
+      </div>}
+      <PageControls nextCursor={page.nextCursor} total={page.total} count={page.items.length} scope="activity" load={onPage} />
+      {page.items.length === 0 && <Empty icon="✨" title="No activity yet" detail="Complete a space to see it here." />}
       <div className="space-list">
-        {closed.map((space) => (
-          <div key={space.id} className="history-card" role="button" tabIndex={0} onClick={() => onOpenSpace(space.id)} onKeyDown={(e) => { if (e.key === 'Enter') onOpenSpace(space.id); }}>
-            <span className="history-icon">✓</span>
+        <VirtualRows rows={page.items} rowId={row => row.key} total={page.total} offset={page.offset} render={row => (
+          <div className="history-card" role={row.spaceId ? 'button' : undefined} tabIndex={row.spaceId ? 0 : undefined}
+            onClick={() => row.spaceId && onOpenSpace(row.spaceId)}
+            onKeyDown={e => { if ((e.key === 'Enter' || e.key === ' ') && row.spaceId) { e.preventDefault(); onOpenSpace(row.spaceId); } }}>
+            <span className="history-icon">{row.icon}</span>
             <div className="history-body">
-              <div className="history-title">{space.description || 'Untitled'}</div>
+              <div className="history-title">{row.title}</div>
               <div className="history-meta">
-                {space.client && <span>👤 {space.client}</span>}
-                {space.session_id && <span className="badge">● session</span>}
-                <span className="muted">{timeAgo(space.completed_at || space.updated_at)}</span>
+                {row.client && <span>{row.client}</span>}
+                {row.agentCount > 0 && <span>{row.agentCount} workers</span>}
+                <span className="muted">{new Date(row.at).toLocaleString()}</span>
               </div>
             </div>
-            <button className="row-x" onClick={(e) => { e.stopPropagation(); void unarchive(space.id); }} title="Restore">↺</button>
+            {row.spaceId && <button className="row-x" onClick={(e) => { e.stopPropagation(); void unarchive(row.spaceId!); }} title="Restore">↺</button>}
           </div>
-        ))}
+        )} />
       </div>
     </div>
   );
@@ -673,10 +782,10 @@ function pageCanvasSpaceId(spaceId: string, pageName: string): string {
   return `__page__${spaceId}/${encodeURIComponent(pageName)}`;
 }
 
-function CanvasScreen({ client, space, agents, personas, onClose, onOpenAgent, onRefreshAgents }: {
+function CanvasScreen({ client, space, agentUpdates, personas, onClose, onOpenAgent, onRefreshAgents }: {
   client: WebRemoteClient;
   space: Space;
-  agents: AgentListAllItem[];
+  agentUpdates: AgentListAllItem[];
   personas: AgentPersona[];
   onClose: () => void;
   onOpenAgent: (id: string) => void;
@@ -688,8 +797,28 @@ function CanvasScreen({ client, space, agents, personas, onClose, onOpenAgent, o
   const [editing, setEditing] = useState(false);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [panel, setPanel] = useState<'workers' | 'pages' | 'history'>('workers');
+  const [workerPage, setWorkerPage] = useState<AgentPage>({
+    items: [], total: 0, nextCursor: null, counts: { running: 0, waiting: 0, completed: 0, failed: 0 },
+  });
+  const [workerError, setWorkerError] = useState('');
+  const workerCursor = useRef<string | undefined>(undefined);
+  const workerRequest = useRef(0);
+  const loadWorkers = useCallback(async (cursor?: string) => {
+    workerCursor.current = cursor;
+    const request = ++workerRequest.current;
+    const page = await client.invoke('agent:list-page', { spaceId: space.id, includePages: true, cursor });
+    if (request === workerRequest.current) {
+      setWorkerPage(page);
+      setWorkerError('');
+    }
+  }, [client, space.id]);
+  useEffect(() => {
+    let active = true;
+    void loadWorkers(workerCursor.current).catch(error => { if (active) setWorkerError(String(error)); });
+    return () => { active = false; ++workerRequest.current; };
+  }, [loadWorkers, agentUpdates]);
 
-  const dirty = useRef(false);
+  const [saveError, setSaveError] = useState('');
   const saveTimer = useRef<number | null>(null);
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const contentRef = useRef('');
@@ -698,87 +827,118 @@ function CanvasScreen({ client, space, agents, personas, onClose, onOpenAgent, o
     contentRef.current = next;
     setContent(next);
   }, []);
+  const saves = useMemo(() => new DocumentSave(
+    () => contentRef.current, setEditorContent,
+    next => target.kind === 'main'
+      ? client.invoke('canvas:write', space.id, next)
+      : client.invoke('canvas:write-page', space.id, target.page, next),
+  ), [client, space.id, target, setEditorContent]);
+  const showSaveError = useCallback((error: unknown) => {
+    setSaveState('idle');
+    setSaveError(error instanceof Error ? error.message : 'Document could not save. Your text is kept.');
+  }, []);
+  const loadRevision = useRef(0);
 
   const load = useCallback(async () => {
+    if (saves.hasDirty()) throw new Error('Save the current edits before reloading this document.');
+    const revision = ++loadRevision.current;
     setLoaded(false);
     const result = target.kind === 'main'
       ? await client.invoke('canvas:read', space.id)
       : await client.invoke('canvas:read-page', space.id, target.page);
+    if (revision !== loadRevision.current) return;
+    if (saves.hasDirty()) throw new Error('Newer edits were kept instead of replacing them with a reload.');
+    if ('error' in result && result.error) throw new Error(result.error);
     setEditorContent('content' in result ? result.content : '');
-    dirty.current = false;
     setLoaded(true);
-  }, [client, space.id, target, setEditorContent]);
+  }, [client, space.id, target, setEditorContent, saves]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load().catch(showSaveError);
+    return () => { ++loadRevision.current; };
+  }, [load, showSaveError]);
 
   useEffect(() => () => {
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
   }, []);
+  useEffect(() => {
+    const guard = (event: BeforeUnloadEvent) => {
+      if (!saves.hasDirty()) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', guard);
+    return () => window.removeEventListener('beforeunload', guard);
+  }, [saves]);
 
   // Pick up live canvas edits from agents when not actively editing.
   useEffect(() => {
     function onUpdate(e: Event) {
       const detail = (e as CustomEvent).detail as { spaceId?: string; content?: string };
       const targetSpaceId = target.kind === 'main' ? space.id : pageCanvasSpaceId(space.id, target.page);
-      if (detail?.spaceId === targetSpaceId && !dirty.current && typeof detail.content === 'string') {
+      if (detail?.spaceId === targetSpaceId && !saves.hasDirty() && typeof detail.content === 'string') {
         setEditorContent(detail.content);
       }
     }
     window.addEventListener('whim:canvas-updated', onUpdate);
     return () => window.removeEventListener('whim:canvas-updated', onUpdate);
-  }, [space.id, target, setEditorContent]);
+  }, [space.id, target, setEditorContent, saves]);
 
-  const doSave = useCallback(async (nextContent = contentRef.current) => {
+  const doSave = useCallback(async () => {
+    if (saveTimer.current) window.clearTimeout(saveTimer.current);
     setSaveState('saving');
-    if (target.kind === 'main') {
-      const result = await client.invoke('canvas:write', space.id, nextContent);
-      if ('content' in result && typeof result.content === 'string') {
-        setEditorContent(result.content);
-      }
-    } else {
-      await client.invoke('canvas:write-page', space.id, target.page, nextContent);
-    }
-    dirty.current = false;
+    await saves.flush();
+    setSaveError('');
     setSaveState('saved');
     window.setTimeout(() => setSaveState('idle'), 1200);
-  }, [client, space.id, target, setEditorContent]);
+  }, [saves]);
 
   function onEdit(next: string) {
     setEditorContent(next);
-    dirty.current = true;
+    saves.changed();
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => void doSave(), 1500);
+    saveTimer.current = window.setTimeout(() => { void doSave().catch(showSaveError); }, 1500);
   }
 
   async function switchTarget(nextTarget: CanvasTargetKind): Promise<void> {
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    if (dirty.current) await doSave();
+    if (saves.hasDirty()) await doSave();
     setTarget(nextTarget);
     setEditing(false);
   }
 
   async function close() {
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    if (dirty.current) await doSave();
-    if (target.kind === 'main') await client.invoke('canvas:close', space.id, contentRef.current);
+    if (saves.hasDirty()) await doSave();
+    if (target.kind === 'main') {
+      const result = await client.invoke('canvas:close', space.id, contentRef.current);
+      if (!result.success) throw new Error(result.error || 'Document could not close. Your text is kept.');
+    }
     onClose();
   }
 
   return (
     <div className="screen canvas-screen">
       <header className="screen-top">
-        <button className="ghost icon-btn" onClick={() => void close()} title="Back">‹</button>
+        <button className="ghost icon-btn" onClick={() => { void close().catch(showSaveError); }} title="Back">‹</button>
         <div className="screen-title">
-          <div className="screen-title-main">{space.description || space.body || 'Canvas'}</div>
+          <div className="screen-title-main">{space.description || 'Canvas'}</div>
           {target.kind === 'page' && <div className="screen-subtitle">{target.page}</div>}
         </div>
         <div className="screen-top-actions">
           {saveState !== 'idle' && <span className="save-state">{saveState === 'saving' ? 'Saving…' : 'Saved'}</span>}
-          <button className={`ghost ${editing ? 'active' : ''}`} onClick={() => { if (editing && dirty.current) void doSave(); setEditing((v) => !v); }}>
+          <button className={`ghost ${editing ? 'active' : ''}`} onClick={() => {
+            if (editing && saves.hasDirty()) {
+              void doSave().then(() => setEditing(false)).catch(showSaveError);
+            } else setEditing((v) => !v);
+          }}>
             {editing ? 'Preview' : 'Edit'}
           </button>
         </div>
       </header>
+      {saveError && <div role="alert" className="error">{saveError} <button onClick={() => {
+        void (loaded ? doSave() : load()).catch(showSaveError);
+      }}>{loaded ? 'Retry save' : 'Retry load'}</button></div>}
 
       <div className="canvas-body">
         {!loaded ? (
@@ -801,15 +961,20 @@ function CanvasScreen({ client, space, agents, personas, onClose, onOpenAgent, o
 
       <div className="canvas-dock">
         <div className="dock-tabs">
-          <button className={panel === 'workers' ? 'active' : ''} onClick={() => setPanel('workers')}>Workers {agents.length > 0 && <span className="pill">{agents.length}</span>}</button>
+          <button className={panel === 'workers' ? 'active' : ''} onClick={() => setPanel('workers')}>Workers {workerPage.total > 0 && <span className="pill">{workerPage.total}</span>}</button>
           <button className={panel === 'pages' ? 'active' : ''} onClick={() => setPanel('pages')}>Pages</button>
           <button className={panel === 'history' ? 'active' : ''} onClick={() => setPanel('history')}>History</button>
         </div>
         <div className="dock-body">
           {panel === 'workers' && (
-            <CanvasWorkers client={client} space={space} target={target} agents={agents} personas={personas} selection={() => readSelection(textRef.current)} onOpenAgent={onOpenAgent} onRefreshAgents={onRefreshAgents} />
+            <>
+              {workerError && <p role="alert">{workerError}</p>}
+              <PageControls nextCursor={workerPage.nextCursor} total={workerPage.total} count={workerPage.items.length}
+                scope={`canvas:${space.id}`} load={loadWorkers} />
+              <CanvasWorkers client={client} space={space} target={target} agents={workerPage.items} personas={personas} selection={() => readSelection(textRef.current)} onOpenAgent={onOpenAgent} onRefreshAgents={onRefreshAgents} />
+            </>
           )}
-          {panel === 'pages' && <CanvasPages client={client} space={space} onOpenPage={(page) => { void switchTarget({ kind: 'page', page }); }} active={target.kind === 'page' ? target.page : null} onOpenMain={() => { void switchTarget({ kind: 'main' }); }} />}
+          {panel === 'pages' && <CanvasPages client={client} space={space} onOpenPage={(page) => { void switchTarget({ kind: 'page', page }).catch(showSaveError); }} active={target.kind === 'page' ? target.page : null} onOpenMain={() => { void switchTarget({ kind: 'main' }).catch(showSaveError); }} />}
           {panel === 'history' && <CanvasHistory client={client} space={space} onRestored={load} />}
         </div>
       </div>
@@ -1017,39 +1182,80 @@ function ChatScreen({ client, agent, interactions, registerLive, unregisterLive,
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const loadingHistory = useRef(false);
   const pendingEvents = useRef<ChatEvent[]>([]);
+  const [olderCursor, setOlderCursor] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState('');
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const olderFlight = useRef(false);
+  const following = useRef(true);
+  const watermark = useRef(0);
+  const agentGeneration = useRef(0);
+  const localHistoryIds = useRef(new Set<string>());
+  const [sendError, setSendError] = useState('');
+  const [historyApprovals, setHistoryApprovals] = useState<ApprovalMessage[]>([]);
+  const [historyQuestions, setHistoryQuestions] = useState<PendingInteraction[]>([]);
 
   useEffect(() => {
     let active = true;
+    const generation = ++agentGeneration.current;
     loadingHistory.current = true;
     pendingEvents.current = [];
     setLoading(true);
-    registerLive(agent.agentId, (event) => {
+    const batch = createEventBatch(event => {
       if (loadingHistory.current) {
         pendingEvents.current.push(event);
         return;
       }
+      if (event.type === 'approval.resolved') setHistoryApprovals(current => current.filter(item => item.requestId !== event.requestId));
+      if (event.type === 'elicitation.resolved') setHistoryQuestions(current => current.filter(item => item.requestId !== event.requestId));
       setBubbles((prev) => applyChatEvent(prev, event));
+    });
+    const seen = new Set<string>();
+    registerLive(agent.agentId, event => {
+      if (!active || (event.sequence !== undefined && event.sequence <= watermark.current)) return;
+      if (event.eventId) {
+        if (seen.has(event.eventId)) return;
+        seen.add(event.eventId);
+        if (seen.size > 4096) seen.delete(seen.values().next().value!);
+      }
+      batch.push(event);
     });
     (async () => {
       try {
-        const result = await client.invoke('agent:get-history', agent.agentId);
+        const page = await client.invoke('agent:history-page', agent.agentId);
+        const result = page.legacySession ? await client.invoke('agent:get-history', agent.agentId) : null;
         if (active) {
-          const history = 'events' in result && Array.isArray(result.events) ? parseHistory(result.events) : [];
-          setBubbles(() => {
-            const merged = applyChatEvents(history, pendingEvents.current);
-            pendingEvents.current = [];
-            loadingHistory.current = false;
-            return merged;
+          if (result && 'error' in result) throw new Error(result.error);
+          const history = result && 'events' in result ? parseHistory(result.events) : historyBubbles(page.items);
+          setOlderCursor(page.nextCursor);
+          watermark.current = page.watermark;
+          batch.flush();
+          const buffered = pendingEvents.current.filter(event => event.sequence === undefined || event.sequence > page.watermark);
+          const resolved = new Set(buffered.flatMap(event =>
+            event.type === 'approval.resolved' || event.type === 'elicitation.resolved' ? [event.requestId] : []));
+          setHistoryApprovals(page.items.filter((item): item is ApprovalMessage =>
+            item.type === 'approval' && !item.responded && !resolved.has(item.requestId)));
+          setHistoryQuestions(page.items.flatMap<PendingInteraction>(item =>
+            item.type === 'elicitation' && !item.responded && !resolved.has(item.requestId) ? [{
+              kind: 'elicitation', agentId: agent.agentId, requestId: item.requestId,
+              message: item.message, mode: item.mode === 'url' ? 'url' : 'form', source: item.elicitationSource ?? null,
+            }] : []));
+          pendingEvents.current = [];
+          loadingHistory.current = false;
+          const localIds = new Set(localHistoryIds.current);
+          localHistoryIds.current.clear();
+          setBubbles(current => {
+            return applyChatEvents(mergeHistoryWithLocal(history, current, localIds), buffered);
           });
         }
-      } catch {
+      } catch (error) {
         if (active) {
-          setBubbles(() => {
-            const merged = applyChatEvents([], pendingEvents.current);
-            pendingEvents.current = [];
-            loadingHistory.current = false;
-            return merged;
-          });
+          setHistoryError(error instanceof Error ? error.message : 'Could not load conversation');
+          batch.flush();
+          const buffered = pendingEvents.current;
+          pendingEvents.current = [];
+          loadingHistory.current = false;
+          localHistoryIds.current.clear();
+          setBubbles(current => applyChatEvents(current, buffered));
         }
       } finally {
         if (active) {
@@ -1060,24 +1266,64 @@ function ChatScreen({ client, agent, interactions, registerLive, unregisterLive,
         }
       }
     })();
-    return () => { active = false; loadingHistory.current = false; pendingEvents.current = []; unregisterLive(); };
+    return () => {
+      active = false; agentGeneration.current = generation + 1;
+      batch.dispose(); loadingHistory.current = false; pendingEvents.current = []; unregisterLive();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, agent.agentId]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    if (following.current) scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [bubbles]);
+
+  async function loadOlder() {
+    if (!olderCursor || olderFlight.current) return;
+    olderFlight.current = true;
+    setLoadingOlder(true);
+    const generation = agentGeneration.current;
+    setHistoryError('');
+    try {
+      const page = await client.invoke('agent:history-page', agent.agentId, { cursor: olderCursor });
+      if (generation !== agentGeneration.current) return;
+      const resolved = new Set(page.items.flatMap(item => 'responded' in item && item.responded ? [item.requestId] : []));
+      setHistoryApprovals(current => current.filter(item => !resolved.has(item.requestId)));
+      setHistoryQuestions(current => current.filter(item => !resolved.has(item.requestId)));
+      following.current = false;
+      setOlderCursor(page.nextCursor);
+      setBubbles(current => {
+        const ids = new Set(current.map(row => row.id));
+        return orderTranscript([...historyBubbles(page.items).filter(row => !ids.has(row.id)), ...current]);
+      });
+    } catch (error) {
+      if (generation === agentGeneration.current) setHistoryError(String(error));
+    } finally {
+      olderFlight.current = false;
+      if (generation === agentGeneration.current) setLoadingOlder(false);
+    }
+  }
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
     const text = message.trim();
-    if (!text) return;
+    if (!text || sending) return;
     setSending(true);
-    setBubbles((prev) => [...prev, { kind: 'user', id: `u${Date.now()}`, text }]);
+    setSendError('');
+    const localId = crypto.randomUUID();
+    if (loadingHistory.current) localHistoryIds.current.add(localId);
+    setBubbles((prev) => [...prev, { kind: 'user', id: localId, text }]);
     setMessage('');
     try {
-      await client.invoke('chat:send-message', agent.agentId, text);
+      const result = await client.invoke('chat:send-message', agent.agentId, text);
+      if (result.error) throw new Error(result.error);
+      if (result.messageId) {
+        if (localHistoryIds.current.delete(localId)) localHistoryIds.current.add(`user:${result.messageId}`);
+        setBubbles(current => acknowledgeUserMessage(current, localId, result.messageId!));
+      }
       await onRefreshAgents();
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : 'Could not send message');
+      setMessage(current => current || text);
     } finally {
       setSending(false);
     }
@@ -1095,6 +1341,8 @@ function ChatScreen({ client, agent, interactions, registerLive, unregisterLive,
         </div>
       </header>
 
+      {(agent.pendingApprovalId || historyApprovals.length > 0 || historyQuestions.length > 0 || interactions.length > 0) && (
+      <section aria-label="Pending requests" style={{ maxHeight: '40vh', overflowY: 'auto', flexShrink: 0 }}>
       {agent.pendingApprovalId && (
         <Approval
           label={approvalDesc.label}
@@ -1104,14 +1352,35 @@ function ChatScreen({ client, agent, interactions, registerLive, unregisterLive,
         />
       )}
 
-      {interactions.map((item) => (
+      {historyApprovals.filter(item => item.requestId !== agent.pendingApprovalId).map(item => {
+        const description = describeApproval({ permissionKind: item.permissionKind, intention: item.intention, path: item.path });
+        const respond = async (approved: boolean) => {
+          try {
+            await client.invoke('agent:approve', agent.agentId, item.requestId, approved);
+            await onRefreshAgents();
+          } catch (error) { setHistoryError(error instanceof Error ? error.message : 'Could not respond to approval'); }
+        };
+        return <Approval key={item.requestId} label={description.label} detail={description.detail}
+          onApprove={() => void respond(true)} onDeny={() => void respond(false)} />;
+      })}
+      {[...historyQuestions.filter(item => !interactions.some(live => live.requestId === item.requestId)), ...interactions].map((item) => (
         <InteractionTile key={item.requestId} client={client} item={item} onRefreshAgents={onRefreshAgents} />
       ))}
+      </section>
+      )}
 
-      <div className="chat-scroll" ref={scrollRef}>
+      {olderCursor && <button disabled={loadingOlder} onClick={() => void loadOlder()}>
+        {loadingOlder ? 'Loading earlier history...' : 'Load earlier history'}
+      </button>}
+      {historyError && <p role="alert">{historyError}</p>}
+      {sendError && <p role="alert">{sendError}</p>}
+      <div className="chat-scroll" ref={scrollRef} onScroll={event => {
+        const node = event.currentTarget;
+        following.current = node.scrollHeight - node.scrollTop - node.clientHeight < 60;
+      }}>
         {loading && <div className="loading">Loading conversation…</div>}
         {!loading && bubbles.length === 0 && <Empty icon="💬" title="No messages yet" detail="Send a message to continue." />}
-        {bubbles.map((b) => <BubbleView key={b.id} bubble={b} />)}
+        <VirtualRows rows={bubbles} rowId={bubble => bubble.id} render={bubble => <BubbleView bubble={bubble} />} />
       </div>
 
       <form className="chat-composer" onSubmit={send}>
@@ -1135,7 +1404,9 @@ function BubbleView({ bubble }: { bubble: Bubble }) {
   if (bubble.kind === 'assistant') {
     return (
       <div className="bubble assistant">
-        <div className="bubble-body markdown"><Markdown remarkPlugins={[remarkGfm]}>{bubble.text || '…'}</Markdown></div>
+        <div className="bubble-body markdown"><FeatureBoundary fallback={bubble.text}>
+          <Suspense fallback={bubble.text}><Markdown>{bubble.text || '…'}</Markdown></Suspense>
+        </FeatureBoundary></div>
       </div>
     );
   }
@@ -1280,7 +1551,9 @@ function CanvasMarkdown({ spaceId, content }: { spaceId: string; content: string
 
   return (
     <div className="markdown">
-      <Markdown remarkPlugins={[remarkGfm]} components={components}>{content}</Markdown>
+      <FeatureBoundary fallback={<pre>{content}</pre>}>
+        <Suspense fallback={<pre>{content}</pre>}><Markdown components={components}>{content}</Markdown></Suspense>
+      </FeatureBoundary>
     </div>
   );
 }

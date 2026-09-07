@@ -5,23 +5,31 @@ import { app, BrowserWindow, dialog, globalShortcut, session, protocol, net, pow
 import * as path from 'path';
 import * as fs from 'fs';
 import { loadConfig, getConfigValue, setConfigValue, getResolvedHotkeys } from './config';
-import { initDatabase, mergeSessionIds, syncCanvasContent } from './database';
-import { initWorkspace, getDbPath, getLogRoot } from './workspace';
-import { startSkillWatcher } from './skill-watcher';
+import { initDatabase, closeDatabase, mergeSessionIds, syncCanvasContent, initWorkspace, withWorkspaceContext, getStorageReadiness } from './storage';
+import { startStorageMaintenance, stopStorageMaintenance } from './storage-maintenance';
+import { getDbPath, getLogRoot, drainGitOperations, commitNow } from './workspace';
+import { startSkillWatcher, stopSkillWatcher } from './skill-watcher';
 import { startScheduler, stopScheduler } from './services/scheduler';
-import { migrateOldDatabase } from './migration';
-import { compactOldSegments } from './compaction';
+import { migrateOldDatabase } from './storage';
 import { registerIpcHandlers } from './ipc';
-import { preloadModel } from './voice';
 import { initCopilot, shutdownCopilot } from './ai';
-import { startCliExitMonitor, stopCliExitMonitor, reconcileStaleAgents } from './agent-service';
-import { createMainWindow, toggleWindow, setupSnapOnDrop, registerWindowIpcHandlers, preWarmSettingsWindow, releaseSettingsWindow, preWarmCanvasWindow, releaseCanvasWindow } from './window-manager';
+import { startCliExitMonitor, stopCliExitMonitor, reconcileStaleAgents, stopWorkspaceAgents } from './agent-service';
+import { createMainWindow, toggleWindow, setupSnapOnDrop, registerWindowIpcHandlers, whenRendererReady, releaseSettingsWindow, releaseCanvasWindow } from './window-manager';
+import { serveAppRequest } from './app-protocol';
 import { createTray, destroyTray } from './tray';
-import { initAutoUpdater, cleanupAutoUpdater } from './update-service';
+import { initAutoUpdater, cleanupAutoUpdater, registerUpdateHandlers } from './update-service';
 import { syncWebRemoteServer, stopWebRemoteServer, refreshWebRemoteBindings } from './web/server';
 import { restoreActiveCloudPollers, stopAllCloudPollers } from './cloud-agent-poller';
 import { registerArtifactSchemePrivileges, registerArtifactProtocol } from './canvas/artifact-protocol';
 import { resolveSpaceLocation } from './canvas/space-location';
+import { installLifecycleHandler, prepareShutdown } from './lifecycle';
+import { stopSyncPolling, restartWorkspaceServices } from './ipc/workspace-handlers';
+import { stopAllWatchers } from './canvas-watcher';
+import { registerIpcHandler } from './ipc/registry';
+import { notifyAllWindows } from './notify';
+import { drainProducers, pauseWorkspaceCommands } from './producer-tasks';
+import { getPerformanceTimings } from '../shared/performance';
+import { shutdownVoice } from './voice';
 
 let currentToggleAccelerator: string | null = null;
 let toggleShortcutRegistered = false;
@@ -110,6 +118,7 @@ protocol.registerSchemesAsPrivileged([
       standard: true,
       secure: true,
       supportFetchAPI: true,
+      corsEnabled: true,
       stream: true,
     },
   },
@@ -119,76 +128,14 @@ protocol.registerSchemesAsPrivileged([
 // so agent-authored HTML can never reach the app renderer's origin or storage.
 registerArtifactSchemePrivileges();
 
-const MIME_TYPES: Record<string, string> = {
-  '.html': 'text/html',
-  '.css': 'text/css',
-  '.js': 'application/javascript',
-  '.json': 'application/json',
-  '.png': 'image/png',
-  '.svg': 'image/svg+xml',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.mp3': 'audio/mpeg',
-  '.wav': 'audio/wav',
-  '.ogg': 'audio/ogg',
-  '.m4a': 'audio/mp4',
-  '.mp4': 'video/mp4',
-  '.webm': 'video/webm',
-  '.mov': 'video/quicktime',
-  '.pdf': 'application/pdf',
-};
-
 app.whenReady().then(async () => {
   try {
   // Register custom protocol to serve renderer files (Web Speech API needs a real origin, not file://)
   // Also serves workspace attachment files via copilot-whim://app/workspace/<intentFolder>/<path>
-  protocol.handle('copilot-whim', (request) => {
-    const url = new URL(request.url);
-    const pathname = url.pathname;
-
-    // Serve workspace attachments: /workspace/<folder>/<relativePath>
-    if (pathname.startsWith('/workspace/')) {
-      const workspace = getConfigValue('workspace');
-      if (!workspace) {
-        return new Response('No workspace', { status: 404 });
-      }
-
-      const relativePath = pathname.slice('/workspace/'.length);
-      const fullPath = path.resolve(path.join(workspace, relativePath));
-      const workspaceRoot = path.resolve(workspace);
-
-      // Security: ensure path stays within workspace
-      if (!fullPath.startsWith(workspaceRoot)) {
-        return new Response('Forbidden', { status: 403 });
-      }
-
-      if (!fs.existsSync(fullPath)) {
-        return new Response('Not found', { status: 404 });
-      }
-
-      const ext = path.extname(fullPath);
-      const mimeType = MIME_TYPES[ext] || 'application/octet-stream';
-      return net.fetch('file://' + fullPath.replace(/\\/g, '/'), {
-        headers: { 'Content-Type': mimeType },
-      });
-    }
-
-    // Default: serve app renderer files
-    // URL: whim://app/renderer/index.html → host="app", pathname="/renderer/index.html"
-    const filePath = path.join(__dirname, '..', pathname);
-    const ext = path.extname(filePath);
-    const mimeType = MIME_TYPES[ext] || 'application/octet-stream';
-
-    if (!fs.existsSync(filePath)) {
-      console.error('Protocol: file not found:', filePath);
-      return new Response('Not found', { status: 404 });
-    }
-    return net.fetch('file://' + filePath.replace(/\\/g, '/'), {
-      headers: { 'Content-Type': mimeType },
-    });
-  });
+  protocol.handle('copilot-whim', request => serveAppRequest(
+    request, path.join(__dirname, '..', 'renderer'), getConfigValue('workspace'),
+    url => net.fetch(url),
+  ));
 
   // Serve canvas artifacts from an isolated session on their own origin.
   registerArtifactProtocol(resolveSpaceLocation);
@@ -196,7 +143,13 @@ app.whenReady().then(async () => {
   // Grant microphone permission for Web Speech API
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     const allowed = ['media', 'audioCapture', 'microphone'];
-    callback(allowed.includes(permission));
+    if (!allowed.includes(permission)) { callback(false); return; }
+    if (process.platform === 'darwin') {
+      void systemPreferences.askForMediaAccess('microphone').then(callback, error => {
+        console.warn('[main] Microphone permission request failed:', error);
+        callback(false);
+      });
+    } else callback(true);
   });
 
   session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
@@ -204,39 +157,16 @@ app.whenReady().then(async () => {
     return allowed.includes(permission);
   });
 
-  // Request macOS system-level mic access (triggers the OS permission dialog)
-  if (process.platform === 'darwin') {
-    systemPreferences.askForMediaAccess('microphone').then(granted => {
-      if (!granted) console.warn('[main] Microphone access denied by macOS');
-    });
-  }
-
   // Load local config and initialize workspace if configured
   const config = loadConfig();
   const workspace = config.workspace;
 
-  if (workspace && fs.existsSync(workspace)) {
-    initWorkspace(workspace);
-    migrateOldDatabase(workspace);
-    initDatabase(getDbPath(workspace), getLogRoot(workspace));
-    mergeSessionIds(config.sessions);
-    syncCanvasContent(workspace);
-    startSkillWatcher(workspace);
-    startScheduler();
-
-    // Background compaction — fold events older than the 30-day keep
-    // window into a single snapshot.jsonl. Runs once after startup
-    // (deferred to idle so it doesn't compete with first-paint work)
-    // and then once a day for long-running sessions. Cheap to call
-    // when no segments are cold.
-    scheduleCompaction(workspace);
-  } else if (workspace) {
+  if (workspace && !fs.existsSync(workspace)) {
     // Workspace path configured but directory missing — clear it
     console.warn(`[main] Workspace directory not found: ${workspace}`);
     setConfigValue('workspace', null);
   }
   // If no workspace, DB is not initialized — IPC handlers return empty/error states
-  await syncWebRemoteServer();
 
   // Interfaces routinely change while the machine is asleep and the binder's
   // poll timer is suspended, so re-resolve immediately on resume.
@@ -250,38 +180,62 @@ app.whenReady().then(async () => {
   const preloadPath = path.join(__dirname, 'preload.js');
 
   registerIpcHandlers();
+  registerUpdateHandlers();
+  registerIpcHandler('storage:status', () => getStorageReadiness());
+  // Recovery runs in its worker concurrently with native window construction;
+  // creating the capture shell must not serialize these independent cold starts.
+  const storageOpening = workspace && fs.existsSync(workspace)
+    ? (async () => {
+      await initWorkspace(workspace);
+      const migrated = await migrateOldDatabase(workspace, path.join(app.getPath('userData'), 'spaces.db'));
+      if (migrated) {
+        if (migrated.theme) setConfigValue('theme', migrated.theme);
+        if (migrated.model) setConfigValue('model', migrated.model);
+        config.sessions = { ...migrated.sessions, ...config.sessions };
+        setConfigValue('sessions', config.sessions);
+      }
+      await initDatabase(getDbPath(workspace), getLogRoot(workspace));
+    })().then(() => ({ ok: true as const }), error => ({ ok: false as const, error }))
+    : undefined;
   const mainWin = createMainWindow({ preloadPath });
   // Register before any recovery work that may invoke a slow external auth
   // command. Otherwise the page can finish loading while startup is awaiting
   // recovery, causing this one-shot event to be missed.
-  mainWin.webContents.once('did-finish-load', () => {
-    toggleWindow('startup');
-
-    if (workspace && fs.existsSync(workspace)) {
-      setTimeout(() => {
-        try {
-          preWarmSettingsWindow(preloadPath);
-        } catch (err) {
-          console.warn('[main] Settings pre-warm failed:', err);
-        }
-        try {
-          preWarmCanvasWindow(preloadPath);
-        } catch (err) {
-          console.warn('[main] Canvas pre-warm failed:', err);
-        }
-      }, 1500);
-    }
+  whenRendererReady(mainWin, () => {
+    if (mainWin.isVisible()) {
+      const side = (getConfigValue('snapPosition') || 'bottom-right').includes('left') ? 'left' : 'right';
+      mainWin.webContents.send('window:shown', { side, expanded: false, source: 'startup' });
+    } else toggleWindow('startup');
   });
   registerWindowIpcHandlers(preloadPath);
   setupSnapOnDrop();
-  createTray();
-  preloadModel();
-  initCopilot();
+  void createTray().catch(error => console.error('[main] Tray initialization failed:', error));
+  const hotkeys = getResolvedHotkeys();
+  registerToggleShortcut(hotkeys.toggleWindow);
+
+  // The shell is already loading; only post-readiness services wait for recovery.
+  let webStarted = false;
+  if (workspace && storageOpening) {
+    const opened = await storageOpening;
+    if (!opened.ok) throw opened.error;
+    webStarted = true;
+    void syncWebRemoteServer().catch(error => console.error('[main] Web service failed:', error));
+    await withWorkspaceContext(async () => {
+      await mergeSessionIds(config.sessions);
+      notifyAllWindows('workspace:changed', workspace);
+      await syncCanvasContent(workspace);
+      (await startSkillWatcher(workspace));
+      (await startScheduler());
+      startStorageMaintenance(workspace);
+    });
+  }
+  if (!webStarted) void syncWebRemoteServer().catch(error => console.error('[main] Web service failed:', error));
+  void initCopilot().catch(error => console.error('[main] Runtime initialization failed:', error));
   startCliExitMonitor();
   void restoreActiveCloudPollers().catch((err) => {
     console.warn('[main] Cloud poller recovery failed:', err);
   });
-  reconcileStaleAgents();
+  (await reconcileStaleAgents());
   initAutoUpdater();
 
   // Dev mode: watch renderer files and auto-reload windows
@@ -296,8 +250,6 @@ app.whenReady().then(async () => {
     });
   }
 
-  const hotkeys = getResolvedHotkeys();
-  registerToggleShortcut(hotkeys.toggleWindow);
   } catch (err) {
     console.error('[main] Fatal startup error:', err);
     dialog.showErrorBox('whim — Startup Error',
@@ -306,23 +258,73 @@ app.whenReady().then(async () => {
   }
 });
 
-app.on('before-quit', () => {
+let exitPrepared = false;
+installLifecycleHandler(async () => {
+  const resumeCommands = pauseWorkspaceCommands();
+  const workspace = getConfigValue('workspace');
+  const restoreWatchers = stopAllWatchers();
+  let canResume = true;
+  try {
+  stopStorageMaintenance();
+  stopSyncPolling();
+  stopSkillWatcher();
+  stopCliExitMonitor();
+  stopAllCloudPollers();
+  stopScheduler();
+  await stopWebRemoteServer();
+  await stopWorkspaceAgents();
+  await shutdownCopilot();
+  await drainProducers();
+  await shutdownVoice();
+  if (workspace) {
+    try { await commitNow(workspace); }
+    catch (error) { console.error('[main] Git checkpoint failed; durable local files retained:', error); }
+  }
+  await drainGitOperations();
+  await closeDatabase();
+  cleanupAutoUpdater();
+  if (process.env.WHIM_PERF === '1') console.info('[perf]', getPerformanceTimings());
+  globalShortcut.unregisterAll();
+  destroyTray();
+  exitPrepared = true;
+  releaseSettingsWindow();
+  releaseCanvasWindow();
+  } catch (error) {
+    if (getStorageReadiness().state !== 'ready') {
+      canResume = false;
+      console.error('[main] Shutdown failed after storage became unavailable:', error);
+      throw new Error('Shutdown failed after storage became unavailable. Drafts are retained; copy them and restart before saving.');
+    }
+    try {
+      await restartWorkspaceServices(workspace);
+      await restoreWatchers();
+      await syncWebRemoteServer();
+    } catch (recoveryError) {
+      canResume = false;
+      console.error('[main] Shutdown failed:', error);
+      console.error('[main] Shutdown recovery failed:', recoveryError);
+      throw new Error('Shutdown recovery failed. Drafts are retained; copy them and restart before saving.');
+    }
+    throw error;
+  } finally {
+    if (!exitPrepared && canResume) resumeCommands();
+  }
+});
+
+app.on('before-quit', event => {
+  if (!exitPrepared) {
+    event.preventDefault();
+    void prepareShutdown('quit').then(() => app.quit()).catch(error => {
+      console.error('[main] Shutdown cancelled:', error);
+      dialog.showErrorBox('whim - Save before quitting', error instanceof Error ? error.message : String(error));
+    });
+    return;
+  }
   // Let the settings + canvas windows' `close` handlers actually close them
   // now that the app is quitting (normally we intercept close to hide for
   // speed).
   releaseSettingsWindow();
   releaseCanvasWindow();
-});
-
-app.on('will-quit', async () => {
-  globalShortcut.unregisterAll();
-  stopCliExitMonitor();
-  stopAllCloudPollers();
-  stopScheduler();
-  await stopWebRemoteServer();
-  cleanupAutoUpdater();
-  destroyTray();
-  await shutdownCopilot();
 });
 
 app.on('window-all-closed', () => {
@@ -331,37 +333,3 @@ app.on('window-all-closed', () => {
     // On macOS this is standard behavior (app stays in dock)
   }
 });
-
-/**
- * Schedule background log compaction. Runs once at idle after startup
- * (so it doesn't compete with first-paint or DB-replay work) and then
- * once every 24 hours for long-running sessions.
- *
- * Compaction itself is cheap when nothing is cold: it just stats the
- * segment files and exits early. The 24h cadence is intentionally
- * generous — segments only become eligible after 30 days, so more
- * frequent runs would be wasted work.
- */
-function scheduleCompaction(workspace: string): void {
-  const logRoot = getLogRoot(workspace);
-  const dayMs = 24 * 60 * 60 * 1000;
-
-  const run = (): void => {
-    try {
-      const result = compactOldSegments(logRoot);
-      if (result.ran) {
-        console.log(
-          `[main] Compaction folded ${result.compactedSegments} segment(s) ` +
-          `and GC'd ${result.removedSideFiles ?? 0} side file(s)`,
-        );
-      }
-    } catch (err) {
-      console.warn('[main] Compaction run failed:', err);
-    }
-  };
-
-  // First run: 30 seconds after startup so DB init + window paint finish first.
-  setTimeout(run, 30 * 1000).unref();
-  // Periodic: once a day for sessions that stay open.
-  setInterval(run, dayMs).unref();
-}

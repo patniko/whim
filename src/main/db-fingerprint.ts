@@ -24,11 +24,11 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import * as crypto from 'crypto';
 import { listLogFiles } from './log-store';
+import { hashFile, snapshotChunkFiles } from './persistence-snapshot';
 
 /** Bump this when the DB schema in initDatabase changes. Mismatches force a rebuild. */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 6;
 
 /** Sibling filename next to spaces.db. */
 export const FINGERPRINT_FILENAME = 'db.fingerprint.json';
@@ -67,8 +67,19 @@ export function readFingerprint(sidecarPath: string): Fingerprint | null {
     const text = fs.readFileSync(sidecarPath, 'utf-8');
     const parsed = JSON.parse(text);
     if (typeof parsed !== 'object' || parsed === null) return null;
-    if (typeof parsed.schemaVersion !== 'number') return null;
+    if (!Number.isSafeInteger(parsed.schemaVersion)) return null;
     if (!Array.isArray(parsed.logFiles)) return null;
+    const validStat = (entry: unknown): entry is DbFileFingerprint => {
+      if (!entry || typeof entry !== 'object') return false;
+      const stat = entry as Partial<DbFileFingerprint>;
+      return typeof stat.path === 'string' && typeof stat.size === 'number' &&
+        Number.isSafeInteger(stat.size) && stat.size >= 0 &&
+        typeof stat.mtimeMs === 'number' && Number.isFinite(stat.mtimeMs);
+    };
+    if (parsed.logFiles.some((entry: unknown) => !validStat(entry) ||
+        typeof (entry as LogFileFingerprint).sha256 !== 'string')) return null;
+    if (parsed.db !== undefined && !validStat(parsed.db)) return null;
+    if (new Set(parsed.logFiles.map((entry: LogFileFingerprint) => entry.path)).size !== parsed.logFiles.length) return null;
     return parsed as Fingerprint;
   } catch {
     return null;
@@ -108,24 +119,15 @@ export function computeFingerprint(
   }
 
   const logFiles: LogFileFingerprint[] = [];
-  for (const file of listLogFiles(logRoot)) {
-    let size = 0;
-    let mtimeMs = 0;
-    try {
-      const stat = fs.statSync(file);
-      size = stat.size;
-      mtimeMs = stat.mtimeMs;
-    } catch {
-      // Race with delete — skip silently.
-      continue;
-    }
+  for (const file of [...listLogFiles(logRoot), ...snapshotChunkFiles(logRoot)]) {
+    const { size, mtimeMs } = fs.statSync(file);
 
     const prev = previousByPath.get(file);
     let sha256: string;
     if (prev && prev.size === size && prev.mtimeMs === mtimeMs) {
       sha256 = prev.sha256;
     } else {
-      sha256 = sha256OfFile(file);
+      sha256 = hashFile(file, size);
     }
     logFiles.push({ path: file, size, mtimeMs, sha256 });
   }
@@ -153,10 +155,9 @@ export function computeFingerprint(
  *   • The DB file still exists with the same size + mtime as recorded.
  *   • Every log file (and only those log files) matches by size + mtime.
  *
- * Note: we deliberately compare size+mtime here, not sha256. The sha is
- * recorded for diagnostics and to give compaction a cheap way to detect
- * tampering later; reusing the cache only requires that the OS hasn't
- * seen the file change.
+ * Hashes must also agree. computeFingerprint reuses hashes when the OS
+ * reports unchanged size+mtime; this remains a stat-based cache, not a
+ * defense against modifications that deliberately preserve those metadata.
  */
 export function canSkipReplay(
   previous: Fingerprint | null,
@@ -169,7 +170,13 @@ export function canSkipReplay(
   if (!previous.db || !current.db) return false;
   if (previous.db.size !== current.db.size) return false;
   if (previous.db.mtimeMs !== current.db.mtimeMs) return false;
+  if (previous.db.path !== current.db.path) return false;
 
+  return sameLogState(previous, current);
+}
+
+/** Compare observed log inputs, independently of the derived database's mtime. */
+export function sameLogState(previous: Fingerprint, current: Fingerprint): boolean {
   if (previous.logFiles.length !== current.logFiles.length) return false;
 
   // Cheap path: index previous entries by path.
@@ -179,20 +186,7 @@ export function canSkipReplay(
     if (!prev) return false;
     if (prev.size !== entry.size) return false;
     if (prev.mtimeMs !== entry.mtimeMs) return false;
+    if (prev.sha256 !== entry.sha256) return false;
   }
   return true;
-}
-
-function sha256OfFile(filePath: string): string {
-  const hash = crypto.createHash('sha256');
-  // Files are capped at 25 MB by log-store rotation, so readFileSync
-  // memory pressure is bounded. If the cap ever grows, swap to a stream.
-  try {
-    hash.update(fs.readFileSync(filePath));
-    return hash.digest('hex');
-  } catch {
-    // Unreadable file (race with delete or perms issue) — return a marker
-    // that will never accidentally match a real digest.
-    return 'unreadable';
-  }
 }

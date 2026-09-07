@@ -6,6 +6,10 @@ import { useStore } from './useStore';
 import { EmptyState } from './EmptyState';
 import { ActivityStatsPanel } from './ActivityStatsPanel';
 import { buildActivityDays, rowTime, type ActivityRow } from './activity-rows';
+import { VirtualRows } from './VirtualRows';
+import { PageControls } from './PageControls';
+import { loadHistorySnapshot } from '../state/ipc-bridge';
+import { getAPI } from '../ipc-client';
 
 export interface HistoryViewProps {
   onCardClick: (spaceId: string) => void;
@@ -73,7 +77,7 @@ const ActivityRowItem = React.memo(function ActivityRowItem({
 
 export function HistoryView({ onCardClick, onUnarchive }: HistoryViewProps): React.ReactElement {
   const { spaces } = useStore(spaceStore);
-  const { events } = useStore(historyStore);
+  const { events, page } = useStore(historyStore);
   const agentState = useStore(agentStore);
 
   const closedSpaces = React.useMemo(() => spaces.filter(s => s.status === 'done'), [spaces]);
@@ -85,6 +89,18 @@ export function HistoryView({ onCardClick, onUnarchive }: HistoryViewProps): Rea
     [closedSpaces, events, eventsBySpace, agentsBySpace],
   );
 
+  if (page) {
+    return <>
+      <ActivityStatsPanel />
+      <PageControls nextCursor={page.nextCursor} total={page.total} count={page.items.length} scope="history"
+        load={cursor => loadHistorySnapshot(getAPI(), 60, { cursor, invalidate: true })} />
+      <VirtualRows rows={page.items} rowId={row => row.key} total={page.total} offset={page.offset} render={row =>
+        <section aria-label={new Date(row.at).toLocaleDateString()}>
+          <time>{new Date(row.at).toLocaleDateString()}</time>
+          <ActivityRowItem row={row} onOpen={onCardClick} onUnarchive={onUnarchive} />
+        </section>} />
+    </>;
+  }
   if (days.length === 0) {
     return (
       <>

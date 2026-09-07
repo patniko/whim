@@ -1,5 +1,6 @@
 import { BrowserWindow, Notification } from 'electron';
 import { mirrorRendererEvent } from '../web/event-hub';
+import { assertWorkspaceContext, workspaceCallback } from '../workspace-context';
 
 export interface ApprovalNotificationOptions {
   agentId: string;
@@ -72,6 +73,7 @@ export function buildToastXml(
 export class AgentNotifier {
   /** Send an event to all renderer windows */
   notifyRenderer(channel: string, ...args: any[]): void {
+    assertWorkspaceContext();
     mirrorRendererEvent(channel, ...args);
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send(channel, ...args);
@@ -90,6 +92,7 @@ export class AgentNotifier {
 
   /** Show native OS notification for permission approval when window is unfocused */
   showApprovalNotification(options: ApprovalNotificationOptions): void {
+    assertWorkspaceContext();
     const wins = BrowserWindow.getAllWindows();
     const anyFocused = wins.some(w => w.isFocused());
     if (anyFocused) return;
@@ -129,23 +132,24 @@ export class AgentNotifier {
       } : {}),
     });
 
-    notification.on('action', (_event, index) => {
+    notification.on('action', workspaceCallback((_event, index) => {
       if (index === 0) {
         onApprove?.();
       } else {
         onDeny?.();
       }
-    });
+    }));
 
-    notification.on('click', () => {
+    notification.on('click', workspaceCallback(() => {
       this.bringWindowToFront(agentId);
-    });
+    }));
 
     notification.show();
   }
 
   /** Show native OS notification for a sandbox block event. */
   showSandboxBlockNotification(options: SandboxBlockNotificationOptions): void {
+    assertWorkspaceContext();
     const wins = BrowserWindow.getAllWindows();
     const anyFocused = wins.some(w => w.isFocused());
     if (anyFocused) return;
@@ -179,23 +183,24 @@ export class AgentNotifier {
       } : {}),
     });
 
-    notification.on('action', (_event, index) => {
+    notification.on('action', workspaceCallback((_event, index) => {
       if (index === 0) {
         onAllowOnce?.();
       } else {
         this.bringWindowToFront(agentId);
       }
-    });
+    }));
 
-    notification.on('click', () => {
+    notification.on('click', workspaceCallback(() => {
       this.bringWindowToFront(agentId);
-    });
+    }));
 
     notification.show();
   }
 
   /** Show native OS notification when an agent asks the user a question. */
   showUserInputNotification(options: UserInputNotificationOptions): void {
+    assertWorkspaceContext();
     const wins = BrowserWindow.getAllWindows();
     const anyFocused = wins.some(w => w.isFocused());
     if (anyFocused) return;
@@ -223,19 +228,20 @@ export class AgentNotifier {
       } : {}),
     });
 
-    notification.on('action', () => {
+    notification.on('action', workspaceCallback(() => {
       this.bringWindowToFront(agentId);
-    });
+    }));
 
-    notification.on('click', () => {
+    notification.on('click', workspaceCallback(() => {
       this.bringWindowToFront(agentId);
-    });
+    }));
 
     notification.show();
   }
 
   /** Show native OS notification when an agent needs elicitation input. */
   showElicitationNotification(options: ElicitationNotificationOptions): void {
+    assertWorkspaceContext();
     const wins = BrowserWindow.getAllWindows();
     const anyFocused = wins.some(w => w.isFocused());
     if (anyFocused) return;
@@ -263,13 +269,13 @@ export class AgentNotifier {
       } : {}),
     });
 
-    notification.on('action', () => {
+    notification.on('action', workspaceCallback(() => {
       this.bringWindowToFront(agentId);
-    });
+    }));
 
-    notification.on('click', () => {
+    notification.on('click', workspaceCallback(() => {
       this.bringWindowToFront(agentId);
-    });
+    }));
 
     notification.show();
   }

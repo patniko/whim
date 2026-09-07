@@ -122,7 +122,7 @@ describe('canvas editor — selection trigger (regression)', () => {
     view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, 1, 6)));
 
     expect(listeners.selections.length).toBeGreaterThan(0);
-    expect(listeners.selections.at(-1)!.text).toBe('Hello');
+    expect(listeners.selections.slice(-1)[0]!.text).toBe('Hello');
 
     editor.destroy();
   });
@@ -140,7 +140,7 @@ describe('canvas editor — autosave wiring (regression)', () => {
     await new Promise((r) => setTimeout(r, 300));
 
     expect(listeners.markdownUpdates.length).toBeGreaterThan(0);
-    expect(listeners.markdownUpdates.at(-1)).toContain('Hello world!');
+    expect(listeners.markdownUpdates.slice(-1)[0]).toContain('Hello world!');
 
     editor.destroy();
   });

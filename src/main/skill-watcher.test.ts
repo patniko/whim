@@ -13,6 +13,11 @@ vi.mock('electron', () => ({
 vi.mock('./eventlog', () => ({
   appendEvent: vi.fn(),
   replayLog: vi.fn(),
+  recoverLogTails: vi.fn(),
+}));
+vi.mock('./storage', async () => ({
+  indexSkills: (await import('./storage-index')).indexSkills,
+  getStorageGeneration: () => 0,
 }));
 
 // Mock workspace
@@ -74,11 +79,11 @@ describe('skill-watcher', () => {
   });
 
   describe('syncAllSkills', () => {
-    it('indexes skills from disk into the database', () => {
+    it('indexes skills from disk into the database', async () => {
       createSkillOnDisk('pdf-processing', 'name: PDF Processing\ndescription: Handle PDFs');
       createSkillOnDisk('code-review', 'name: Code Review\ndescription: Review code');
 
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
 
       const skills = listSkills();
       expect(skills).toHaveLength(2);
@@ -95,81 +100,81 @@ describe('skill-watcher', () => {
       expect(pdf.emoji).toBe('📄');
     });
 
-    it('uses folder name as fallback when no name in frontmatter', () => {
+    it('uses folder name as fallback when no name in frontmatter', async () => {
       createSkillOnDisk('my-skill', '', '# Just a body');
 
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
 
       const skills = listSkills();
       expect(skills).toHaveLength(1);
       expect(skills[0].name).toBe('my-skill');
     });
 
-    it('removes skills from DB that no longer exist on disk', () => {
+    it('removes skills from DB that no longer exist on disk', async () => {
       createSkillOnDisk('keep-me', 'name: Keep Me');
       createSkillOnDisk('remove-me', 'name: Remove Me');
 
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
       expect(listSkills()).toHaveLength(2);
 
       // Remove one from disk
       fs.rmSync(path.join(wsRoot, '.agents', 'skills', 'remove-me'), { recursive: true });
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
 
       const skills = listSkills();
       expect(skills).toHaveLength(1);
       expect(skills[0].id).toBe('keep-me');
     });
 
-    it('skips non-directory entries in the skills folder', () => {
+    it('skips non-directory entries in the skills folder', async () => {
       ensureSkillsDir(wsRoot);
       // Create a regular file (not a directory)
       fs.writeFileSync(path.join(wsRoot, '.agents', 'skills', 'not-a-dir.txt'), 'hello');
       createSkillOnDisk('real-skill', 'name: Real Skill');
 
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
       expect(listSkills()).toHaveLength(1);
     });
 
-    it('skips folders without SKILL.md', () => {
+    it('skips folders without SKILL.md', async () => {
       const dir = path.join(wsRoot, '.agents', 'skills', 'empty-skill');
       fs.mkdirSync(dir, { recursive: true });
       // No SKILL.md inside
 
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
       expect(listSkills()).toHaveLength(0);
     });
 
-    it('handles missing skills directory gracefully', () => {
+    it('handles missing skills directory gracefully', async () => {
       // Don't create the skills dir
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
       expect(listSkills()).toHaveLength(0);
     });
 
-    it('updates DB when skill content changes', () => {
+    it('updates DB when skill content changes', async () => {
       createSkillOnDisk('my-skill', 'name: Original Name');
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
       expect(listSkills()[0].name).toBe('Original Name');
 
       // Update the file
       const filePath = path.join(wsRoot, '.agents', 'skills', 'my-skill', 'SKILL.md');
       fs.writeFileSync(filePath, '---\nname: Updated Name\n---\nBody', 'utf-8');
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
       expect(listSkills()[0].name).toBe('Updated Name');
     });
 
-    it('uses emoji from frontmatter when provided', () => {
+    it('uses emoji from frontmatter when provided', async () => {
       createSkillOnDisk('custom-emoji', 'name: My Skill\ndescription: Does things\nemoji: "🎸"');
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
 
       const skills = listSkills();
       expect(skills).toHaveLength(1);
       expect(skills[0].emoji).toBe('🎸');
     });
 
-    it('auto-generates emoji when not specified in frontmatter', () => {
+    it('auto-generates emoji when not specified in frontmatter', async () => {
       createSkillOnDisk('deploy-helper', 'name: Deploy Helper\ndescription: Automate deployments');
-      syncAllSkills(wsRoot);
+      (await syncAllSkills(wsRoot));
 
       const skills = listSkills();
       expect(skills).toHaveLength(1);

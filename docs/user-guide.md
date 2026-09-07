@@ -89,7 +89,15 @@ Each intent card shows:
 
 ### Searching
 
-Press **Shift+Tab** to enter search mode. Type to filter intents by description. Press **Shift+Tab** again or **Escape** to exit search.
+Press **Shift+Tab** to enter search mode. Type to search titles, descriptions, and indexed canvas text. Press **Shift+Tab** again or **Escape** to exit search.
+
+Space search retains SQLite substring-search behavior: ASCII matching is case-insensitive, non-ASCII case remains significant, and `%` and `_` are wildcards. Worker search instead uses case-insensitive literal substrings. Longer searches use a trigram index; short or wildcard-only space searches use a compatibility scan and can take longer. Canvas changes from external editors, archived canvases, and Git pulls are reindexed.
+
+### Browsing Large Collections
+
+Spaces, Workers, and Past load lightweight pages rather than downloading every document or transcript. Use **Previous** and **Next** to browse; totals describe the full matching collection, while scheduled-run groupings describe the current page. Changing a filter starts at the first page. Live changes can move rows between pages because pages are not a frozen snapshot.
+
+Full document and worker details load when opened. Long lists and conversations render a window of variable-height rows while retaining focused controls. Conversation history loads its newest stored messages and any outstanding stored approval or elicitation requests first, with earlier messages available on demand; tool results and approval responses remain attached even when their events fall on different pages. Pending controls can exceed the ordinary row window, but transcript responses have an explicit 4 MiB budget. The first history request may take longer while its index is prepared. Older SDK-only and temporary sessions are imported in bounded runtime batches rather than loading the entire history into the interface. Temporary-session indexes stay in memory and are never written to disk. A custom runtime without cursor-based history support must be updated; the interface reports this instead of silently loading an unlimited history.
 
 ---
 
@@ -142,7 +150,18 @@ comments with threads.
 
 - **Auto-save** — changes are saved automatically after 2 seconds of inactivity
 - **Cmd+S** — manual save
-- All saves are auto-committed to git
+- Canvas and skill saves are durable independently of Git. In Git workspaces, auto-commits run separately.
+
+Closing an editor, quitting, installing an update, or changing workspaces waits
+for pending saves. If a save or merge fails, the operation is cancelled and your
+draft remains open. Profile changes do not redirect an old draft into the new
+workspace.
+
+If the desktop changes workspaces while you are editing in a browser, further
+requests are rejected rather than saving into a different document with the same
+ID. Preserve your draft before reloading. Losing connectivity does not unpair the
+browser; the cached shell offers a reconnect or reload action. A workspace-change
+warning leaves the browser's open editor in place so you can copy its draft.
 
 ### Version History
 
@@ -235,13 +254,41 @@ Each agent card shows:
 
 ---
 
-## Scheduled Skills and Reports
+## Scheduled Skills
 
-A skill can run on a schedule and publish a **report** — a visual summary you open with one click from the space row, the tray, or the notification it fires when it finds something.
+A scheduled skill creates a dated space and writes its result directly to the
+space's main canvas. The skill is linked above the canvas, and an instruction
+snapshot is saved with each run. You do not need to configure a report format.
 
-Repeat runs refresh the same space by default, so a daily skill leaves one space to complete rather than a hundred. Complete the space when you are done with it; the next run reopens it.
+Choose **Schedule** on a skill, set its frequency, time and timezone, and select
+the connected sources it may read. Additional instructions are optional. Saving
+authorizes only operations declared read-only by the selected MCP servers;
+scheduling does not authorize sending messages or changing external systems.
+Unknown or unavailable access is recorded as a limitation, not left waiting for
+an invisible approval.
 
-See [Canvas reports](./canvas-artifacts.md) for enabling reports on a skill, shipping a report layout with it, and the security model.
+For example, schedule [Missed messages](../examples/skills/missed-messages/SKILL.md)
+each morning to collect unanswered requests with source links and suggested next
+steps. Each run receives the previous successful result as context so it can
+preserve your follow-up decisions without rewriting yesterday's space.
+
+The schedule shows the latest outcome: **Running**, **Ready**, **Nothing to
+follow up on**, **Partial result**, **Needs connection**, or **Failed**.
+An empty search still leaves a result with source coverage. Notifications open
+the space itself; empty results do not interrupt you.
+
+**Run now** uses saved settings, does not save changes still in the schedule
+dialog, and does not move the next scheduled run.
+
+Scheduling runs locally while Whim is running. After reopening the app, an
+overdue schedule catches up once instead of creating a backlog of daily spaces.
+It is not an always-on cloud scheduler or a cross-device execution guarantee.
+Scheduled canvas results currently require a local agent.
+
+Existing schedules keep their report format and space-reuse behavior. Their
+timing is migrated separately from reusable `SKILL.md` instructions. Removing a
+schedule does not delete its previous spaces or reports. See
+[Canvas reports](./canvas-artifacts.md) for the optional rich-report system.
 
 ---
 

@@ -11,9 +11,9 @@ import {
 type FetchHandler = (url: string, init?: RequestInit) => Promise<Response>;
 
 function setupFetch(handler: FetchHandler): void {
-  vi.stubGlobal('fetch', vi.fn((input: any, init?: any) => {
+  vi.stubGlobal('fetch', vi.fn(async (input: any, init?: any) => {
     const url = typeof input === 'string' ? input : input.url;
-    return handler(url, init);
+    return (await handler(url, init));
   }));
 }
 

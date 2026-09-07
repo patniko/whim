@@ -39,6 +39,7 @@ import {
 } from './sessions';
 import { GatewayError, invokeWebRemoteCommand } from './gateway';
 import { currentEventSequence, replayEventsSince, subscribeWebRemoteEvents } from './event-hub';
+import { getWorkspaceEpoch } from '../workspace-context';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -277,7 +278,7 @@ function startListener(address: string, port: number): Promise<BoundListener> {
     void handleHttp(req, res).catch((err) => {
       const status = err instanceof GatewayError ? err.status : 500;
       const message = err instanceof Error ? err.message : 'Internal server error';
-      sendJson(res, status, { ok: false, error: { code: 'request_failed', message } });
+      sendJson(res, status, { ok: false, error: { code: err instanceof GatewayError ? err.code : 'request_failed', message } });
     });
   };
 
@@ -442,6 +443,7 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
         return;
       }
       const issued = sessionStore.issue(req.headers['user-agent'], getRemoteAddress(req));
+      res.setHeader('X-Whim-Workspace-Epoch', getWorkspaceEpoch());
       res.setHeader('Set-Cookie', buildSessionCookie(issued.cookieValue, { secure: tlsState.active }));
       sendJson(res, 200, { ok: true, result: { device: { id: issued.record.id, label: issued.record.label } } });
       return;
@@ -455,6 +457,7 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
     }
 
     if (req.method === 'GET' && url.pathname === '/api/health') {
+      res.setHeader('X-Whim-Workspace-Epoch', getWorkspaceEpoch());
       sendJson(res, 200, { ok: true, result: { running: true } });
       return;
     }
@@ -507,6 +510,9 @@ async function handleHttp(req: http.IncomingMessage, res: http.ServerResponse): 
         return;
       }
 
+      if (payload.workspaceEpoch !== getWorkspaceEpoch()) {
+        throw new GatewayError('workspace_changed', 409, 'The desktop workspace changed. Preserve your draft and reload before continuing.');
+      }
       const result = await invokeWebRemoteCommand(payload.channel, Array.isArray(payload.args) ? payload.args : []);
       sendJson(res, 200, { ok: true, result });
       return;
@@ -679,7 +685,7 @@ async function serveAttachment(res: http.ServerResponse, url: URL): Promise<void
   }
 
   const workspace = getConfigValue('workspace');
-  const { getSpace, isInitialized } = await import('../database');
+  const { getSpace, isInitialized } = await import('../storage');
   if (!workspace || !isInitialized()) {
     sendJson(res, 503, { ok: false, error: { code: 'no_workspace', message: 'No workspace is open.' } });
     return;
@@ -692,11 +698,13 @@ async function serveAttachment(res: http.ServerResponse, url: URL): Promise<void
   // workspace, resolves to nothing.
   const { resolveCanvasFile } = await import('../canvas/canvas-file-root');
   const { getMimeType } = await import('../workspace');
+  const { parseSyntheticPageId } = await import('../services/comment-launch-target');
+  const folder = (await getSpace(parseSyntheticPageId(spaceId)?.realSpaceId ?? spaceId))?.folder ?? null;
   const absolute = resolveCanvasFile(
     workspace,
     spaceId,
     relativePath,
-    (id) => getSpace(id)?.folder ?? null,
+    () => folder,
   );
   if (!absolute) {
     sendJson(res, 404, { ok: false, error: { code: 'not_found', message: 'Attachment not found.' } });
@@ -728,7 +736,7 @@ async function serveAttachment(res: http.ServerResponse, url: URL): Promise<void
 }
 
 /** Content-hashed filenames (`app.<hash>.js`) can be cached indefinitely. */
-const HASHED_ASSET_RE = /\.[0-9a-f]{12}\.(js|css)$/;
+const HASHED_ASSET_RE = /\.(?:[0-9a-f]{12}|[A-Z0-9]{8})\.(js|css)$/;
 
 export function cacheControlFor(filePath: string): string {
   // A cached service worker would pin the app to an old shell indefinitely,

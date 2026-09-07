@@ -76,3 +76,15 @@
 .web-boot-error {
   color: #ff6b6b !important;
 }
+
+.web-workspace-changed {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  padding: 8px 12px;
+  background: #1e2128;
+  color: #fff;
+  font-size: 14px;
+}

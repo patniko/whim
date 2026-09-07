@@ -106,8 +106,8 @@ describe('tray menu', () => {
     destroyTray();
   });
 
-  it('renders only base items when there are no workers or canvases', () => {
-    createTray();
+  it('renders only base items when there are no workers or canvases', async () => {
+    (await createTray());
     expect(labels()).toEqual(['📱 Remote Control', '---', 'Quit']);
     expect(itemByLabelIncludes('Show/Hide')).toBeUndefined();
     expect(itemByLabelIncludes('Workers')).toBeUndefined();
@@ -115,11 +115,11 @@ describe('tray menu', () => {
     expect(itemByLabelIncludes('Reports')).toBeUndefined();
   });
 
-  it('lists reports from the artifact index and opens one on click', () => {
+  it('lists reports from the artifact index and opens one on click', async () => {
     h.artifacts.listActiveArtifacts.mockReturnValue([
       { spaceId: 's1', artifactId: 'questions', title: 'Open questions', status: '3 open questions', published: true, updatedAt: '', url: '' },
     ]);
-    createTray();
+    (await createTray());
 
     expect(itemByLabelIncludes('Reports')?.enabled).toBe(false);
 
@@ -135,13 +135,13 @@ describe('tray menu', () => {
     });
   });
 
-  it('caps the report list so the menu stays usable', () => {
+  it('caps the report list so the menu stays usable', async () => {
     h.artifacts.listActiveArtifacts.mockReturnValue(
       Array.from({ length: 20 }, (_, i) => ({
         spaceId: `s${i}`, artifactId: `a${i}`, title: `Report ${i}`, published: true, updatedAt: '', url: '',
       })),
     );
-    createTray();
+    (await createTray());
 
     const reportItems = template().filter(i => typeof i.label === 'string' && i.label.includes('Report '));
     expect(reportItems).toHaveLength(8);
@@ -150,21 +150,21 @@ describe('tray menu', () => {
   it('survives a workspace that cannot be read', () => {
     h.artifacts.listActiveArtifacts.mockImplementation(() => { throw new Error('no workspace'); });
 
-    expect(() => createTray()).not.toThrow();
+    expect(async () => (await createTray())).not.toThrow();
     expect(itemByLabelIncludes('Reports')).toBeUndefined();
   });
 
-  it('refreshes when a run publishes a report', () => {
-    createTray();
+  it('refreshes when a run publishes a report', async () => {
+    (await createTray());
     expect(h.canvasEvents.onArtifactPublished).toHaveBeenCalledTimes(1);
   });
 
-  it('shows a Workers section with status icon + summary and wires the click', () => {
+  it('shows a Workers section with status icon + summary and wires the click', async () => {
     h.svc.listTrayWorkers.mockReturnValue([
       { agentId: 'a1', status: 'running', summary: 'Refactor auth module', selectedText: 'sel-1', source: 'sdk', spaceId: 's1' },
       { agentId: 'a2', status: 'waiting-approval', summary: 'Write tests', selectedText: 'sel-2', source: 'cli', spaceId: 's2' },
     ]);
-    createTray();
+    (await createTray());
 
     expect(itemByLabelIncludes('Workers')?.enabled).toBe(false);
 
@@ -183,20 +183,20 @@ describe('tray menu', () => {
     });
   });
 
-  it('falls back to selectedText and truncates long worker labels', () => {
+  it('falls back to selectedText and truncates long worker labels', async () => {
     const long = 'x'.repeat(120);
     h.svc.listTrayWorkers.mockReturnValue([
       { agentId: 'a1', status: 'running', summary: '', selectedText: long, source: 'sdk', spaceId: 's1' },
     ]);
-    createTray();
+    (await createTray());
     const item = template().find((i) => typeof i.label === 'string' && i.label.includes('x'));
     expect(String(item!.label).length).toBeLessThan(60);
     expect(String(item!.label)).toContain('…');
   });
 
-  it('shows a Canvases section and focuses the window on click', () => {
+  it('shows a Canvases section and focuses the window on click', async () => {
     h.wm.getOpenCanvases.mockReturnValue([{ winId: 7, label: 'My Canvas' }]);
-    createTray();
+    (await createTray());
 
     expect(itemByLabelIncludes('Canvases')?.enabled).toBe(false);
     const canvasItem = itemByLabelIncludes('My Canvas');
@@ -206,29 +206,29 @@ describe('tray menu', () => {
     expect(h.wm.focusCanvasWindow).toHaveBeenCalledWith(7);
   });
 
-  it('tray icon click toggles the window', () => {
-    createTray();
+  it('tray icon click toggles the window', async () => {
+    (await createTray());
     expect(h.trayClickRef.current).toBeTruthy();
     h.trayClickRef.current!();
     expect(h.wm.toggleWindow).toHaveBeenCalledTimes(1);
   });
 
-  it('rebuildTrayMenu re-reads current worker/canvas state', () => {
-    createTray();
+  it('rebuildTrayMenu re-reads current worker/canvas state', async () => {
+    (await createTray());
     expect(itemByLabelIncludes('Workers')).toBeUndefined();
 
     h.svc.listTrayWorkers.mockReturnValue([
       { agentId: 'a1', status: 'running', summary: 'New work', selectedText: 'sel', source: 'sdk', spaceId: 's1' },
     ]);
-    rebuildTrayMenu();
+    (await rebuildTrayMenu());
     expect(itemByLabelIncludes('Workers')).toBeTruthy();
     expect(itemByLabelIncludes('New work')).toBeTruthy();
   });
 
-  it('subscribes to worker + canvas changes and rebuilds (debounced)', () => {
+  it('subscribes to worker + canvas changes and rebuilds (debounced)', async () => {
     vi.useFakeTimers();
     try {
-      createTray();
+      (await createTray());
       expect(h.svc.onAgentListChanged).toHaveBeenCalledTimes(1);
       expect(h.wm.onCanvasWindowsChanged).toHaveBeenCalledTimes(1);
 
@@ -242,7 +242,7 @@ describe('tray menu', () => {
       // Nothing yet (debounced).
       expect(buildFromTemplateMock.mock.calls.length).toBe(before);
 
-      vi.advanceTimersByTime(250);
+      await vi.advanceTimersByTimeAsync(250);
       // Exactly one extra rebuild after the debounce window.
       expect(buildFromTemplateMock.mock.calls.length).toBe(before + 1);
     } finally {
@@ -250,13 +250,13 @@ describe('tray menu', () => {
     }
   });
 
-  it('destroyTray unsubscribes and destroys the tray', () => {
+  it('destroyTray unsubscribes and destroys the tray', async () => {
     const unsubAgent = vi.fn();
     const unsubCanvas = vi.fn();
     h.svc.onAgentListChanged.mockReturnValueOnce(unsubAgent);
     h.wm.onCanvasWindowsChanged.mockReturnValueOnce(unsubCanvas);
 
-    createTray();
+    (await createTray());
     destroyTray();
 
     expect(unsubAgent).toHaveBeenCalledTimes(1);

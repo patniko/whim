@@ -1,12 +1,39 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import Database from 'better-sqlite3';
 import { resolveActiveSegment, listLogFiles, SNAPSHOT_FILENAME } from './log-store';
+import { SNAPSHOT_COLUMNS, SNAPSHOT_OPERATIONS, type SnapshotTable } from './persistence-schema';
+import { coveredOffset, parseManifest, readLines, readSnapshotManifest, resolveSnapshotChunk, syncDirectory, writeAll } from './persistence-snapshot';
 
 export interface LogEvent {
   ts: string;
   op: string;
   data: Record<string, any>;
+}
+
+export interface AppendReceipt {
+  path: string;
+  before: { size: number; mtimeMs: number } | null;
+  after: { size: number; mtimeMs: number };
+  bytesWritten: number;
+}
+
+const statementCaches = new WeakMap<Database.Database, Map<string, Database.Statement>>();
+
+function prepare(db: Database.Database, sql: string): Database.Statement {
+  let cache = statementCaches.get(db);
+  if (!cache) {
+    cache = new Map();
+    statementCaches.set(db, cache);
+  }
+  let statement = cache.get(sql);
+  if (!statement) {
+    statement = db.prepare(sql);
+    if (cache.size >= 256) cache.clear();
+    cache.set(sql, statement);
+  }
+  return statement;
 }
 
 const ALLOWED_SPACE_FIELDS = new Set([
@@ -15,6 +42,71 @@ const ALLOWED_SPACE_FIELDS = new Set([
   'attachments', 'source_skill_id',
 ]);
 
+const EVENT_FIELDS: Record<string, readonly string[]> = {
+  'space.create': [...SNAPSHOT_COLUMNS.spaces.split(', '), 'session_id', 'canvas_content'],
+  'space.update': ['id', 'fields'],
+  'space.assign_folder': ['id', 'folder', 'updated_at'],
+  'space.delete': ['id'],
+  'intent_event.log': [...SNAPSHOT_COLUMNS.space_events.split(', '), 'intent_id'],
+  'canvas_agent.created': SNAPSHOT_COLUMNS.canvas_agents.split(', '),
+  'canvas_agent.updated': ['id', 'status', 'pid', 'pid_provided', 'updated_at'],
+  'agent_session.created': SNAPSHOT_COLUMNS.agent_sessions.split(', '),
+  'agent_session.updated': ['id', 'status', 'summary', 'session_id', 'updated_at'],
+  'agent_session.cca_result': ['id', 'cca_result_json', 'updated_at'],
+  'agent_session.yolo': ['id', 'yolo_mode', 'updated_at'],
+  'agent_session.deleted': ['id'],
+  'agent_chat.appended': [...SNAPSHOT_COLUMNS.agent_chat_events.split(', '), 'id'],
+  'agent_chat.cleared': ['agent_id'],
+  'subagent.created': [...SNAPSHOT_COLUMNS.subagent_records.split(', '), 'streaming_content_digest', 'turns_digest'],
+  'subagent.updated': ['id', 'status', 'completed_at', 'duration_ms', 'model', 'total_tokens', 'total_tool_calls', 'error',
+    'streaming_content', 'streaming_content_path', 'streaming_content_digest', 'turns_json', 'turns_path', 'turns_digest', 'progress_json', 'updated_at'],
+  'subagent_tool.created': [...SNAPSHOT_COLUMNS.subagent_tool_calls.split(', '), 'id', 'result_digest'],
+  'subagent_tool.updated': ['subagent_id', 'tool_call_id', 'success', 'error', 'completed_at', 'result', 'result_path', 'result_digest'],
+};
+
+/** Validation is shared by replay and retained-reference scanning before GC. */
+export function validateDurableEvent(event: LogEvent): void {
+  if (!event || typeof event.op !== 'string' || !event.data || typeof event.data !== 'object' || Array.isArray(event.data)) {
+    throw new Error('Invalid durable event');
+  }
+  const op = event.op.replace(/^intent\./, 'space.');
+  if (op === 'snapshot') {
+    for (const [key, rows] of Object.entries(event.data)) {
+      const table = key === 'intents' ? 'spaces' : key === 'intent_events' ? 'space_events' : key;
+      if (!Object.prototype.hasOwnProperty.call(SNAPSHOT_COLUMNS, table)) throw new Error(`Unsupported snapshot entity: ${key}`);
+      if (!Array.isArray(rows)) throw new Error(`Invalid snapshot entity: ${key}`);
+      const columns = SNAPSHOT_COLUMNS[table as keyof typeof SNAPSHOT_COLUMNS].split(', ');
+      for (const row of rows) {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error(`Invalid snapshot row: ${key}`);
+        for (const field of Object.keys(row)) {
+          // Older snapshots may include local-only columns and SQLite row IDs.
+          if (!columns.includes(field) && field !== 'id' &&
+              !(table === 'spaces' && ['session_id', 'canvas_content'].includes(field)) &&
+              !(table === 'space_events' && field === 'intent_id')) {
+            throw new Error(`Unsupported snapshot field: ${key}.${field}`);
+          }
+        }
+      }
+    }
+    return;
+  }
+  const allowed = EVENT_FIELDS[op];
+  if (!allowed) throw new Error(`Unsupported durable event op: ${event.op}`);
+  for (const field of Object.keys(event.data)) {
+    if (!allowed.includes(field) && field !== 'intent_id') {
+      throw new Error(`Unsupported durable event field: ${op}.${field}`);
+    }
+  }
+  if (op === 'space.update') {
+    if (!event.data.fields || typeof event.data.fields !== 'object' || Array.isArray(event.data.fields)) {
+      throw new Error('Invalid space update fields');
+    }
+    for (const field of Object.keys(event.data.fields)) {
+      if (!ALLOWED_SPACE_FIELDS.has(field)) throw new Error(`Unsupported space update field: ${field}`);
+    }
+  }
+}
+
 /**
  * Append a single event to the active rotated segment under `logRoot`.
  *
@@ -22,20 +114,94 @@ const ALLOWED_SPACE_FIELDS = new Set([
  * about month buckets or 25 MB rotation — they just pass the workspace
  * log root and the LogStore picks the right file.
  */
-export function appendEvent(logRoot: string, op: string, data: Record<string, any>): void {
+export function appendEvent(logRoot: string, op: string, data: Record<string, any>): AppendReceipt {
   const event: LogEvent = {
     ts: new Date().toISOString(),
     op,
     data,
   };
   const line = JSON.stringify(event) + '\n';
+  const rootExisted = fs.existsSync(logRoot);
   const target = resolveActiveSegment(logRoot);
+  const fileExisted = fs.existsSync(target);
+  const before = fileExisted ? fs.statSync(target) : null;
+  if (before?.size) {
+    const input = fs.openSync(target, 'r');
+    try {
+      const last = Buffer.alloc(1);
+      fs.readSync(input, last, 0, 1, before.size - 1);
+      if (last[0] !== 10) throw new Error('Incomplete event log tail; recover before writing');
+    } finally { fs.closeSync(input); }
+  }
   const fd = fs.openSync(target, 'a');
   try {
-    fs.writeSync(fd, line);
+    writeAll(fd, line);
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
+  }
+  if (!fileExisted) {
+    syncDirectory(path.dirname(target));
+    syncDirectory(logRoot);
+    if (!rootExisted) syncDirectory(path.dirname(logRoot));
+  }
+  const after = fs.statSync(target);
+  return {
+    path: target,
+    before: before ? { size: before.size, mtimeMs: before.mtimeMs } : null,
+    after: { size: after.size, mtimeMs: after.mtimeMs },
+    bytesWritten: Buffer.byteLength(line),
+  };
+}
+
+/** Repair append boundaries before opening storage, preserving damaged bytes. */
+export function recoverLogTails(logRoot: string): void {
+  for (const file of listLogFiles(logRoot)) {
+    if (path.basename(file) === SNAPSHOT_FILENAME) continue;
+    const fd = fs.openSync(file, 'r+');
+    try {
+      const size = fs.fstatSync(fd).size;
+      if (!size) continue;
+      const block = Buffer.allocUnsafe(64 * 1024);
+      let end = size;
+      let boundary = 0;
+      while (end > 0) {
+        const start = Math.max(0, end - block.length);
+        const count = fs.readSync(fd, block, 0, end - start, start);
+        const newline = block.subarray(0, count).lastIndexOf(10);
+        if (newline >= 0) { boundary = start + newline + 1; break; }
+        end = start;
+      }
+      if (boundary === size) continue;
+      // Preserve the entire tail on disk before either fixing its delimiter or
+      // truncating it. Stream the copy; a malformed legacy record may be huge.
+      const quarantine = `${file}.torn-${crypto.randomUUID()}`;
+      const output = fs.openSync(quarantine, 'wx', 0o600);
+      try {
+        for (let position = boundary; position < size;) {
+          const count = fs.readSync(fd, block, 0, Math.min(block.length, size - position), position);
+          if (!count) throw new Error('Event log changed during tail recovery');
+          writeAll(output, block.subarray(0, count));
+          position += count;
+        }
+        fs.fsyncSync(output);
+      } finally { fs.closeSync(output); }
+      syncDirectory(path.dirname(file));
+      // Preserve valid unterminated JSON as a real event. Invalid JSON was
+      // never acknowledged; retain its quarantined bytes for recovery.
+      let valid = false;
+      if (size - boundary > 25 * 1024 * 1024) {
+        throw new Error('Oversized incomplete event retained for manual recovery; storage not opened');
+      }
+      if (size - boundary <= 25 * 1024 * 1024) {
+        try { JSON.parse(fs.readFileSync(quarantine, 'utf8')); valid = true; }
+        catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+      }
+      if (valid) fs.writeSync(fd, '\n', size, 'utf8');
+      else fs.ftruncateSync(fd, boundary);
+      fs.fsyncSync(fd);
+      console.warn('[eventlog] Recovered incomplete append boundary', { bytes: size - boundary, retainedEvent: valid });
+    } finally { fs.closeSync(fd); }
   }
 }
 
@@ -44,13 +210,12 @@ export function appendEvent(logRoot: string, op: string, data: Record<string, an
  * chronological order (snapshot first, then segments by date) so the
  * resulting state matches what the live writers produced.
  *
- * Phase 3 will swap this for a streamed k-way merge with cached prepared
- * statements; for now we keep the existing semantics (single transaction,
- * one db.prepare per line) and just generalise across multiple files.
+ * Segments are streamed in their historical file order. Snapshot coverage
+ * skips already-folded prefixes even if a crash left the source files behind.
  */
-export function replayLog(logRoot: string, db: Database.Database): void {
+export function replayLog(logRoot: string, db: Database.Database, appliedOffsets?: ReadonlyMap<string, number>): { complete: boolean } {
   const files = listLogFiles(logRoot);
-  if (files.length === 0) return;
+  if (files.length === 0) return { complete: true };
 
   // Foreign keys are enforced on the live database, but replay is a different
   // situation: the log is a chronological record, and a snapshot written by an
@@ -66,13 +231,21 @@ export function replayLog(logRoot: string, db: Database.Database): void {
 
   try {
     const replay = db.transaction(() => {
+      const manifest = readSnapshotManifest(logRoot);
+      const covered = new Map(manifest.covered.map(entry => [entry.path, entry]));
+      let complete = true;
       for (const file of files) {
-        replayOneFile(file, db);
+        const relative = path.relative(logRoot, file).split(path.sep).join('/');
+        const coveredStart = coveredOffset(file, covered.get(relative));
+        const start = Math.max(coveredStart, appliedOffsets?.get(file) ?? 0);
+        if (start === fs.statSync(file).size) continue;
+        if (!replayOneFile(file, db, { start })) complete = false;
       }
       purgeOrphanedRows(db);
+      return { complete };
     });
 
-    replay();
+    return replay();
   } finally {
     if (fkEnforced) db.pragma('foreign_keys = ON');
   }
@@ -127,14 +300,15 @@ function tableExists(db: Database.Database, table: string): boolean {
  * for crash recovery; mid-file corruption throws so the caller can
  * decide how to handle it.
  */
-export function replayFile(filePath: string, db: Database.Database): void {
-  replayOneFile(filePath, db);
+export function replayFile(
+  filePath: string,
+  db: Database.Database,
+  options: { start?: number; strict?: boolean } = {},
+): void {
+  replayOneFile(filePath, db, options);
 }
 
-function replayOneFile(filePath: string, db: Database.Database): void {
-  const content = fs.readFileSync(filePath, 'utf-8');
-  const lines = content.split('\n');
-
+function replayOneFile(filePath: string, db: Database.Database, options: { start?: number; strict?: boolean; snapshotRowsOnly?: boolean } = {}): boolean {
   // Tolerating a torn last line only makes sense for the append-only segments,
   // where a crash mid-append is expected. The snapshot is written to a temp
   // file and renamed into place, so it is either wholly there or not there at
@@ -142,10 +316,17 @@ function replayOneFile(filePath: string, db: Database.Database): void {
   // line, so "skip the bad last line" would throw away every space the user
   // has and start them at empty, which is the worst possible response.
   const isAtomicFile = path.basename(filePath) === SNAPSHOT_FILENAME;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
+  let snapshotStarted = false;
+  let snapshotEnded = false;
+  let rows = 0;
+  const hash = crypto.createHash('sha256');
+  let tornLine: number | undefined;
+  let incomplete = false;
+  for (const input of readLines(filePath, options.start)) {
+    if (!input.terminated) incomplete = true;
+    const line = input.text.trim();
     if (!line) continue;
+    if (tornLine !== undefined) throw new Error(`Corrupt event log at ${filePath}:${tornLine}`);
 
     // Parsing and applying fail for very different reasons, and conflating
     // them was hiding real bugs: a SQL error from `applyEvent` was reported as
@@ -155,39 +336,94 @@ function replayOneFile(filePath: string, db: Database.Database): void {
     try {
       event = JSON.parse(line);
     } catch (err) {
-      const remaining = lines.slice(i + 1).some(l => l.trim());
-      if (!remaining && !isAtomicFile) {
-        console.warn(`[eventlog] Ignoring corrupt final line ${i + 1} of ${filePath}`);
+      if (!isAtomicFile && !options.strict) {
+        tornLine = input.number;
         continue;
       }
-      throw new Error(`Corrupt event log at ${filePath}:${i + 1}: ${(err as Error).message}`);
+      throw new Error(`Corrupt event log at ${filePath}:${input.number}: ${(err as Error).message}`);
     }
 
     try {
+      if (!event || typeof event.op !== 'string' || !event.data || typeof event.data !== 'object' || Array.isArray(event.data)) {
+        throw new Error('Invalid durable event');
+      }
+      if (options.strict && !input.terminated) throw new Error('Incomplete final line');
+      if (options.snapshotRowsOnly && event.op !== 'snapshot') throw new Error('Unexpected snapshot chunk record');
+      if (snapshotEnded) throw new Error('Data after snapshot end');
+      if (event.op === 'snapshot.begin') {
+        if (!isAtomicFile || snapshotStarted || rows > 0) throw new Error('Unexpected snapshot manifest');
+        parseManifest(event.data);
+        snapshotStarted = true;
+        hash.update(input.text + '\n');
+        continue;
+      }
+      if (event.op === 'snapshot.end') {
+        if (!snapshotStarted || event.data.rows !== rows || event.data.sha256 !== hash.digest('hex')) {
+          throw new Error('Incomplete or corrupt snapshot');
+        }
+        snapshotEnded = true;
+        continue;
+      }
+      if (event.op === 'snapshot.chunk') {
+        if (!isAtomicFile || !snapshotStarted) throw new Error('Unexpected snapshot chunk reference');
+        const chunk = resolveSnapshotChunk(path.dirname(filePath), event.data);
+        replayOneFile(chunk, db, { strict: true, snapshotRowsOnly: true });
+        hash.update(input.text + '\n');
+        rows++;
+        continue;
+      }
+      if (snapshotStarted) {
+        if (event.op !== 'snapshot') throw new Error('Unexpected snapshot row');
+        hash.update(input.text + '\n');
+      }
       applyEvent(db, event);
+      rows++;
     } catch (err) {
       // The line was well-formed, so this is our bug, not a damaged file.
       // Never swallow it: replay is how the database is rebuilt.
       throw new Error(
-        `Failed to apply event at ${filePath}:${i + 1} (op=${event.op}): ${(err as Error).message}`
+        `Failed to apply event at ${filePath}:${input.number} (op=${event?.op}): ${(err as Error).message}`
       );
     }
   }
+  if (snapshotStarted && !snapshotEnded) throw new Error(`Incomplete snapshot: ${filePath}`);
+  if (tornLine !== undefined) console.warn(`[eventlog] Ignoring corrupt final line ${tornLine} of ${filePath}`);
+  return tornLine === undefined && !incomplete;
 }
 
 function applyEvent(db: Database.Database, event: LogEvent): void {
+  validateDurableEvent(event);
   // Backward compatibility: map old 'intent.*' ops to 'space.*'
   const op = event.op.replace(/^intent\./, 'space.');
   // Also normalize old field names in data
   const d = event.data;
   if (d.intent_id !== undefined && d.space_id === undefined) d.space_id = d.intent_id;
 
+  const updateTable: Record<string, string> = {
+    'space.update': 'spaces', 'space.assign_folder': 'spaces',
+    'canvas_agent.updated': 'canvas_agents',
+    'agent_session.updated': 'agent_sessions', 'agent_session.cca_result': 'agent_sessions', 'agent_session.yolo': 'agent_sessions',
+    'subagent.updated': 'subagent_records',
+  };
+  const table = updateTable[op];
+  if (table && !prepare(db, `SELECT 1 FROM ${table} WHERE id = ?`).get(d.id)) {
+    // Older quick/comment sessions emitted this update without owning a canvas
+    // row. Accept only that identifiable historical no-op, not arbitrary misses.
+    if (op === 'canvas_agent.updated' && tableExists(db, 'agent_sessions') &&
+        prepare(db, 'SELECT 1 FROM agent_sessions WHERE id = ?').get(d.id)) return;
+    throw new Error(`Unapplied durable update: ${op} target does not exist`);
+  }
+  if (op === 'subagent_tool.updated' &&
+      !prepare(db, 'SELECT 1 FROM subagent_tool_calls WHERE subagent_id = ? AND tool_call_id = ?').get(d.subagent_id, d.tool_call_id)) {
+    throw new Error('Unapplied durable update: subagent tool target does not exist');
+  }
+
   switch (op) {
     case 'space.create': {
       const d = event.data;
       // Backfill body from raw_text/description for old events
       const body = d.body ?? d.raw_text ?? d.description ?? '';
-      db.prepare(
+      prepare(db,
         `INSERT OR REPLACE INTO spaces (id, description, body, raw_text, client, due_at, due_at_utc, recurrence, completed_at, folder, source_skill_id, attachments, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
@@ -208,8 +444,7 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
 
       for (const [key, val] of Object.entries(fields)) {
         if (!ALLOWED_SPACE_FIELDS.has(key)) {
-          console.warn(`[eventlog] Skipping unknown field in update: ${key}`);
-          continue;
+          throw new Error(`Unsupported space update field: ${key}`);
         }
         sets.push(`${key} = ?`);
         values.push(val ?? null);
@@ -217,26 +452,26 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
 
       if (sets.length > 0) {
         values.push(d.id);
-        db.prepare(`UPDATE spaces SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+        prepare(db, `UPDATE spaces SET ${sets.join(', ')} WHERE id = ?`).run(...values);
       }
       break;
     }
 
     case 'space.assign_folder': {
       const d = event.data;
-      db.prepare('UPDATE spaces SET folder = ?, updated_at = ? WHERE id = ?')
-        .run(d.folder, event.ts, d.id);
+      prepare(db, 'UPDATE spaces SET folder = ?, updated_at = ? WHERE id = ?')
+        .run(d.folder, d.updated_at ?? event.ts, d.id);
       break;
     }
 
     case 'space.delete': {
-      db.prepare('DELETE FROM spaces WHERE id = ?').run(event.data.id);
+      prepare(db, 'DELETE FROM spaces WHERE id = ?').run(event.data.id);
       break;
     }
 
     case 'intent_event.log': {
       const d = event.data;
-      db.prepare(
+      prepare(db,
         `INSERT OR REPLACE INTO space_events (id, space_id, event_type, due_at, due_at_utc, completed_at, recurrence_json, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
@@ -250,7 +485,7 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
 
     case 'canvas_agent.created': {
       const d = event.data;
-      db.prepare(
+      prepare(db,
         `INSERT OR REPLACE INTO canvas_agents (id, space_id, selected_text, session_id, pid, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(d.id, d.space_id, d.selected_text, d.session_id, d.pid ?? null, d.status, d.created_at, d.updated_at);
@@ -259,11 +494,11 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
 
     case 'canvas_agent.updated': {
       const d = event.data;
-      if (d.pid !== undefined && d.pid !== null) {
-        db.prepare('UPDATE canvas_agents SET status = ?, pid = ?, updated_at = ? WHERE id = ?')
+      if (d.pid_provided === true || (d.pid !== undefined && d.pid !== null)) {
+        prepare(db, 'UPDATE canvas_agents SET status = ?, pid = ?, updated_at = ? WHERE id = ?')
           .run(d.status, d.pid, d.updated_at, d.id);
       } else {
-        db.prepare('UPDATE canvas_agents SET status = ?, updated_at = ? WHERE id = ?')
+        prepare(db, 'UPDATE canvas_agents SET status = ?, updated_at = ? WHERE id = ?')
           .run(d.status, d.updated_at, d.id);
       }
       break;
@@ -274,7 +509,7 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
       // Normalize legacy source value: old 'cloud' meant CCA, now 'cca'
       const source = d.source === 'cloud' ? 'cca' : (d.source ?? 'sdk');
       const runLocation = d.run_location === 'cloud' ? 'cloud' : 'local';
-      db.prepare(
+      prepare(db,
         `INSERT OR REPLACE INTO agent_sessions (id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, cca_job_id, cca_repository, cca_effective_repository, cca_fallback_json, cca_result_json, yolo_mode, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
@@ -290,64 +525,71 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
 
     case 'agent_session.cca_result': {
       const d = event.data;
-      db.prepare('UPDATE agent_sessions SET cca_result_json = ?, updated_at = ? WHERE id = ?')
+      prepare(db, 'UPDATE agent_sessions SET cca_result_json = ?, updated_at = ? WHERE id = ?')
         .run(d.cca_result_json ?? null, d.updated_at ?? event.ts, d.id);
       break;
     }
 
     case 'agent_session.yolo': {
       const d = event.data;
-      db.prepare('UPDATE agent_sessions SET yolo_mode = ?, updated_at = ? WHERE id = ?')
+      prepare(db, 'UPDATE agent_sessions SET yolo_mode = ?, updated_at = ? WHERE id = ?')
         .run(d.yolo_mode ? 1 : 0, d.updated_at, d.id);
       break;
     }
 
     case 'agent_session.updated': {
       const d = event.data;
-      if (d.summary !== undefined && d.summary !== null) {
-        db.prepare('UPDATE agent_sessions SET status = ?, summary = ?, updated_at = ? WHERE id = ?')
-          .run(d.status ?? 'running', d.summary, d.updated_at, d.id);
-      } else {
-        db.prepare('UPDATE agent_sessions SET status = ?, updated_at = ? WHERE id = ?')
-          .run(d.status ?? 'running', d.updated_at, d.id);
+      const sets = ['updated_at = ?'];
+      const values: Array<string | null> = [d.updated_at ?? event.ts];
+      for (const key of ['status', 'summary', 'session_id']) {
+        if (d[key] != null) {
+          sets.push(`${key} = ?`);
+          values.push(d[key]);
+        }
+      }
+      prepare(db, `UPDATE agent_sessions SET ${sets.join(', ')} WHERE id = ?`).run(...values, d.id);
+      if (d.session_id != null) {
+        prepare(db, 'UPDATE canvas_agents SET session_id = ?, updated_at = ? WHERE id = ?')
+          .run(d.session_id, d.updated_at ?? event.ts, d.id);
       }
       break;
     }
 
     case 'agent_session.deleted': {
       const d = event.data;
-      db.prepare('DELETE FROM agent_sessions WHERE id = ?').run(d.id);
-      // Cascade chat events.  Older event logs may not have the table
-      // when replayed standalone (tests) — guard with IF EXISTS-style
-      // try/catch so a missing table is non-fatal.
-      try {
-        db.prepare('DELETE FROM agent_chat_events WHERE agent_id = ?').run(d.id);
-      } catch { /* table missing — ignore */ }
+      prepare(db, 'DELETE FROM agent_sessions WHERE id = ?').run(d.id);
+      prepare(db, 'DELETE FROM agent_chat_events WHERE agent_id = ?').run(d.id);
+      break;
+    }
+
+    case 'agent_chat.cleared': {
+      prepare(db, 'DELETE FROM agent_chat_events WHERE agent_id = ?').run(d.agent_id);
       break;
     }
 
     case 'agent_chat.appended': {
       const d = event.data;
-      try {
-        db.prepare(
-          `INSERT OR IGNORE INTO agent_chat_events (agent_id, seq, event_id, type, timestamp, payload)
-           VALUES (?, ?, ?, ?, ?, ?)`
-        ).run(
-          d.agent_id, d.seq, d.event_id ?? null, d.type,
-          d.timestamp ?? event.ts, d.payload ?? '{}',
-        );
-      } catch (err) {
-        // The agent_chat_events table is a recent addition.  When old
-        // tests replay against a schema that doesn't define it, swallow
-        // the error rather than aborting the entire replay transaction.
-        console.warn(`[eventlog] agent_chat.appended replay skipped: ${(err as Error).message}`);
+      const existing = prepare(db,
+        'SELECT event_id, type, timestamp, payload FROM agent_chat_events WHERE agent_id = ? AND seq = ?',
+      ).get(d.agent_id, d.seq) as { event_id: string | null; type: string; timestamp: string; payload: string } | undefined;
+      const row = { event_id: d.event_id ?? null, type: d.type, timestamp: d.timestamp ?? event.ts, payload: d.payload ?? '{}' };
+      if (existing) {
+        if (existing.event_id !== row.event_id || existing.type !== row.type ||
+            existing.timestamp !== row.timestamp || existing.payload !== row.payload) {
+          throw new Error('Conflicting agent chat sequence');
+        }
+      } else {
+        prepare(db,
+          `INSERT INTO agent_chat_events (agent_id, seq, event_id, type, timestamp, payload)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        ).run(d.agent_id, d.seq, row.event_id, row.type, row.timestamp, row.payload);
       }
       break;
     }
 
     case 'subagent.created': {
       const d = event.data;
-      db.prepare(
+      prepare(db,
         `INSERT OR REPLACE INTO subagent_records (id, parent_agent_id, tool_call_id, agent_name, display_name, description, agent_type, status, started_at, completed_at, duration_ms, model, total_tokens, total_tool_calls, error, streaming_content, streaming_content_path, turns_json, turns_path, progress_json, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
@@ -385,13 +627,13 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
         values.push(d.turns_json ?? '[]', d.turns_path ?? null);
       }
       values.push(d.id);
-      db.prepare(`UPDATE subagent_records SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+      prepare(db, `UPDATE subagent_records SET ${sets.join(', ')} WHERE id = ?`).run(...values);
       break;
     }
 
     case 'subagent_tool.created': {
       const d = event.data;
-      db.prepare(
+      prepare(db,
         `INSERT INTO subagent_tool_calls (subagent_id, parent_agent_id, tool_call_id, tool_name, arguments_json, result, result_path, success, error, started_at, completed_at, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
@@ -419,115 +661,26 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
       }
       if (sets.length > 0) {
         values.push(d.subagent_id, d.tool_call_id);
-        db.prepare(`UPDATE subagent_tool_calls SET ${sets.join(', ')} WHERE subagent_id = ? AND tool_call_id = ?`).run(...values);
+        prepare(db, `UPDATE subagent_tool_calls SET ${sets.join(', ')} WHERE subagent_id = ? AND tool_call_id = ?`).run(...values);
       }
       break;
     }
 
     case 'snapshot': {
-      const d = event.data;
-      // Support both old ('intents') and new ('spaces') snapshot keys
-      const spaces = d.spaces ?? d.intents;
-      if (spaces) {
-        for (const s of spaces) {
-          const body = s.body ?? s.raw_text ?? s.description ?? '';
-          db.prepare(
-            `INSERT OR REPLACE INTO spaces (id, description, body, raw_text, client, due_at, due_at_utc, recurrence, completed_at, folder, source_skill_id, attachments, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).run(
-            s.id, s.description, body, s.raw_text ?? null, s.client ?? null,
-            s.due_at ?? null, s.due_at_utc ?? null, s.recurrence ?? null,
-            s.completed_at ?? null, s.folder ?? null, s.source_skill_id ?? null, s.attachments ?? '[]',
-            s.status,
-            s.created_at, s.updated_at,
-          );
-        }
-      }
-      // Support both old ('intent_events') and new ('space_events') keys
-      const spaceEvents = d.space_events ?? d.intent_events;
-      if (spaceEvents) {
-        for (const evt of spaceEvents) {
-          db.prepare(
-            `INSERT OR REPLACE INTO space_events (id, space_id, event_type, due_at, due_at_utc, completed_at, recurrence_json, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-          ).run(
-            evt.id, evt.space_id ?? evt.intent_id, evt.event_type,
-            evt.due_at ?? null, evt.due_at_utc ?? null,
-            evt.completed_at ?? null, evt.recurrence_json ?? null,
-            evt.created_at,
-          );
-        }
-      }
-      // Extended snapshot payload (Phase 4 compaction): bulk-restore
-      // the remaining entity types so the snapshot encodes the full
-      // materialised state.
-      if (Array.isArray(d.canvas_agents)) {
-        for (const a of d.canvas_agents) {
-          db.prepare(
-            `INSERT OR REPLACE INTO canvas_agents (id, space_id, selected_text, session_id, pid, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-          ).run(
-            a.id, a.space_id, a.selected_text, a.session_id,
-            a.pid ?? null, a.status ?? 'completed', a.created_at, a.updated_at,
-          );
-        }
-      }
-      if (Array.isArray(d.agent_sessions)) {
-        for (const a of d.agent_sessions) {
-          const source = a.source === 'cloud' ? 'cca' : (a.source ?? 'sdk');
-          db.prepare(
-            `INSERT OR REPLACE INTO agent_sessions (id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, cca_job_id, cca_repository, cca_effective_repository, cca_fallback_json, cca_result_json, yolo_mode, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).run(
-            a.id, a.session_id, a.space_id ?? null, a.prompt,
-            a.status ?? 'completed', a.summary ?? '', a.working_dir ?? null,
-            source, a.persona_handle ?? null, a.quoted_text ?? null,
-            a.comment_thread_id ?? null,
-            a.run_location === 'cloud' ? 'cloud' : 'local',
-            a.cca_job_id ?? null,
-            a.cca_repository ?? null,
-            a.cca_effective_repository ?? null,
-            a.cca_fallback_json ?? null,
-            a.cca_result_json ?? null,
-            a.yolo_mode ? 1 : 0,
-            a.created_at, a.updated_at,
-          );
-        }
-      }
-      if (Array.isArray(d.subagent_records)) {
-        for (const r of d.subagent_records) {
-          db.prepare(
-            `INSERT OR REPLACE INTO subagent_records (id, parent_agent_id, tool_call_id, agent_name, display_name, description, agent_type, status, started_at, completed_at, duration_ms, model, total_tokens, total_tool_calls, error, streaming_content, streaming_content_path, turns_json, turns_path, progress_json, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).run(
-            r.id, r.parent_agent_id, r.tool_call_id ?? null, r.agent_name,
-            r.display_name ?? null, r.description ?? null, r.agent_type ?? null,
-            r.status ?? 'completed', r.started_at, r.completed_at ?? null,
-            r.duration_ms ?? null, r.model ?? null, r.total_tokens ?? null,
-            r.total_tool_calls ?? null, r.error ?? null,
-            r.streaming_content ?? '', r.streaming_content_path ?? null,
-            r.turns_json ?? '[]', r.turns_path ?? null,
-            r.progress_json ?? '{}', r.created_at, r.updated_at,
-          );
-        }
-      }
-      if (Array.isArray(d.subagent_tool_calls)) {
-        for (const tc of d.subagent_tool_calls) {
-          db.prepare(
-            `INSERT INTO subagent_tool_calls (subagent_id, parent_agent_id, tool_call_id, tool_name, arguments_json, result, result_path, success, error, started_at, completed_at, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).run(
-            tc.subagent_id, tc.parent_agent_id, tc.tool_call_id ?? null, tc.tool_name,
-            tc.arguments_json ?? null, tc.result ?? null, tc.result_path ?? null,
-            tc.success ?? 1, tc.error ?? null,
-            tc.started_at ?? null, tc.completed_at ?? null, tc.created_at,
-          );
+      for (const [key, rows] of Object.entries(event.data)) {
+        const table = (key === 'intents' ? 'spaces' : key === 'intent_events' ? 'space_events' : key) as SnapshotTable;
+        for (const row of rows) {
+          const data = { ...row };
+          if (['canvas_agents', 'agent_sessions', 'subagent_records'].includes(table)) {
+            data.status ??= 'completed';
+          }
+          applyEvent(db, { ts: event.ts, op: SNAPSHOT_OPERATIONS[table], data });
         }
       }
       break;
     }
 
     default:
-      console.warn(`[eventlog] Unknown event op: ${event.op}`);
+      throw new Error(`Unsupported durable event op: ${event.op}`);
   }
 }

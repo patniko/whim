@@ -8,6 +8,8 @@
 import type { Space, CreateSpaceInput, Attachment, AgentAnchor, AgentSession, LinkPreviewMeta, RecurrenceResult, RecallMatch, Skill, SkillContent, SkillInvocationInput, SkillInvocationResult, SkillScheduleFrequency, CanvasTarget, SpaceCanvasArtifact, UpdateState, ExportFormat, ExportDestination, ActivityStats } from './types';
 import type { ChatEvent, ElicitationSchema, ElicitationFieldValue } from './chat-types';
 import type { SubagentSummary, SubagentInfo } from './subagent-types';
+import type { ScheduleOptions } from './skill-schedule';
+import type { SpacePageRequest, PageRequest, SpacePage, Page, ChatHistoryPage, AgentPageRequest, AgentPage } from './paging';
 
 // ---------------------------------------------------------------------------
 // Helper types needed by the contract that don't exist in shared/ yet
@@ -16,6 +18,23 @@ import type { SubagentSummary, SubagentInfo } from './subagent-types';
 export interface CanvasSaveResult {
   success: boolean;
   content?: string;
+  error?: string;
+}
+
+export interface StorageStatus {
+  state: 'closed' | 'opening' | 'ready' | 'closing' | 'failed';
+  generation: number;
+  pending: number;
+  indexing: boolean;
+}
+
+export interface EditorFlushRequest {
+  token: string;
+  reason: 'quit' | 'update' | 'workspace';
+}
+export interface EditorFlushResult {
+  token: string;
+  ok: boolean;
   error?: string;
 }
 
@@ -353,9 +372,14 @@ export interface CloudJobPollResult {
 // ---------------------------------------------------------------------------
 
 export interface IpcCommands {
+  'storage:status': { args: []; result: StorageStatus };
   // ── Intents ──────────────────────────────────────────────
   'space:create': { args: [input: CreateSpaceInput]; result: Space };
   'space:list': { args: []; result: Space[] };
+  'space:list-page': { args: [request?: SpacePageRequest]; result: SpacePage };
+  'space:get': { args: [id: string]; result: Space | null };
+  'space:events-page': { args: [request?: PageRequest]; result: Page<SpaceEvent> };
+  'activity:list-page': { args: [request?: import('./paging').ActivityPageRequest]; result: import('./paging').ActivityPage };
   'space:update': { args: [id: string, updates: SpaceUpdates]; result: Space | null };
   'space:delete': { args: [id: string]; result: boolean };
   'space:dismiss-recurrence': { args: [id: string]; result: boolean };
@@ -482,7 +506,7 @@ export interface IpcCommands {
 
   // ── Canvas artifacts ─────────────────────────────────────
   'canvas-artifact:list': { args: [spaceId: string]; result: { artifacts: SpaceCanvasArtifact[] } };
-  'canvas-artifact:list-all': { args: []; result: { artifacts: SpaceCanvasArtifact[] } };
+  'canvas-artifact:list-all': { args: [spaceIds?: string[]]; result: { artifacts: SpaceCanvasArtifact[] } };
   'canvas-artifact:open': {
     args: [spaceId: string, artifactId: string];
     result: { ok: true } | { error: string };
@@ -547,6 +571,9 @@ export interface IpcCommands {
     result: { agentId: string; sessionId: string } | { error: string };
   };
   'agent:list-all': { args: []; result: AgentListAllItem[] };
+  'agent:list-page': { args: [request?: AgentPageRequest]; result: AgentPage };
+  'agent:get': { args: [agentId: string]; result: AgentListAllItem | null };
+  'agent:history-page': { args: [agentId: string, request?: PageRequest]; result: ChatHistoryPage };
   'agent:delete-session': { args: [agentId: string]; result: { ok: true } };
   'agent:launch-cloud': {
     args: [spaceId: string, prompt: string];
@@ -576,7 +603,7 @@ export interface IpcCommands {
   // ── Chat ─────────────────────────────────────────────────
   'chat:send-message': {
     args: [agentId: string, prompt: string, attachments?: Array<{ type: 'file'; path: string }>];
-    result: { error?: string; restarted?: boolean };
+    result: { error?: string; restarted?: boolean; messageId?: string };
   };
   'chat:set-model': { args: [agentId: string, model: string]; result: { error?: string } };
 
@@ -600,7 +627,8 @@ export interface IpcCommands {
   'skill:create-space': { args: [skillId: string]; result: Space | { error: string } };
   'skill:launch': { args: [skillId: string]; result: Space | { error: string } };
   'skill:invoke': { args: [input: SkillInvocationInput]; result: SkillInvocationResult | { error: string } };
-  'skill:set-schedule': { args: [skillId: string, frequency: SkillScheduleFrequency, time: string, day: number | null]; result: Skill | { error: string } };
+  'skill:set-schedule': { args: [skillId: string, frequency: SkillScheduleFrequency, time: string, day: number | null, options?: ScheduleOptions]; result: Skill | { error: string } };
+  'skill:schedule-sources': { args: []; result: Array<{ name: string }> | { error: string } };
   'skill:clear-schedule': { args: [skillId: string]; result: { success: boolean } | { error: string } };
   'skill:set-canvas': { args: [skillId: string, canvas: string | null, spaceMode: 'new' | 'reuse' | null]; result: Skill | { error: string } };
 
@@ -617,6 +645,8 @@ export interface IpcCommands {
 // ---------------------------------------------------------------------------
 
 export interface IpcMessages {
+  'window:renderer-ready': { args: [] };
+  'lifecycle:flush-result': { args: [result: EditorFlushResult] };
   'window:hide': { args: [] };
   'window:expand': { args: [] };
   'window:collapse': { args: [] };
@@ -640,6 +670,8 @@ export interface IpcMessages {
 export type WindowToggleSource = 'hotkey' | 'tray' | 'startup' | 'other';
 
 export interface IpcEvents {
+  'lifecycle:flush-request': EditorFlushRequest;
+  'lifecycle:flush-released': string;
   'chat:event': { agentId: string } & ChatEvent;
   'subagent:changed': { parentAgentId: string };
   'window:pinned-changed': { pinned: boolean };
@@ -699,6 +731,7 @@ export interface IpcEvents {
   'canvas:content-updated': { spaceId: string; content: string };
   'space:processed': { spaceId: string };
   'space:title-updated': { spaceId: string; title: string };
+  'space:index-changed': { error?: string };
   'space:recurrence': { spaceId: string; result: RecurrenceResult };
   'space:recurrence-applied': { spaceId: string };
   'space:recall': { spaceId: string; match: RecallMatch };

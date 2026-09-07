@@ -45,7 +45,12 @@ All app settings (theme, model, Copilot runtime source (bundled/inprocess/auto/p
 
 ### database.ts — Storage
 
-Uses `better-sqlite3` for synchronous SQLite. Key tables:
+`database.ts` still uses synchronous `better-sqlite3`, but application callers
+use the asynchronous `storage.ts` facade. The actual SQLite, replay and
+compaction work runs in `storage-worker.ts`; returning a promise from an IPC
+handler alone would not isolate this work. Worker admission is bounded by
+request count and serialized argument bytes. Workspace generations reject
+stale continuations. Key tables:
 
 | Table | Purpose |
 |---|---|
@@ -53,6 +58,149 @@ Uses `better-sqlite3` for synchronous SQLite. Key tables:
 | `agent_sessions` | Central agent registry (SDK, CLI, cloud) with status, prompt, source |
 | `canvas_agents` | Legacy agent records for backward compatibility |
 | `intent_events` | Cached event log entries for timeline |
+
+Local append acknowledgements are tracked separately from hashed replay
+checkpoints. A checkpoint cannot replay already-applied non-idempotent local
+events; mixed uncheckpointed local writes and external changes use a validating
+rebuild instead. Before reopening an append segment, recovery durably quarantines
+an incomplete tail in a sibling `.torn-*` file. Complete JSON lacking its final
+newline is retained; incomplete JSON is removed only after its original bytes
+are durable in quarantine. An oversized tail fails closed.
+
+Git staging and local merge/application hold a storage barrier, excluding
+snapshot publication and source deletion. Bounded deferred requests resume after
+that barrier and recheck their original workspace generation. Network fetches do
+not hold it. Skill documents, scheduled results and report linkbacks use the same
+worker-owned revision comparison, file fsync, atomic rename and directory sync
+as ordinary canvas saves. Report publication awaits linkback completion instead
+of acknowledging a failed final write.
+
+### Startup, lazy features, and save lifecycle
+
+The main window, tray shell and shortcut are created without waiting for storage
+recovery. The persistence worker starts concurrently with native window creation,
+rather than adding the two cold-start costs sequentially.
+Native target delivery waits for `window:renderer-ready`, sent after the
+renderer installs its subscriptions, rather than assuming a navigation event
+means the split module graph has finished evaluating.
+The renderer mounts its list/capture shell without waiting for CLI discovery,
+model enumeration, a full collection snapshot, voice initialization or network
+requests. `storage:status` distinguishes opening, ready, failed and closing
+storage; a ready store can accept capture while canvas indexing is still in
+progress. Missing runtime/model configuration does not hide local capture for
+an existing workspace. Runtime setup is still required to run agents.
+
+Normal startup no longer creates hidden settings/canvas windows or initializes
+speech. Windows are created on demand and can be reused after a successful
+close. Microphone permission is requested when microphone access is requested,
+not at normal boot.
+
+`scripts/build-renderer.js` emits content-hashed ES modules with actual esbuild
+code splitting. The desktop entry's static graph excludes the editor and chat
+implementations and all settings markup/control registration. `settings/controls.ts`
+mounts the extracted settings form only on demand, using a typed host interface
+for shared theme, workspace, persona and hotkey state. Draft tracking and durable
+flushes include lazily mounted controls. The mobile shell separately defers formatted
+Markdown. The desktop-web loader installs the shared API before importing the
+same renderer graph. Classic merge workers keep explicit, content-hashed URLs
+under each shell; the Node merge and storage workers are separate packaged
+files. The app protocol sets **response** MIME types for modules/fonts and
+confines reads to the renderer or configured workspace roots.
+
+Each shell has an asset manifest describing its initial and lazy import graphs.
+Build and package verification check their dependencies and worker outputs.
+The mobile service worker precaches only its initial graph, not all lazy
+features or the desktop renderer. The desktop initial shell is cached after
+that surface is visited. Visited lazy features are cached on demand.
+Updates wait for old clients instead of forcibly replacing their service worker.
+Desktop navigations retain their own cached HTML, rather than falling back to
+the mobile shell. Cached HTML is bound to its build manifest, so a newer online
+navigation cannot strand an older offline shell with missing modules.
+Workspace/API responses are never cached. An unvisited
+feature still needs connectivity; load failures keep the surrounding UI and
+show a reconnect/reload message. Deployment must retain old hashed assets for
+already-open clients that have not fetched those features yet, or those clients
+must save and reload. The build's clean step is not a versioned deployment
+asset-retention mechanism.
+
+Quit, updater preparation and workspace changes use tokenized, per-window save
+requests. Renderers lock input while flushing capture drafts, debounced settings
+writes and document saves, then acknowledge only successful durable results.
+Failed or missing acknowledgements cancel the operation; release messages
+restore interaction on cancellation and after workspace transitions. Settings
+forms with unapplied edits require explicit Save or Cancel rather than silently
+changing permissions during quit. Native secondary-canvas and settings closes
+also wait for the handshake. Explicit document Save drains newer revisions
+behind an in-flight write. Navigation retains the current editor if save fails
+or the document changes during close. Browser unload cannot await IPC; it uses
+a leave-page warning for unsaved text, not a claimed durable unload save.
+The mobile editor also serializes revision-aware saves. A rejected timer save
+keeps the draft dirty and shows a retry error; delayed acknowledgements rebase
+newer typing with the browser merge worker instead of overwriting it. Failed
+saves prevent close/page navigation, and concurrent conflicts remain visible
+for review rather than being silently acknowledged.
+
+Workspace transitions suspend command admission and drain producers before
+closing storage. Profile configuration changes only after old-editor flushing
+and new-workspace initialization; initialization failure restores the previous
+destination. Maintenance timers and notification callbacks are generation-scoped.
+Updater installation is excluded from the producer set it must itself drain.
+Recoverable shutdown failures restore workspace services, command admission and
+document watchers, reconciling changes observed while watches were suspended.
+If storage or restoration fails, commands remain blocked with an explicit
+copy-drafts-and-restart error rather than resuming a partially closed workspace.
+
+Web pairing and health responses carry an opaque workspace epoch. Both browser
+transports pin subsequent API requests to it; the epoch includes a process
+identity so it cannot accidentally match after restarting into another
+workspace. Missing or stale epochs receive HTTP 409 before command execution,
+even when both workspaces contain the same document ID. Browsers must preserve
+their drafts and reload rather than automatically retrying an old write against
+the new destination. Older cached browser clients must reload to obtain this
+contract. Offline connection failure is distinct from expired authentication:
+the cached shell offers reconnect/retry without removing device pairing.
+Reconnect health checks never replace the epoch of an already-loaded page.
+Workspace-change events retain browser editors and stop applying events from
+the replacement workspace. The desktop-web first-handshake resync is ignored
+independently of renderer-load timing, avoiding an initial reload loop.
+
+### Performance diagnostics and reproducible fixtures
+
+Set `WHIM_PERF=1` for bounded main-process numeric aggregates (printed after
+shutdown storage draining). Add `?perf=1` (or `&perf=1`) to a renderer URL for
+`window.__whimPerformance()` and long-task observation in DevTools. These
+record named durations/counts/failures, never document text, workspace paths,
+agent IDs, tokens, or error payloads. Storage round trips, execution time, Git
+queue/network/reconciliation, merges, capture/document acknowledgement and
+renderer refresh spans measure different scopes and must not be added together
+as independent work. Renderer startup spans begin at entry evaluation, not at
+Electron's `app.ready` event.
+
+Existing Vitest fixtures in `storage-worker.test.ts` reopen a synthetic
+1000-space workspace and exercise approximately 100 KB fsynced document saves.
+`shared/performance.test.ts` checks exact sparse-merge output at 1000, 4000 and
+10000 lines while reporting timings. `chat/transcript-layout.test.ts` reports
+100000-row geometry/viewport costs; it does not measure Markdown rendering.
+These fixtures use disposable directories and the existing test runner.
+The tray/capture application p95 goals and a universal 50 ms main-thread limit
+are not established by these isolated measurements.
+
+Unmirrored SDK/CLI and ephemeral conversations use the SDK's cursor-based
+`eventLog.read`, never an initial full `getEvents` response. Batches of at most
+32 events are normalized in the storage worker before the next batch is
+requested; tool/request completions update earlier rows across page boundaries.
+Normal-session projections use SQLite-owned temporary databases with bounded
+page caches, removed on close. Ephemeral projections remain exclusively in
+memory, so their retained data still grows with the conversation by design.
+There are at most eight cached runtime projections. RPC failures preserve the
+last acknowledged cursor for retry; incompatible older runtimes produce an
+explicit upgrade error, not an unbounded fallback. Runtime projection ordinals
+never suppress live events in the unrelated durable-mirror sequence domain.
+Opening unavailable history never creates a replacement session. Initial
+runtime-history loading still scans the retained log in chronological batches
+before returning its newest page; bounded batches do not provide history-size-
+independent first-page latency. Tail-first normalization with cross-page
+completion reconciliation remains necessary for that stronger guarantee.
 
 ### ai.ts — Copilot SDK Client
 
@@ -102,7 +250,26 @@ The desktop settings panel controls enablement, port, bind addresses, token rota
 
 ### workspace.ts — Workspace & Persistence
 
-Event-sourced via append-only `.whim/events.jsonl`. SQLite is a disposable cache. Auto-commits to git. Attachment handling with 25MB limit.
+Log-backed entities are authoritative in append-only rotated JSONL under
+`.whim/events/`; the legacy `.whim/events.jsonl` layout is migrated. SQLite is
+a derived cache, while canvas/page files remain authoritative documents in
+their own right. A local log append is fsynced before applying SQLite and is
+marked applied only after SQL succeeds. Worker-backed document publication
+compares the expected disk revision, fsyncs a temporary file, renames it, and
+synchronizes the directory before returning an acknowledgement. Conflicts and
+failed writes are errors, not successful empty documents.
+
+Applied fingerprints allow a validated hot cache or eligible incoming suffix
+to be reused. Invalid/torn replay must not stamp a clean fingerprint.
+Compaction publishes checksummed, immutable snapshot shards (including chat
+events) before its root, then removes only covered source data and eligible
+cold side content. Readers must understand this snapshot format before sharing
+compacted logs. Git operations are serialized; fetch does not hold the storage
+barrier, but local merge/replay/projection reconciliation does. An acknowledgement
+means local persistence, not successful Git push or protection against every
+external-writer/power-loss scenario. Windows directory fsync and comprehensive
+producer isolation across workspace switches still need platform/integration
+coverage. Attachments retain the existing 25 MB limit.
 
 ### mcp.ts — MCP Server Discovery
 
@@ -110,7 +277,13 @@ Auto-discovers from `~/.copilot/mcp-config.json` and installed plugins. Merges w
 
 ### voice.ts — Local Whisper STT
 
-Runs `whisper-tiny.en` locally via `@huggingface/transformers`. Pre-loaded on startup.
+Runs `whisper-tiny.en` locally via `@huggingface/transformers` in `voice-worker.ts`.
+The worker, runtime and model are loaded on first transcription with shared,
+retryable initialization. PCM conversion, validation and inference execute off
+main; inference is serialized. Admission allows five requests and at most
+32 MiB of queued PCM data. Worker failures reject pending requests and an
+explicit retry creates a new worker. There is no normal-boot model warmup.
+The real model still needs its cached files or a first-use download.
 
 ## Renderer Process (`src/renderer/`)
 

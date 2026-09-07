@@ -74,6 +74,16 @@ if (runtimeCheck.status !== 0) {
 }
 
 const appArchive = path.join(platform === 'mac' ? macResources : winResources, 'app.asar');
+const rendererCheck = spawnSync(appExecutable, [
+  path.join(__dirname, 'verify-renderer-assets.js'), path.join(appArchive, 'dist'),
+], {
+  encoding: 'utf8',
+  env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+});
+if (rendererCheck.status !== 0) {
+  throw new Error(`Packaged renderer graph is incomplete:\n${rendererCheck.stderr || rendererCheck.error}`);
+}
+console.log(rendererCheck.stdout.trim());
 for (const transport of ['stdio', 'inprocess']) {
   const result = spawnSync(appExecutable, [path.join(__dirname, 'smoke-sdk-runtime.js'), appArchive, transport], {
     encoding: 'utf8',

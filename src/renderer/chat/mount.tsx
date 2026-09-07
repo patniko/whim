@@ -1,6 +1,7 @@
 import React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { ChatView } from './ChatView';
+import type { ChatHistorySource } from './transcript-layout';
 
 let root: Root | null = null;
 
@@ -17,6 +18,7 @@ export interface MountChatOptions {
   onClose: () => void;
   onOpenCli: (agentId: string) => void;
   onOpenCanvas?: (spaceId: string) => void;
+  historySource?: ChatHistorySource;
 }
 
 export function mountChat(container: HTMLElement, options: MountChatOptions): void {
@@ -39,6 +41,7 @@ export function mountChat(container: HTMLElement, options: MountChatOptions): vo
       onClose={options.onClose}
       onOpenCli={options.onOpenCli}
       onOpenCanvas={options.onOpenCanvas}
+      historySource={options.historySource}
     />
   );
 }

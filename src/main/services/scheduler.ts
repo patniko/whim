@@ -1,110 +1,135 @@
-import {
-  getDueSkills,
-  getScheduledSkillsNeedingNextRun,
-  claimSkillRun,
-  updateSkillSchedule,
-} from '../database';
+import { getAgentSession, getSkill, isInitialized, listSkills, markSkillRun, updateSkillSchedule } from '../storage';
 import { getConfigValue } from '../config';
-import { notifyAllWindows } from '../notify';
-import { isInitialized } from '../database';
+import { observeProducer } from '../producer-tasks';
 import { invokeSkill } from '../skill-invocation';
-import type { SkillScheduleFrequency } from '../../shared/types';
+import { claimScheduledRun, clearSkillSchedule, completeScheduledRun, failScheduledRun, getSkillSchedule, listSkillSchedules, migrateLegacySkillSchedule, recordScheduledRunLaunch } from '../storage';
+import type { ScheduledRun, SkillSchedule } from '../../shared/skill-schedule';
 
-const CHECK_INTERVAL_MS = 60_000; // Check every 60 seconds
+export { computeNextRunAt } from './skill-schedule-store';
+const CHECK_INTERVAL_MS = 60_000;
+const RUN_TIMEOUT_MS = 2 * 60 * 60_000;
+const RUN_TIMEOUT_SUMMARY = 'Scheduled run timed out; it will not be retried automatically.';
 let intervalId: ReturnType<typeof setInterval> | null = null;
-let isChecking = false; // Reentrancy guard — prevents overlapping ticks
+let isChecking = false;
+let generation = 0;
+let pendingRecovery = false;
+const launchingSchedules = new Set<string>();
 
-/** Start the skill scheduler — checks for due skills every 60s. */
-export function startScheduler(): void {
+/** main.ts starts this after the watcher's initial skill sync finishes. */
+export async function startScheduler(): Promise<void> {
   stopScheduler();
-  // Recover schedules from disk on startup (DB is rebuilt each launch, so
-  // next_run_at is null after skill-watcher sync) and catch up any due runs.
-  void recoverSchedulesAndTick();
-  intervalId = setInterval(() => { void checkAndRunDueSkills(); }, CHECK_INTERVAL_MS);
-  console.log('[scheduler] Started skill scheduler');
+  pendingRecovery = true;
+  void observeProducer(checkAndRunDueSkills(true)).catch(reportError);
+  intervalId = setInterval(() => { void observeProducer(checkAndRunDueSkills()).catch(reportError); }, CHECK_INTERVAL_MS);
 }
 
-/** Stop the skill scheduler. */
 export function stopScheduler(): void {
-  if (intervalId) {
-    clearInterval(intervalId);
-    intervalId = null;
-  }
+  generation++;
+  pendingRecovery = false;
+  if (intervalId) clearInterval(intervalId);
+  intervalId = null;
 }
 
-/**
- * On startup, compute next_run_at for any scheduled skill that doesn't have one
- * (this happens because the DB is rebuilt from event log on each launch, while
- * schedule frontmatter is on disk). Then run a normal due-check.
- */
-async function recoverSchedulesAndTick(): Promise<void> {
-  if (!isInitialized()) return;
+function reportError(error: unknown): void {
+  console.error('[scheduler] Durable schedule processing failed:', error);
+}
 
-  try {
-    const needsRecovery = getScheduledSkillsNeedingNextRun();
-    for (const skill of needsRecovery) {
-      if (!skill.schedule) continue;
-      const nextRun = computeNextRunAt(
-        skill.schedule,
-        skill.schedule_time || '09:00',
-        skill.schedule_day
-      );
-      updateSkillSchedule(skill.id, skill.schedule, skill.schedule_time, skill.schedule_day, nextRun);
-      console.log(`[scheduler] Recovered schedule for ${skill.id}: next run ${nextRun}`);
+export async function projectSkillSchedule(schedule: SkillSchedule): Promise<void> {
+  (await updateSkillSchedule(
+    schedule.skillId, schedule.enabled ? schedule.frequency : null,
+    schedule.enabled ? schedule.time : null, schedule.enabled ? schedule.day : null,
+    schedule.enabled ? schedule.nextRunAt : null,
+  ));
+  if (schedule.lastRun) (await markSkillRun(schedule.skillId, schedule.lastRun.startedAt, schedule.nextRunAt));
+}
+
+async function hasLiveAgent(run: ScheduledRun): Promise<boolean> {
+  if (!run.agentId) return false;
+  const { getAgentSessionId } = await import('../agent-service');
+  const agent = (await getAgentSession(run.agentId));
+  return !!agent && (agent.status === 'running' || agent.status === 'waiting-approval') &&
+    (!!getAgentSessionId(run.agentId) || agent.run_location === 'cloud');
+}
+
+async function stopExpiredRun(workspace: string, scheduleId: string, run: ScheduledRun): Promise<void> {
+  if (run.agentId) {
+    const { abortAgent } = await import('../agent-service');
+    await abortAgent(run.agentId);
+    if (await hasLiveAgent(run)) {
+      throw new Error('Timed-out scheduled agent is still active; cancellation must finish before another run can start.');
     }
-    if (needsRecovery.length > 0) notifyAllWindows('skills:changed');
-  } catch (err) {
-    console.error('[scheduler] Failed to recover schedules:', err);
   }
-
-  await checkAndRunDueSkills();
+  await failScheduledRun(workspace, scheduleId, run.id, RUN_TIMEOUT_SUMMARY, false);
 }
 
-/** Check for due skills and launch them. */
-async function checkAndRunDueSkills(): Promise<void> {
-  if (!isInitialized()) return;
-  if (isChecking) {
-    // Previous tick still in flight — skip this one to avoid duplicate launches.
-    return;
+async function reconcileRun(workspace: string, schedule: SkillSchedule, startup: boolean): Promise<boolean> {
+  const run = schedule.lastRun;
+  if (!run) return false;
+  const agent = run.agentId ? (await getAgentSession(run.agentId)) : null;
+  const live = await hasLiveAgent(run);
+  if (run.status !== 'running') return live;
+  if (agent?.status === 'completed') {
+    // Canvas completion is owned by result delivery, never inferred from launch.
+    if (schedule.output === 'legacy') {
+      (await completeScheduledRun(workspace, schedule.id, run.id, {
+        status: 'ready', summary: agent.summary || 'Scheduled run completed.', spaceId: run.spaceId,
+      }));
+    } else {
+      (await failScheduledRun(workspace, schedule.id, run.id, 'Agent completed without delivering a scheduled result.', false));
+    }
+    return false;
   }
+  if (agent?.status === 'failed') {
+    (await failScheduledRun(workspace, schedule.id, run.id, agent.summary || 'Scheduled agent failed.', false));
+    return false;
+  }
+  if (Date.now() - Date.parse(run.startedAt) >= RUN_TIMEOUT_MS) {
+    if (live) await stopExpiredRun(workspace, schedule.id, run);
+    else await failScheduledRun(workspace, schedule.id, run.id, RUN_TIMEOUT_SUMMARY, false);
+    return live;
+  }
+  if (startup && !live) {
+    (await failScheduledRun(workspace, schedule.id, run.id, 'Scheduled run was interrupted by an app restart.', schedule.output === 'canvas'));
+    return false;
+  }
+  return true;
+}
+
+/** Synchronous disk claims plus this guard serialize the single local owner. */
+export async function checkAndRunDueSkills(startup = false): Promise<void> {
+  const workspace = getConfigValue('workspace');
+  if (!workspace || !isInitialized() || isChecking) return;
+  startup ||= pendingRecovery;
+  pendingRecovery = false;
   isChecking = true;
-
+  const currentGeneration = generation;
   try {
-    const now = new Date().toISOString();
-    const dueSkills = getDueSkills(now);
-
-    for (const skill of dueSkills) {
-      if (!skill.schedule || !skill.next_run_at) continue;
-
-      const previousNextRun = skill.next_run_at;
-      const nextRun = computeNextRunAt(
-        skill.schedule,
-        skill.schedule_time || '09:00',
-        skill.schedule_day
-      );
-
-      // Atomically claim this run by CAS-advancing next_run_at. If another
-      // tick already grabbed it, claimed will be false and we skip the launch.
-      const claimed = claimSkillRun(skill.id, previousNextRun, now, nextRun);
-      if (!claimed) {
-        console.log(`[scheduler] Skipped ${skill.id} — already claimed by another tick`);
+    for (const skill of (await listSkills())) (await migrateLegacySkillSchedule(workspace, skill));
+    for (const schedule of (await listSkillSchedules(workspace))) {
+      if (currentGeneration !== generation || getConfigValue('workspace') !== workspace) break;
+      if (!(await getSkill(schedule.skillId))) {
+        if (schedule.enabled) (await clearSkillSchedule(workspace, schedule.skillId));
         continue;
       }
-
-      console.log(`[scheduler] Triggering scheduled skill: ${skill.name} (${skill.id})`);
-      notifyAllWindows('skills:changed');
-
+      (await projectSkillSchedule(schedule));
       try {
-        const result = await launchSkillForSchedule(skill.id);
-        if (!result.success) {
-          console.error(`[scheduler] Launch failed for ${skill.id}: ${result.error}`);
-        } else {
-          console.log(`[scheduler] Next run for ${skill.id}: ${nextRun}`);
+        if (launchingSchedules.has(schedule.id) || await reconcileRun(workspace, schedule, startup) || !schedule.enabled) continue;
+        if (currentGeneration !== generation || getConfigValue('workspace') !== workspace) break;
+        const run = (await claimScheduledRun(workspace, schedule.id));
+        if (!run) continue;
+        const claimedSchedule = (await getSkillSchedule(workspace, schedule.skillId))!;
+        (await projectSkillSchedule(claimedSchedule));
+        const launchSchedule = (await getSkillSchedule(workspace, schedule.skillId))!;
+        if (!launchSchedule.enabled || currentGeneration !== generation || getConfigValue('workspace') !== workspace) {
+          (await completeScheduledRun(workspace, schedule.id, run.id, {
+            status: 'failed', summary: 'Schedule stopped before the run could launch.',
+          }));
+          continue;
         }
-      } catch (err) {
-        // Launch errored — DB has already been advanced, so we won't retry until
-        // the next scheduled tick. This is intentional: better than infinite retry.
-        console.error(`[scheduler] Launch error for ${skill.id}:`, err);
+        await launchSkillForSchedule(schedule.skillId, { workspace, schedule: launchSchedule, run });
+        (await projectSkillSchedule((await getSkillSchedule(workspace, schedule.skillId))!));
+      } catch (error) {
+        reportError(error);
       }
     }
   } finally {
@@ -112,87 +137,84 @@ async function checkAndRunDueSkills(): Promise<void> {
   }
 }
 
-/** Launch a skill as a new space. Returns launch success/failure. */
-export async function launchSkillForSchedule(skillId: string): Promise<{ success: boolean; error?: string }> {
-  const workspace = getConfigValue('workspace');
+export async function launchSkillForSchedule(
+  skillId: string,
+  occurrence?: { workspace: string; schedule: SkillSchedule; run: ScheduledRun },
+): Promise<{ success: boolean; error?: string }> {
+  const workspace = occurrence?.workspace ?? getConfigValue('workspace');
   if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
-
-  const result = await invokeSkill({ skillId, run: true, source: 'schedule' });
-  if ('space' in result && !result.error) return { success: true };
-  return { success: false, error: result.error || 'launch_failed' };
-}
-
-/**
- * Compute the next run time in UTC ISO 8601 based on frequency, time-of-day, and day-of-week.
- * All times are relative to the local timezone.
- */
-export function computeNextRunAt(
-  frequency: SkillScheduleFrequency,
-  time: string,
-  day: number | null
-): string {
-  const [hours, minutes] = time.split(':').map(Number);
-  const now = new Date();
-
-  // Start from "today at the scheduled time"
-  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes, 0, 0);
-
-  switch (frequency) {
-    case 'daily':
-      // If already past today's time, schedule for tomorrow
-      if (next <= now) next.setDate(next.getDate() + 1);
-      break;
-
-    case 'weekdays':
-      // If already past today's time, move to tomorrow
-      if (next <= now) next.setDate(next.getDate() + 1);
-      // Skip weekends
-      while (next.getDay() === 0 || next.getDay() === 6) {
-        next.setDate(next.getDate() + 1);
+  const schedule = occurrence?.schedule;
+  const run = occurrence?.run;
+  let acknowledged = false;
+  let timedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutError = new Error('Scheduled launch timed out; it will not be retried automatically.');
+  try {
+    if (schedule) launchingSchedules.add(schedule.id);
+    const invocation = Promise.resolve().then(() => invokeSkill({
+      skillId, run: true, source: 'schedule',
+      ...(schedule && run ? {
+        ...(schedule.output === 'canvas' ? { intent: schedule.intent } : {}),
+        scheduledRun: {
+          scheduleId: schedule.id, runId: run.id, scheduledAt: run.scheduledAt,
+          output: schedule.output,
+          timeZone: schedule.timeZone, readOnlyServers: schedule.readOnlyServers,
+          previousSpaceId: schedule.lastSuccessfulRun?.spaceId,
+          lastSuccessfulAt: schedule.lastSuccessfulRun?.completedAt,
+        },
+      } : {}),
+    })).then(async result => {
+      acknowledged = true;
+      if ('space' in result && schedule && run) {
+        (await recordScheduledRunLaunch(workspace, schedule.id, run.id, {
+          spaceId: result.space.id, agentId: result.agent?.agentId,
+        }));
       }
-      break;
-
-    case 'weekly': {
-      const targetDay = day ?? 1; // Default to Monday
-      // Move to next occurrence of the target day
-      if (next <= now) next.setDate(next.getDate() + 1);
-      while (next.getDay() !== targetDay) {
-        next.setDate(next.getDate() + 1);
+      if (timedOut && schedule && run) {
+        const current = await getSkillSchedule(workspace, skillId);
+        if (current?.lastRun?.id === run.id && current.lastRun.status === 'running') {
+          await stopExpiredRun(workspace, schedule.id, current.lastRun);
+        }
       }
-      break;
+      return result;
+    }).catch(error => {
+      if (timedOut) console.error(`[scheduler] Timed-out launch later failed for ${skillId}:`, error);
+      throw error;
+    }).finally(() => {
+      if (schedule) launchingSchedules.delete(schedule.id);
+    });
+    const result = await Promise.race([
+      invocation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          reject(timeoutError);
+        }, RUN_TIMEOUT_MS);
+      }),
+    ]);
+    if ('space' in result && !result.error) return { success: true };
+    const error = result.error || 'launch_failed';
+    if (schedule && run) (await failScheduledRun(workspace, schedule.id, run.id, error, true));
+    return { success: false, error };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // An exception may follow a launch with external effects. Only read-only
+    // canvas attempts are safe to retry when launch acknowledgement is lost.
+    if (schedule && run) {
+      if (error === timeoutError) {
+        const current = await getSkillSchedule(workspace, skillId);
+        // A launch without an acknowledged agent identity remains claimed.
+        // Its late return must revoke publishing privileges before expiration.
+        if (current?.lastRun?.id === run.id && current.lastRun.status === 'running' && current.lastRun.agentId) {
+          await stopExpiredRun(workspace, schedule.id, current.lastRun);
+        }
+      } else {
+        await failScheduledRun(workspace, schedule.id, run.id, message, schedule.output === 'canvas' && !acknowledged);
+      }
     }
-
-    case 'biweekly': {
-      const targetDay2 = day ?? 1;
-      if (next <= now) next.setDate(next.getDate() + 1);
-      while (next.getDay() !== targetDay2) {
-        next.setDate(next.getDate() + 1);
-      }
-      // If less than 7 days from now, push another week
-      const diffDays = (next.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
-      if (diffDays < 7) {
-        next.setDate(next.getDate() + 7);
-      }
-      break;
-    }
-
-    case 'monthly': {
-      // Same day of month, next month if past. Clamp to last day if month
-      // doesn't have the target day (e.g. Jan 31 → Feb 28).
-      const targetDayOfMonth = now.getDate();
-      if (next <= now) {
-        next.setMonth(next.getMonth() + 1);
-      }
-      // If JS rolled over (e.g. Feb 30 → Mar 2), clamp to last day of the
-      // intended month.
-      if (next.getDate() !== targetDayOfMonth) {
-        // Go back to day 0 of the next month = last day of intended month
-        next.setDate(0);
-        next.setHours(hours, minutes, 0, 0);
-      }
-      break;
-    }
+    console.error(`[scheduler] Launch failed for ${skillId}:`, error);
+    return { success: false, error: message };
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
-
-  return next.toISOString();
 }

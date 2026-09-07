@@ -57,9 +57,17 @@ const UNTYPED_CHANNEL_ACCESS: Record<string, WebAccess> = {
 };
 
 export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
+  'storage:status': 'allow',
   // ── Spaces — the core workspace content ──
   'space:create': 'allow',
   'space:list': 'allow',
+  'space:list-page': 'allow',
+  'space:get': 'allow',
+  'space:events-page': 'allow',
+  'activity:list-page': 'allow',
+  'agent:list-page': 'allow',
+  'agent:get': 'allow',
+  'agent:history-page': 'allow',
   'space:update': 'allow',
   'space:delete': 'allow',
   'space:dismiss-recurrence': 'allow',
@@ -246,6 +254,7 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   'skill:launch': 'allow',
   'skill:invoke': 'allow',
   'skill:set-schedule': 'allow',
+  'skill:schedule-sources': 'allow',
   'skill:clear-schedule': 'allow',
   'skill:set-canvas': 'allow',
 

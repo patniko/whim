@@ -19,8 +19,9 @@ import { pathToFileURL, fileURLToPath } from 'url';
 import { marked } from 'marked';
 import HTMLtoDOCX from 'html-to-docx';
 import { getConfigValue } from './config';
-import { isInitialized, getSpace } from './database';
-import { resolveSpaceFolder, readCanvas, readPage, getMimeType } from './workspace';
+import { isInitialized, getSpace } from './storage';
+import { resolveSpaceFolder, getMimeType } from './workspace';
+import { readCanvas, readPage } from './storage';
 import { parseFrontmatter } from '../shared/frontmatter';
 import type { ExportFormat } from '../shared/types';
 
@@ -68,7 +69,7 @@ function parseSyntheticPageId(spaceId: string): { realSpaceId: string; pageName:
  * Resolve a canvas target (real space, child page, or workspace .md file) to
  * its title, frontmatter-stripped Markdown body, and attachment base directory.
  */
-export function loadCanvasForExport(spaceId: string): LoadedCanvas | { error: string } {
+export async function loadCanvasForExport(spaceId: string): Promise<LoadedCanvas | { error: string }> {
   const workspace = getConfigValue('workspace');
   if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
@@ -90,9 +91,9 @@ export function loadCanvasForExport(spaceId: string): LoadedCanvas | { error: st
   // Child page pseudo-space.
   const pageTarget = parseSyntheticPageId(spaceId);
   if (pageTarget) {
-    const space = getSpace(pageTarget.realSpaceId);
+    const space = (await getSpace(pageTarget.realSpaceId));
     if (!space || !space.folder) return { error: 'not_found' };
-    const result = readPage(workspace, space.folder, pageTarget.pageName);
+    const result = (await readPage(workspace, space.folder, pageTarget.pageName));
     if ('error' in result) return { error: result.error };
     return {
       title: pageTarget.pageName.replace(/\.md$/i, '') || 'Untitled',
@@ -102,9 +103,9 @@ export function loadCanvasForExport(spaceId: string): LoadedCanvas | { error: st
   }
 
   // Real space canvas.
-  const space = getSpace(spaceId);
+  const space = (await getSpace(spaceId));
   if (!space || !space.folder) return { error: 'not_found' };
-  const content = readCanvas(workspace, space.folder);
+  const content = (await readCanvas(workspace, space.folder));
   const title = (space.description || '').trim().split('\n')[0].trim() || 'Untitled';
   return {
     title,
@@ -290,7 +291,7 @@ export async function buildExport(
 ): Promise<{ path: string } | { error: string }> {
   if (!EXPORT_FORMATS.includes(format)) return { error: 'unsupported_format' };
 
-  const loaded = loadCanvasForExport(spaceId);
+  const loaded = (await loadCanvasForExport(spaceId));
   if ('error' in loaded) return loaded;
 
   const outDir = destDir || path.join(os.tmpdir(), 'whim-share');

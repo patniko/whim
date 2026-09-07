@@ -9,7 +9,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { getLatestSpaceForSkill, hasActiveAgentForSpace } from '../database';
+import { getLatestSpaceForSkill, hasActiveAgentForSpace } from '../storage';
 import { cancelPendingRecurrence } from './recurrence';
 import { unarchiveSpaceFull } from './space-mutations';
 import type { Space } from '../../shared/types';
@@ -46,12 +46,12 @@ export async function resolveSpaceForSkill(params: ResolveSpaceParams): Promise<
 
   if (spaceMode === 'new') return { space: null, reason: 'new-requested' };
 
-  const existing = getLatestSpaceForSkill(skillId);
+  const existing = (await getLatestSpaceForSkill(skillId));
   if (!existing) return { space: null, reason: 'new-first-run' };
 
   // Writing into a space that is mid-run would have two agents editing the same
   // document and artifact at once.
-  if (hasActiveAgentForSpace(existing.id)) {
+  if ((await hasActiveAgentForSpace(existing.id))) {
     return { space: null, reason: 'new-agent-running' };
   }
 

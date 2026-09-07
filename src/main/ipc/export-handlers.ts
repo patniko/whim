@@ -13,7 +13,7 @@ import { showOpenDialog } from './dialog-utils';
 export function registerExportHandlers(): void {
   // Export a canvas to a temp file and return its path (no sharing/reveal).
   registerIpcHandler('canvas:export', async (_event, spaceId: string, format: ExportFormat) => {
-    return buildExport(spaceId, format);
+    return (await buildExport(spaceId, format));
   });
 
   // Export a canvas, then hand it to the OS share sheet (macOS) or reveal it in

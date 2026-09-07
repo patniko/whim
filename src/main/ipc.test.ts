@@ -25,10 +25,38 @@ vi.mock('electron', () => ({
 
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
-  return { ...actual, existsSync: vi.fn(() => true), writeFileSync: vi.fn() };
+  return {
+    ...actual, existsSync: vi.fn(() => true), writeFileSync: vi.fn(),
+    createReadStream: vi.fn(() => ({
+      async *[Symbol.asyncIterator]() { yield 'canvas content'; },
+    })),
+  };
 });
+vi.mock('./canvas-watcher', () => ({
+  startWatching: vi.fn(), stopWatching: vi.fn(), stopAllWatchers: vi.fn(),
+  markSelfWrite: vi.fn(), clearSelfWrite: vi.fn(),
+}));
 
-vi.mock('./database', () => ({
+vi.mock('./storage', async () => ({
+  ...(await import('./workspace')),
+  ...(await import('./services/skill-schedule-store')),
+  ...(await import('./canvas/artifact-store')),
+  documentMatches: vi.fn(() => true),
+  migrateLegacySkillSchedule: vi.fn(() => null),
+  readDocument: async (filePath: string) => (await import('fs')).readFileSync(filePath, 'utf8'),
+  getSkillCanvasSettings: vi.fn(async () => ({ canvas: null, space_mode: null, canvas_template: null })),
+  writeDocument: async (input: import('./storage-documents').DocumentWrite) => {
+    if (!input.spaceId) {
+      (await import('fs')).writeFileSync(input.filePath, input.content, 'utf8');
+      return {};
+    }
+    (await import('./workspace')).writeCanvas(input.root, 'test-folder', input.content);
+    return (await import('./storage')).updateCanvasContent(input.spaceId!, input.content);
+  },
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   isInitialized: vi.fn(() => true),
   createSpace: vi.fn((input: any) => ({
     id: 'space-1',
@@ -119,6 +147,8 @@ vi.mock('./frontmatter', () => ({
 }));
 
 vi.mock('./workspace', () => ({
+  cancelGitPolling: vi.fn(),
+  drainGitOperations: vi.fn(),
   initWorkspace: vi.fn(),
   getDbPath: vi.fn((dir: string) => `${dir}/.whim/spaces.db`),
   getLogRoot: vi.fn((dir: string) => `${dir}/.whim/events`),
@@ -237,7 +267,7 @@ vi.mock('uuid', () => ({
 
 // ── Import after mocks ─────────────────────────────────────────────
 import { registerIpcHandlers } from './ipc';
-import { isInitialized, createSpace, listSpaces, updateSpace, deleteSpace, getSpace, getSkill, searchSpaces, logSpaceEvent, listSpaceEvents, assignSpaceFolder, updateCanvasContent } from './database';
+import { isInitialized, createSpace, listSpaces, updateSpace, deleteSpace, getSpace, getSkill, searchSpaces, logSpaceEvent, listSpaceEvents, assignSpaceFolder, updateCanvasContent } from './storage';
 import { classifyInput, setAIModel, evaluateRecurrence } from './ai';
 import { initSpaceCanvas, materializeSpaceCanvas, readCanvas, writeCanvas, scheduleAutoCommit, commitNow, archiveSpaceFolder, deleteSpaceFolder } from './workspace';
 import { getConfigValue, setConfigValue } from './config';
@@ -287,17 +317,17 @@ describe('IPC handlers', () => {
   });
 
   describe('space:list', () => {
-    it('returns empty array when not initialized', () => {
+    it('returns empty array when not initialized', async () => {
       vi.mocked(isInitialized).mockReturnValueOnce(false);
-      const result = invoke('space:list');
+      const result = await invoke('space:list');
       expect(result).toEqual([]);
     });
 
-    it('returns spaces when initialized', () => {
-      vi.mocked(listSpaces).mockReturnValueOnce([
+    it('returns spaces when initialized', async () => {
+      vi.mocked(listSpaces).mockResolvedValueOnce([
         { id: 'i1', description: 'test' } as any,
       ]);
-      const result = invoke('space:list');
+      const result = await invoke('space:list');
       expect(result).toEqual([{ id: 'i1', description: 'test' }]);
     });
   });
@@ -310,13 +340,13 @@ describe('IPC handlers', () => {
     });
 
     it('handles status transition to done — completion + recurrence', async () => {
-      vi.mocked(getSpace).mockReturnValueOnce({
+      vi.mocked(getSpace).mockResolvedValueOnce({
         id: 'space-1',
         status: 'active',
         due_at: '2024-06-01',
         due_at_utc: '2024-06-01T00:00:00Z',
       } as any);
-      vi.mocked(updateSpace).mockReturnValueOnce({
+      vi.mocked(updateSpace).mockResolvedValueOnce({
         id: 'space-1',
         status: 'done',
         due_at: '2024-06-01',
@@ -339,8 +369,8 @@ describe('IPC handlers', () => {
   });
 
   describe('space:delete', () => {
-    it('calls deleteSpace and schedules auto-commit', () => {
-      const result = invoke('space:delete', 'space-1');
+    it('calls deleteSpace and schedules auto-commit', async () => {
+      const result = await invoke('space:delete', 'space-1');
       expect(deleteSpace).toHaveBeenCalledWith('space-1');
       expect(result).toBe(true);
       expect(deleteSpaceFolder).toHaveBeenCalledWith('/mock/workspace', 'test-folder');
@@ -355,24 +385,24 @@ describe('IPC handlers', () => {
       expect(await invoke('fonts:list')).toEqual(['Apex Serif', 'Arial']);
     });
 
-    it('maps workspace_root to config workspace', () => {
-      const result = invoke('settings:get', 'workspace_root');
+    it('maps workspace_root to config workspace', async () => {
+      const result = await invoke('settings:get', 'workspace_root');
       expect(getConfigValue).toHaveBeenCalledWith('workspace');
       expect(result).toBe('/mock/workspace');
     });
 
-    it('maps theme to theme', () => {
-      const result = invoke('settings:get', 'theme');
+    it('maps theme to theme', async () => {
+      const result = await invoke('settings:get', 'theme');
       expect(result).toBe('dark');
     });
 
-    it('maps font to font', () => {
-      invoke('settings:get', 'font');
+    it('maps font to font', async () => {
+      await invoke('settings:get', 'font');
       expect(getConfigValue).toHaveBeenCalledWith('font');
     });
 
-    it('returns null for unknown keys', () => {
-      const result = invoke('settings:get', 'nonexistent_key');
+    it('returns null for unknown keys', async () => {
+      const result = await invoke('settings:get', 'nonexistent_key');
       expect(result).toBeNull();
     });
   });
@@ -461,46 +491,48 @@ describe('IPC handlers', () => {
   // ── Canvas ──────────────────────────────────────────────────────
 
   describe('canvas:read', () => {
-    it('returns content for valid space', () => {
-      const result = invoke('canvas:read', 'space-1');
+    it('returns content for valid space', async () => {
+      const result = await invoke('canvas:read', 'space-1');
       expect(result).toEqual({ content: 'canvas content' });
       expect(readCanvas).toHaveBeenCalled();
     });
 
-    it('returns error when no workspace', () => {
+    it('returns error when no workspace', async () => {
       vi.mocked(getConfigValue).mockReturnValueOnce(null as any);
-      const result = invoke('canvas:read', 'space-1');
+      const result = await invoke('canvas:read', 'space-1');
       expect(result).toMatchObject({ error: 'no_workspace' });
     });
   });
 
   describe('canvas:write', () => {
-    it('writes content and updates DB', () => {
-      const result = invoke('canvas:write', 'space-1', 'new content');
+    it('writes content and updates DB', async () => {
+      const result = await invoke('canvas:write', 'space-1', 'new content');
       expect(writeCanvas).toHaveBeenCalledWith('/mock/workspace', 'test-folder', 'new content');
       expect(updateCanvasContent).toHaveBeenCalledWith('space-1', 'new content');
       expect(result).toEqual({ success: true });
     });
 
-    it('routes __skill__ prefix to skill file write', () => {
+    it('routes __skill__ prefix to skill file write', async () => {
       vi.clearAllMocks();
-      const result = invoke('canvas:write', '__skill__my-skill', '---\nname: Test\n---\nBody text');
+      const result = await invoke('canvas:write', '__skill__my-skill', '---\nname: Test\n---\nBody text');
       expect(getSkill).toHaveBeenCalledWith('my-skill');
       // Should NOT call writeCanvas (that's for spaces)
       expect(writeCanvas).not.toHaveBeenCalled();
       expect(result).toEqual({ success: true });
     });
 
-    it('returns not_found for unknown skill', () => {
-      vi.mocked(getSkill).mockReturnValueOnce(undefined as any);
-      const result = invoke('canvas:write', '__skill__unknown', 'content');
+    it('returns not_found for unknown skill', async () => {
+      vi.mocked(getSkill).mockResolvedValueOnce(undefined as any);
+      const result = await invoke('canvas:write', '__skill__unknown', 'content');
       expect(result).toEqual({ success: false, error: 'not_found' });
     });
   });
 
   describe('canvas:close', () => {
-    it('writes and schedules auto-commit', () => {
-      const result = invoke('canvas:close', 'space-1', 'final content');
+    it('writes and schedules auto-commit', async () => {
+      const { forgetCanvasEditorContent } = await import('./services/canvas-editor-state');
+      forgetCanvasEditorContent('space-1');
+      const result = await invoke('canvas:close', 'space-1', 'final content');
       expect(writeCanvas).toHaveBeenCalled();
       expect(updateCanvasContent).toHaveBeenCalled();
       expect(scheduleAutoCommit).toHaveBeenCalledWith('/mock/workspace');
@@ -511,15 +543,15 @@ describe('IPC handlers', () => {
   // ── Search & classify ───────────────────────────────────────────
 
   describe('space:search', () => {
-    it('returns results from searchSpaces', () => {
-      const result = invoke('space:search', 'query');
+    it('returns results from searchSpaces', async () => {
+      const result = await invoke('space:search', 'query');
       expect(searchSpaces).toHaveBeenCalledWith('query');
       expect(result).toEqual([{ id: 'i1', description: 'found' }]);
     });
 
-    it('returns empty when not initialized', () => {
+    it('returns empty when not initialized', async () => {
       vi.mocked(isInitialized).mockReturnValueOnce(false);
-      const result = invoke('space:search', 'query');
+      const result = await invoke('space:search', 'query');
       expect(result).toEqual([]);
     });
   });
@@ -627,31 +659,31 @@ describe('IPC handlers', () => {
   // ── MCP handlers ────────────────────────────────────────────────
 
   describe('mcp:list-discovered', () => {
-    it('returns discovered servers', () => {
-      const result = invoke('mcp:list-discovered');
+    it('returns discovered servers', async () => {
+      const result = await invoke('mcp:list-discovered');
       expect(listDiscoveredMcpServers).toHaveBeenCalled();
       expect(result).toEqual([{ name: 'discovered-server' }]);
     });
   });
 
   describe('mcp:list-custom', () => {
-    it('returns custom servers from config', () => {
-      const result = invoke('mcp:list-custom');
+    it('returns custom servers from config', async () => {
+      const result = await invoke('mcp:list-custom');
       expect(result).toEqual([]);
     });
   });
 
   describe('mcp:save-custom', () => {
-    it('validates and saves servers', () => {
+    it('validates and saves servers', async () => {
       const servers = [{ name: 'srv', type: 'stdio', command: 'echo' }];
-      const result = invoke('mcp:save-custom', servers);
+      const result = await invoke('mcp:save-custom', servers);
       expect(validateMcpServers).toHaveBeenCalledWith(servers);
       expect(setConfigValue).toHaveBeenCalledWith('mcpServers', servers);
       expect(result).toEqual({ ok: true });
     });
 
-    it('returns error for invalid input', () => {
-      const result = invoke('mcp:save-custom', 'not-an-array');
+    it('returns error for invalid input', async () => {
+      const result = await invoke('mcp:save-custom', 'not-an-array');
       expect(result).toEqual({ error: 'invalid payload' });
     });
   });
@@ -659,10 +691,10 @@ describe('IPC handlers', () => {
   // ── Persona handlers ────────────────────────────────────────────
 
   describe('personas:list', () => {
-    it('seeds all default personas and sets seeded flag when config is empty', () => {
+    it('seeds all default personas and sets seeded flag when config is empty', async () => {
       // On first call, personasSeeded is falsy (mock returns null) and personas
       // is empty → handler injects all DEFAULT_PERSONAS and flips the flag.
-      const result = invoke('personas:list');
+      const result = await invoke('personas:list');
       expect(getConfigValue).toHaveBeenCalledWith('personas');
       expect(getConfigValue).toHaveBeenCalledWith('personasSeeded');
 
@@ -709,7 +741,7 @@ describe('IPC handlers', () => {
       expect(setConfigValue).toHaveBeenCalledWith('personasArtifactSeeded', true);
     });
 
-    it('does not re-seed when personasSeeded flag is true', () => {
+    it('does not re-seed when personasSeeded flag is true', async () => {
       vi.mocked(setConfigValue).mockClear();
       const cfg = vi.mocked(getConfigValue);
       const agentOnly = [{
@@ -727,7 +759,7 @@ describe('IPC handlers', () => {
         return null as any;
       });
 
-      const result = invoke('personas:list');
+      const result = await invoke('personas:list');
       expect(result).toEqual(agentOnly);
       // Should NOT have written new personas or flipped the flag again
       expect(setConfigValue).not.toHaveBeenCalledWith('personasSeeded', true);
@@ -744,7 +776,7 @@ describe('IPC handlers', () => {
       });
     });
 
-    it('re-injects @agent even after seeding if user removed it', () => {
+    it('re-injects @agent even after seeding if user removed it', async () => {
       vi.mocked(setConfigValue).mockClear();
       const cfg = vi.mocked(getConfigValue);
       const noAgent = [{
@@ -759,7 +791,7 @@ describe('IPC handlers', () => {
         return null as any;
       });
 
-      const result = invoke('personas:list');
+      const result = await invoke('personas:list');
       expect(result).toEqual(expect.arrayContaining([
         expect.objectContaining({ handle: 'agent' }),
         expect.objectContaining({ handle: 'reviewer' }),
@@ -777,7 +809,7 @@ describe('IPC handlers', () => {
       });
     });
 
-    it('merges defaults with existing personas during first seed', () => {
+    it('merges defaults with existing personas during first seed', async () => {
       vi.mocked(setConfigValue).mockClear();
       // Existing user who already has @agent and a custom persona but
       // personasSeeded is false → gets the rest of the default personas added.
@@ -792,7 +824,7 @@ describe('IPC handlers', () => {
         return null as any;
       });
 
-      const result = invoke('personas:list');
+      const result = await invoke('personas:list');
       // Existing ones preserved, missing defaults added (including @sandbox)
       expect(result).toEqual(expect.arrayContaining([
         expect.objectContaining({ handle: 'agent', instructions: 'custom agent' }),
@@ -821,7 +853,7 @@ describe('IPC handlers', () => {
       });
     });
 
-    it('tops up @sandbox for existing installs (personasSeeded=true, personasSandboxSeeded=false)', () => {
+    it('tops up @sandbox for existing installs (personasSeeded=true, personasSandboxSeeded=false)', async () => {
       vi.mocked(setConfigValue).mockClear();
       const cfg = vi.mocked(getConfigValue);
       // Pre-sandbox install: seeded long ago, no sandbox persona, flag missing.
@@ -838,7 +870,7 @@ describe('IPC handlers', () => {
         return null as any;
       });
 
-      const result = invoke('personas:list');
+      const result = await invoke('personas:list');
       expect(result).toEqual(expect.arrayContaining([
         expect.objectContaining({ handle: 'agent' }),
         expect.objectContaining({ handle: 'editor' }),
@@ -873,7 +905,7 @@ describe('IPC handlers', () => {
       });
     });
 
-    it('tops up @artifact for installs that predate it', () => {
+    it('tops up @artifact for installs that predate it', async () => {
       vi.mocked(setConfigValue).mockClear();
       const cfg = vi.mocked(getConfigValue);
       const preArtifact = [
@@ -888,7 +920,7 @@ describe('IPC handlers', () => {
         return null as any;
       });
 
-      const result = invoke('personas:list');
+      const result = await invoke('personas:list');
       // The top-up must carry `canvas: true` — without it the persona is just
       // @agent with a different emoji and produces no reports.
       expect(result).toEqual(expect.arrayContaining([
@@ -908,7 +940,7 @@ describe('IPC handlers', () => {
       });
     });
 
-    it('does not re-add @artifact after its top-up has run', () => {
+    it('does not re-add @artifact after its top-up has run', async () => {
       // A user who deleted @artifact on purpose must not get it back.
       vi.mocked(setConfigValue).mockClear();
       const cfg = vi.mocked(getConfigValue);
@@ -924,7 +956,7 @@ describe('IPC handlers', () => {
         return null as any;
       });
 
-      const result = invoke('personas:list');
+      const result = await invoke('personas:list');
       expect(result).toEqual(withoutArtifact);
       expect(setConfigValue).not.toHaveBeenCalledWith('personas',
         expect.arrayContaining([expect.objectContaining({ handle: 'artifact' })]));
@@ -941,7 +973,7 @@ describe('IPC handlers', () => {
       });
     });
 
-    it('does not re-add @sandbox after top-up has run', () => {
+    it('does not re-add @sandbox after top-up has run', async () => {
       // User intentionally deleted @sandbox post-top-up — respect that.
       vi.mocked(setConfigValue).mockClear();
       const cfg = vi.mocked(getConfigValue);
@@ -957,7 +989,7 @@ describe('IPC handlers', () => {
         return null as any;
       });
 
-      const result = invoke('personas:list');
+      const result = await invoke('personas:list');
       expect(result).toEqual(withoutSandbox);
       expect(setConfigValue).not.toHaveBeenCalledWith('personasSandboxSeeded', true);
       expect(setConfigValue).not.toHaveBeenCalledWith('personas',
@@ -990,12 +1022,12 @@ describe('IPC handlers', () => {
       runLocation: 'local',
     };
 
-    it('validates and saves personas (prepends default-agent when missing)', () => {
+    it('validates and saves personas (prepends default-agent when missing)', async () => {
       vi.mocked(setConfigValue).mockClear();
       const personas = [
         { id: 'p1', handle: 'reviewer', instructions: 'Review code', model: '', runLocation: 'local' },
       ];
-      const result = invoke('personas:save', personas);
+      const result = await invoke('personas:save', personas);
       expect(result).toEqual({ ok: true });
       expect(setConfigValue).toHaveBeenCalledWith('personas', [
         DEFAULT_AGENT_PERSONA,
@@ -1003,16 +1035,16 @@ describe('IPC handlers', () => {
       ]);
     });
 
-    it('returns error for non-array input', () => {
-      const result = invoke('personas:save', 'invalid');
+    it('returns error for non-array input', async () => {
+      const result = await invoke('personas:save', 'invalid');
       expect(result).toEqual({ error: 'invalid payload' });
     });
 
-    it('preserves sandboxed flag when true (with default-agent prepended)', () => {
+    it('preserves sandboxed flag when true (with default-agent prepended)', async () => {
       const personas = [
         { id: 'p1', handle: 'safe-bot', instructions: 'Read only', model: '', runLocation: 'local', sandboxed: true },
       ];
-      const result = invoke('personas:save', personas);
+      const result = await invoke('personas:save', personas);
       expect(result).toEqual({ ok: true });
       expect(setConfigValue).toHaveBeenCalledWith('personas', [
         DEFAULT_AGENT_PERSONA,
@@ -1020,11 +1052,11 @@ describe('IPC handlers', () => {
       ]);
     });
 
-    it('omits sandboxed flag when false or missing (with default-agent prepended)', () => {
+    it('omits sandboxed flag when false or missing (with default-agent prepended)', async () => {
       const personas = [
         { id: 'p1', handle: 'normal-bot', instructions: 'Do things', model: '', runLocation: 'local', sandboxed: false },
       ];
-      const result = invoke('personas:save', personas);
+      const result = await invoke('personas:save', personas);
       expect(result).toEqual({ ok: true });
       expect(setConfigValue).toHaveBeenCalledWith('personas', [
         DEFAULT_AGENT_PERSONA,
@@ -1032,11 +1064,11 @@ describe('IPC handlers', () => {
       ]);
     });
 
-    it('keeps a persona opted into canvas reports', () => {
+    it('keeps a persona opted into canvas reports', async () => {
       const personas = [
         { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: true },
       ];
-      const result = invoke('personas:save', personas);
+      const result = await invoke('personas:save', personas);
       expect(result).toEqual({ ok: true });
       expect(setConfigValue).toHaveBeenCalledWith('personas', [
         DEFAULT_AGENT_PERSONA,
@@ -1044,23 +1076,23 @@ describe('IPC handlers', () => {
       ]);
     });
 
-    it('keeps a named canvas type, so a persona can select its own layout', () => {
+    it('keeps a named canvas type, so a persona can select its own layout', async () => {
       const personas = [
         { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: 'digest' },
       ];
-      invoke('personas:save', personas);
+      await invoke('personas:save', personas);
       expect(setConfigValue).toHaveBeenCalledWith('personas', [
         DEFAULT_AGENT_PERSONA,
         { id: 'p1', handle: 'artifact', instructions: 'Make reports', model: '', runLocation: 'local', canvas: 'digest' },
       ]);
     });
 
-    it('drops the canvas flag when off, so a persona is never opted in by accident', () => {
+    it('drops the canvas flag when off, so a persona is never opted in by accident', async () => {
       const personas = [
         { id: 'p1', handle: 'plain', instructions: 'Do things', model: '', runLocation: 'local', canvas: false },
         { id: 'p2', handle: 'plain-two', instructions: 'Do things', model: '', runLocation: 'local', canvas: 'false' },
       ];
-      invoke('personas:save', personas);
+      await invoke('personas:save', personas);
       expect(setConfigValue).toHaveBeenCalledWith('personas', [
         DEFAULT_AGENT_PERSONA,
         { id: 'p1', handle: 'plain', instructions: 'Do things', model: '', runLocation: 'local' },
@@ -1068,14 +1100,14 @@ describe('IPC handlers', () => {
       ]);
     });
 
-    it('does not duplicate default-agent when caller already includes it', () => {
+    it('does not duplicate default-agent when caller already includes it', async () => {
       // When the editor passes the @agent persona through (the normal flow
       // when saving from the UI), the handler must NOT prepend a duplicate.
       const personas = [
         { id: 'default-agent', handle: 'agent', instructions: 'Custom @agent instructions', model: '', runLocation: 'local' },
         { id: 'p1', handle: 'reviewer', instructions: 'Review code', model: '', runLocation: 'local' },
       ];
-      const result = invoke('personas:save', personas);
+      const result = await invoke('personas:save', personas);
       expect(result).toEqual({ ok: true });
       expect(setConfigValue).toHaveBeenCalledWith('personas', [
         { id: 'default-agent', handle: 'agent', instructions: 'Custom @agent instructions', model: '', runLocation: 'local' },
@@ -1087,13 +1119,13 @@ describe('IPC handlers', () => {
   // ── CLI Runtimes ──────────────────────────────────────────────────
 
   describe('runtimes:save', () => {
-    it('resolves bare command names to full paths', () => {
+    it('resolves bare command names to full paths', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
       vi.mocked(resolveCommandOnPath).mockReturnValueOnce('/usr/local/bin/copilot-dev');
       vi.mocked(resolveCmdToJs).mockReturnValueOnce('/usr/local/bin/copilot-dev');
 
       const runtimes = [{ id: 'rt-1', label: 'Dev', path: 'copilot-dev' }];
-      const result = invoke('runtimes:save', runtimes);
+      const result = await invoke('runtimes:save', runtimes);
 
       expect(resolveCommandOnPath).toHaveBeenCalledWith('copilot-dev');
       expect(setConfigValue).toHaveBeenCalledWith('cliRuntimes', [
@@ -1102,12 +1134,12 @@ describe('IPC handlers', () => {
       expect(result).toMatchObject({ ok: true, runtimes: [{ id: 'rt-1', path: '/usr/local/bin/copilot-dev' }] });
     });
 
-    it('keeps path as-is when it exists on disk', () => {
+    it('keeps path as-is when it exists on disk', async () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(resolveCommandOnPath).mockClear();
 
       const runtimes = [{ id: 'rt-1', label: 'Local', path: '/opt/copilot/bin/copilot' }];
-      const result = invoke('runtimes:save', runtimes);
+      const result = await invoke('runtimes:save', runtimes);
 
       expect(resolveCommandOnPath).not.toHaveBeenCalled();
       expect(setConfigValue).toHaveBeenCalledWith('cliRuntimes', [
@@ -1120,9 +1152,9 @@ describe('IPC handlers', () => {
   // ── CLI tools ───────────────────────────────────────────────────
 
   describe('cli-tools:save', () => {
-    it('validates and saves tools', () => {
+    it('validates and saves tools', async () => {
       const tools = [{ name: 'tool1' }];
-      const result = invoke('cli-tools:save', tools);
+      const result = await invoke('cli-tools:save', tools);
       expect(validateCliTools).toHaveBeenCalledWith(tools);
       expect(setConfigValue).toHaveBeenCalledWith('cliTools', tools);
       expect(result).toEqual({ ok: true });
@@ -1132,8 +1164,8 @@ describe('IPC handlers', () => {
   // ── Misc ────────────────────────────────────────────────────────
 
   describe('space:events', () => {
-    it('returns events list', () => {
-      invoke('space:events', 50);
+    it('returns events list', async () => {
+      await invoke('space:events', 50);
       expect(listSpaceEvents).toHaveBeenCalledWith(50);
     });
   });
@@ -1172,8 +1204,8 @@ describe('IPC handlers', () => {
     });
 
     it('includes existing skill slugs in the prompt to avoid collisions', async () => {
-      const { listSkills } = await import('./database');
-      vi.mocked(listSkills).mockReturnValueOnce([
+      const { listSkills } = await import('./storage');
+      vi.mocked(listSkills).mockResolvedValueOnce([
         { id: 'pr-review', name: 'PR Review', description: '', folder: '', filePath: '', created_at: '', updated_at: '' },
         { id: 'issue-triage', name: 'Issue Triage', description: '', folder: '', filePath: '', created_at: '', updated_at: '' },
       ] as any);
@@ -1194,17 +1226,21 @@ describe('IPC handlers', () => {
       const read = vi.spyOn(fs, 'readFileSync').mockReturnValue('stub' as any);
       const exists = vi.spyOn(fs, 'existsSync').mockImplementation(((p: any) =>
         !String(p).endsWith('canvas.json')) as any);
-      return () => { read.mockRestore(); exists.mockRestore(); };
+      return () => {
+        read.mockRestore(); exists.mockRestore();
+        vi.mocked(parseFrontmatter).mockReset().mockImplementation(content => ({ frontmatter: {}, body: content }));
+      };
     }
 
     it('reports whether a skill publishes, reading SKILL.md rather than the DB', async () => {
-      const { listSkills } = await import('./database');
-      vi.mocked(listSkills).mockReturnValueOnce([
+      const { listSkills, getSkillCanvasSettings } = await import('./storage');
+      vi.mocked(getSkillCanvasSettings).mockResolvedValueOnce({ canvas: 'whim-report', space_mode: 'reuse', canvas_template: null });
+      vi.mocked(listSkills).mockResolvedValueOnce([
         { id: 'digest', name: 'Digest', description: '', folder: '', filePath: '/mock/workspace/.agents/skills/digest/SKILL.md', created_at: '', updated_at: '' },
       ] as any);
       const restore = stubSkillFile({ name: 'Digest', canvas: true, space_mode: 'reuse' });
 
-      const skills = invoke('skill:list');
+      const skills = await invoke('skill:list');
       restore();
 
       expect(skills[0].canvas).toBe('whim-report');
@@ -1212,23 +1248,23 @@ describe('IPC handlers', () => {
     });
 
     it('leaves canvas null for a skill that does not opt in', async () => {
-      const { listSkills } = await import('./database');
-      vi.mocked(listSkills).mockReturnValueOnce([
+      const { listSkills } = await import('./storage');
+      vi.mocked(listSkills).mockResolvedValueOnce([
         { id: 'digest', name: 'Digest', description: '', folder: '', filePath: '/mock/workspace/.agents/skills/digest/SKILL.md', created_at: '', updated_at: '' },
       ] as any);
       const restore = stubSkillFile({ name: 'Digest' });
 
-      const skills = invoke('skill:list');
+      const skills = await invoke('skill:list');
       restore();
 
       expect(skills[0].canvas).toBeNull();
     });
 
-    it('writes canvas: true for the built-in report so the file keeps no whim-specific id', () => {
+    it('writes canvas: true for the built-in report so the file keeps no whim-specific id', async () => {
       const restore = stubSkillFile({ name: 'Digest' });
       vi.mocked(serializeFrontmatter).mockClear();
 
-      invoke('skill:set-canvas', 'digest', 'whim-report', 'reuse');
+      await invoke('skill:set-canvas', 'digest', 'whim-report', 'reuse');
       const written = vi.mocked(serializeFrontmatter).mock.calls[0][0] as any;
       restore();
 
@@ -1236,11 +1272,11 @@ describe('IPC handlers', () => {
       expect(written.space_mode).toBe('reuse');
     });
 
-    it('records a skill template by id rather than as the built-in report', () => {
+    it('records a skill template by id rather than as the built-in report', async () => {
       const restore = stubSkillFile({ name: 'Digest' });
       vi.mocked(serializeFrontmatter).mockClear();
 
-      invoke('skill:set-canvas', 'digest', 'open-questions', 'new');
+      await invoke('skill:set-canvas', 'digest', 'open-questions', 'new');
       const written = vi.mocked(serializeFrontmatter).mock.calls[0][0] as any;
       restore();
 
@@ -1248,11 +1284,11 @@ describe('IPC handlers', () => {
       expect(written.space_mode).toBe('new');
     });
 
-    it('removes both fields when reports are turned off', () => {
+    it('removes both fields when reports are turned off', async () => {
       const restore = stubSkillFile({ name: 'Digest', canvas: true, space_mode: 'reuse' });
       vi.mocked(serializeFrontmatter).mockClear();
 
-      invoke('skill:set-canvas', 'digest', null, null);
+      await invoke('skill:set-canvas', 'digest', null, null);
       const written = vi.mocked(serializeFrontmatter).mock.calls[0][0] as any;
       restore();
 
@@ -1260,16 +1296,16 @@ describe('IPC handlers', () => {
       expect(written).not.toHaveProperty('space_mode');
     });
 
-    it('rejects a canvas id that is not a plain slug', () => {
+    it('rejects a canvas id that is not a plain slug', async () => {
       vi.mocked(fs.writeFileSync).mockClear();
-      const result = invoke('skill:set-canvas', 'digest', '../../etc/passwd', null);
+      const result = await invoke('skill:set-canvas', 'digest', '../../etc/passwd', null);
       expect(result).toEqual({ error: 'invalid_canvas' });
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
-    it('rejects an unknown space mode', () => {
+    it('rejects an unknown space mode', async () => {
       vi.mocked(fs.writeFileSync).mockClear();
-      const result = invoke('skill:set-canvas', 'digest', 'whim-report', 'sometimes');
+      const result = await invoke('skill:set-canvas', 'digest', 'whim-report', 'sometimes');
       expect(result).toEqual({ error: 'invalid_space_mode' });
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });

@@ -25,7 +25,15 @@ vi.mock('fs', async () => {
   return { ...actual, existsSync: vi.fn(() => true) };
 });
 
-vi.mock('../database', () => ({
+vi.mock('../storage', async () => ({
+  ...(await import('../workspace')),
+  ...(await import('../services/skill-schedule-store')),
+  ...(await import('../canvas/artifact-store')),
+  documentMatches: (await import('../storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   isInitialized: vi.fn(() => true),
   initDatabase: vi.fn(),
   closeDatabase: vi.fn(),
@@ -60,7 +68,18 @@ vi.mock('../workspace', () => ({
   gitPull: vi.fn(async () => ({ ok: true })),
   getDefaultProfileName: vi.fn(async () => 'repo'),
   invalidateProfileNameCache: vi.fn(),
+  cancelGitPolling: vi.fn(),
+  drainGitOperations: vi.fn(),
 }));
+vi.mock('../lifecycle', () => ({ flushEditors: vi.fn(async () => vi.fn()) }));
+vi.mock('../ai', () => ({ shutdownCopilot: vi.fn(), initCopilot: vi.fn() }));
+vi.mock('../agent-service', () => ({
+  stopCliExitMonitor: vi.fn(), startCliExitMonitor: vi.fn(),
+  stopWorkspaceAgents: vi.fn(), clearWorkspaceAgentState: vi.fn(),
+}));
+vi.mock('../cloud-agent-poller', () => ({ stopAllCloudPollers: vi.fn(), restoreActiveCloudPollers: vi.fn() }));
+vi.mock('../services/scheduler', () => ({ stopScheduler: vi.fn(), startScheduler: vi.fn() }));
+vi.mock('../window-manager', () => ({ destroySettingsWindow: vi.fn(), destroyCanvasWindow: vi.fn() }));
 
 vi.mock('../skill-watcher', () => ({
   startSkillWatcher: vi.fn(),
@@ -79,11 +98,12 @@ vi.mock('../voice', () => ({
 // ── Import after mocks ─────────────────────────────────────────────
 import { registerWorkspaceHandlers } from '../../main/ipc/workspace-handlers';
 import * as fs from 'fs';
-import { closeDatabase, initDatabase, mergeSessionIds, syncCanvasContent } from '../database';
+import { closeDatabase, initDatabase, mergeSessionIds, syncCanvasContent } from '../storage';
 import { setConfigValue, getConfig, getProfiles, getActiveProfileId, getProfileById, getNextProfile, upsertProfileForPath, setActiveProfile, updateProfile, removeProfileById } from '../config';
 import { initWorkspace, getGitSyncStatus, gitPush, gitPull } from '../workspace';
 import { startSkillWatcher, stopSkillWatcher } from '../skill-watcher';
 import { dialog, BrowserWindow } from 'electron';
+import { flushEditors } from '../lifecycle';
 
 const fakeEvent = { sender: { id: 1 } } as any;
 
@@ -105,6 +125,24 @@ describe('workspace handlers', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(fs.existsSync).mockReturnValue(true as any);
+  });
+
+  it('keeps the old profile and workspace intact when editor flushing fails', async () => {
+    vi.mocked(getProfileById).mockReturnValueOnce({ id: 'new', path: '/new', name: null, tint: null });
+    vi.mocked(flushEditors).mockRejectedValueOnce(new Error('Unsaved conflict'));
+    await expect(invoke('profiles:activate', 'new')).rejects.toThrow('Unsaved conflict');
+    expect(setActiveProfile).not.toHaveBeenCalled();
+    expect(setConfigValue).not.toHaveBeenCalled();
+    expect(closeDatabase).not.toHaveBeenCalled();
+  });
+
+  it('flushes before changing profile configuration and restores the old database on initialization failure', async () => {
+    vi.mocked(getProfileById).mockReturnValueOnce({ id: 'new', path: '/new', name: null, tint: null });
+    vi.mocked(initDatabase).mockRejectedValueOnce(new Error('Recovery failed'));
+    await expect(invoke('profiles:activate', 'new')).rejects.toThrow('Recovery failed');
+    expect(setActiveProfile).not.toHaveBeenCalledWith('new');
+    expect(setConfigValue).not.toHaveBeenCalledWith('workspace', '/new');
+    expect(initDatabase).toHaveBeenLastCalledWith('/mock/workspace/.whim/spaces.db', '/mock/workspace/.whim/events');
   });
 
   describe('workspace:clear', () => {
@@ -143,9 +181,9 @@ describe('workspace handlers', () => {
 
       const callOrder: string[] = [];
       vi.mocked(stopSkillWatcher).mockImplementation(() => { callOrder.push('stop'); });
-      vi.mocked(closeDatabase).mockImplementation(() => { callOrder.push('close'); });
+      vi.mocked(closeDatabase).mockImplementation(async () => { callOrder.push('close'); });
       vi.mocked(initWorkspace).mockImplementation(() => { callOrder.push('init-ws'); });
-      vi.mocked(initDatabase).mockImplementation(() => { callOrder.push('init-db'); });
+      vi.mocked(initDatabase).mockImplementation(async () => { callOrder.push('init-db'); });
 
       await invoke('workspace:select');
 

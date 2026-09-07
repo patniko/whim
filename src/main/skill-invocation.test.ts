@@ -2,17 +2,32 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import type { ScheduledInvocation, SkillSchedule } from '../shared/skill-schedule';
 
 let workspace = '';
 const spaces: any[] = [];
 const skills = new Map<string, any>();
 const launchCalls: any[] = [];
+let savedSchedule: SkillSchedule | null = null;
+
+vi.mock('./services/skill-schedule-store', () => ({
+  getSkillSchedule: () => savedSchedule,
+}));
+vi.mock('./notify', () => ({ notifyAllWindows: vi.fn() }));
 
 vi.mock('./config', () => ({
   getConfigValue: (key: string) => (key === 'workspace' ? workspace : undefined),
 }));
 
-vi.mock('./database', () => ({
+vi.mock('./storage', async () => ({
+  ...(await import('./workspace')),
+  ...(await import('./services/skill-schedule-store')),
+  ...(await import('./canvas/artifact-store')),
+  documentMatches: (await import('./storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   createSpace: (input: any, skillId?: string) => {
     const space = { id: `space-${spaces.length + 1}`, description: input.body, source_skill_id: skillId, folder: null };
     spaces.push(space);
@@ -23,6 +38,7 @@ vi.mock('./database', () => ({
     if (space) space.folder = folder;
   },
   getSkill: (id: string) => skills.get(id) ?? null,
+  getSpace: (id: string) => spaces.find(s => s.id === id) ?? null,
   getLatestSpaceForSkill: (skillId: string) =>
     [...spaces].reverse().find(s => s.source_skill_id === skillId) ?? null,
   hasActiveAgentForSpace: () => false,
@@ -66,6 +82,7 @@ beforeEach(() => {
   spaces.length = 0;
   skills.clear();
   launchCalls.length = 0;
+  savedSchedule = null;
 });
 
 afterEach(() => {
@@ -278,3 +295,91 @@ describe('concurrent invocation', () => {
     expect(second.space.id).toBe(first.space.id);
   });
 });
+
+  describe('scheduled results on the main canvas', () => {
+    const occurrence: ScheduledInvocation = {
+      scheduleId: 'schedule-1',
+      runId: 'run-1',
+      scheduledAt: '2026-09-07T16:00:00.000Z',
+      timeZone: 'America/Los_Angeles',
+      readOnlyServers: ['chat'],
+    };
+
+    it('creates a dated space with a linked, snapshotted skill and no report contract', async () => {
+      addSkill('missed-messages', 'canvas: true\nspace_mode: reuse');
+      const result = await invokeSkill({
+        skillId: 'missed-messages', source: 'schedule', run: true, scheduledRun: occurrence,
+      });
+      if (!('space' in result)) throw new Error(result.error);
+      const fm = frontmatterOf(result.canvasContent);
+      expect(result.space.description).toBe('missed-messages - Sep 7, 2026');
+      expect(fm.skills).toEqual(['missed-messages']);
+      expect(fm.canvas_artifacts).toBe(false);
+      expect(fm.space_mode).toBe('new');
+      expect(fm.instructions).toContain('publish_scheduled_result');
+      expect(fm.instructions).not.toContain('Report artifact (required)');
+      expect(fm.skill_invocation).toMatchObject({
+        schedule_id: 'schedule-1', run_id: 'run-1', instruction_snapshot: 'skill-instructions.md',
+      });
+      const snapshot = path.join(workspace, result.space.folder!, 'skill-instructions.md');
+      expect(fs.readFileSync(snapshot, 'utf-8')).toBe(fs.readFileSync(skills.get('missed-messages').filePath, 'utf-8'));
+      expect(launchCalls[0][3].scheduledRun).toEqual(occurrence);
+    });
+
+    it('creates a fresh occurrence without losing yesterday\'s follow-up decisions', async () => {
+      addSkill('missed-messages', 'canvas: true\nspace_mode: reuse');
+      const first = await invokeSkill({ skillId: 'missed-messages', source: 'schedule', scheduledRun: occurrence });
+      if (!('space' in first)) throw new Error(first.error);
+      const previousPath = path.join(workspace, first.space.folder!, 'canvas.md');
+      fs.appendFileSync(previousPath, '\n- [x] Replied to Dana [thread](https://chat.example/123)\n');
+      const previous = fs.readFileSync(previousPath, 'utf-8');
+      const second = await invokeSkill({
+        skillId: 'missed-messages', source: 'schedule',
+        scheduledRun: { ...occurrence, runId: 'run-2', previousSpaceId: first.space.id, lastSuccessfulAt: occurrence.scheduledAt },
+      });
+      if (!('space' in second)) throw new Error(second.error);
+      expect(second.space.id).not.toBe(first.space.id);
+      expect(fs.readFileSync(previousPath, 'utf-8')).toBe(previous);
+      expect(frontmatterOf(second.canvasContent).instructions).toContain(previousPath);
+      expect(frontmatterOf(second.canvasContent).instructions).toContain('checked-off or dismissed items');
+    });
+
+    it('uses the saved schedule for Run now without consuming its occurrence', async () => {
+      addSkill('missed-messages', '');
+      savedSchedule = {
+        id: 'schedule-1', skillId: 'missed-messages', frequency: 'daily', time: '09:00', day: null,
+        timeZone: occurrence.timeZone, readOnlyServers: ['chat'], intent: 'Look for unanswered mentions',
+        enabled: true, output: 'canvas', nextRunAt: occurrence.scheduledAt,
+        createdAt: occurrence.scheduledAt, updatedAt: occurrence.scheduledAt,
+      };
+      const before = structuredClone(savedSchedule);
+      const result = await invokeSkill({ skillId: 'missed-messages', run: true, source: 'skill-card' });
+      if (!('space' in result)) throw new Error(result.error);
+      expect(launchCalls[0][3].scheduledRun.manual).toBe(true);
+      expect(frontmatterOf(result.canvasContent).instructions).toContain('Look for unanswered mentions');
+      expect(savedSchedule).toEqual(before);
+    });
+
+    it('preserves the main canvas when an existing legacy schedule refreshes a report', async () => {
+      addSkill('reporter', 'canvas: true\nspace_mode: reuse');
+      const first = await invokeSkill({ skillId: 'reporter', source: 'schedule' });
+      if (!('space' in first)) throw new Error(first.error);
+      const canvasPath = path.join(workspace, first.space.folder!, 'canvas.md');
+      fs.appendFileSync(canvasPath, '\n## My notes\n\nKeep my drafted reply.\n');
+      const second = await invokeSkill({
+        skillId: 'reporter', source: 'schedule', scheduledRun: { ...occurrence, output: 'legacy' },
+      });
+      if (!('space' in second)) throw new Error(second.error);
+      expect(second.space.id).toBe(first.space.id);
+      expect(second.canvasContent).toContain('Keep my drafted reply.');
+      expect(frontmatterOf(second.canvasContent).canvas_artifacts).toBe(WHIM_REPORT_CANVAS_ID);
+    });
+
+    it('fails explicitly if the skill instructions cannot be read', async () => {
+      addSkill('missing', '');
+      fs.unlinkSync(skills.get('missing').filePath);
+      const result = await invokeSkill({ skillId: 'missing', scheduledRun: occurrence });
+      expect(result).toEqual({ error: expect.stringContaining('Could not read the skill instructions') });
+      expect(spaces).toHaveLength(0);
+    });
+  });

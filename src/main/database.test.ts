@@ -8,15 +8,16 @@ vi.mock('electron', () => ({
   app: { getPath: () => '/mock/electron-path' },
 }));
 
-// Mock eventlog — spy on appendEvent, no-op replayLog
-vi.mock('./eventlog', () => ({
-  appendEvent: vi.fn(),
-  replayLog: vi.fn(),
-}));
+// Spy on real durable append receipts, but isolate these unit tests from replay.
+vi.mock('./eventlog', async original => {
+  const actual = await original<typeof import('./eventlog')>();
+  return { ...actual, appendEvent: vi.fn(actual.appendEvent), replayLog: vi.fn() };
+});
 
 // Mock workspace — readCanvas returns configurable content
 vi.mock('./workspace', () => ({
   readCanvas: vi.fn(() => ''),
+  resolveSpaceFolder: (root: string, folder: string) => path.join(root, folder),
   slugify: vi.fn((text: string, spaceId: string) => {
     const slug = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'space';
     return `${slug}-${spaceId.replace(/-/g, '').slice(0, 4)}`;
@@ -360,13 +361,15 @@ describe('database', () => {
       assignSpaceFolder(space.id, 'test-folder');
 
       vi.mocked(readCanvas).mockReturnValue('# Canvas Content\nHello world');
-      syncCanvasContent('/fake/workspace');
+      fs.mkdirSync(path.join(testDir, 'test-folder'));
+      fs.writeFileSync(path.join(testDir, 'test-folder', 'canvas.md'), '# Canvas Content\nHello world');
+      syncCanvasContent(testDir);
 
       // canvas_content isn't in the Space type — verify via raw DB
       const row = getDatabase().prepare('SELECT canvas_content FROM spaces WHERE id = ?').get(space.id) as any;
       expect(row.canvas_content).toBe('# Canvas Content\nHello world');
       expect(getSpace(space.id)!.description).toBe('Canvas Content');
-      expect(readCanvas).toHaveBeenCalledWith('/fake/workspace', 'test-folder');
+      expect(readCanvas).toHaveBeenCalledWith(testDir, 'test-folder');
     });
 
     it('skips spaces without folders', () => {

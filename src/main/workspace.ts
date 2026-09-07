@@ -6,6 +6,8 @@ import type { GitSyncStatus } from '../shared/ipc-contract';
 import { mirrorRendererEvent } from './web/event-hub';
 import { getLogRoot as getLogRootForWhim, migrateLegacyEventLog } from './log-store';
 import { ensureMarkdownH1Title } from '../shared/markdown-title';
+import { GitQueue } from './git-queue';
+import { startTiming } from '../shared/performance';
 
 const WHIM_DIR = '.whim';
 const DB_FILE = 'spaces.db';
@@ -350,14 +352,17 @@ function runGitOutput(workspaceRoot: string, args: string[]): Promise<string> {
 }
 
 /** Run a git command with longer timeout for network operations (fetch/push/pull). */
-function runGitNetwork(workspaceRoot: string, args: string[]): Promise<string> {
+function runGitNetwork(workspaceRoot: string, args: string[], signal?: AbortSignal): Promise<string> {
+  const end = startTiming('git.network');
   return new Promise((resolve, reject) => {
     execFile('git', args, {
       cwd: workspaceRoot,
       timeout: 60000,
       maxBuffer: 1024 * 1024,
+      signal,
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
     }, (err, stdout) => {
+      end(!err);
       if (err) reject(err);
       else resolve(stdout);
     });
@@ -367,12 +372,44 @@ function runGitNetwork(workspaceRoot: string, args: string[]): Promise<string> {
 // ── Git operation queue ─────────────────────────────────
 // Serializes all git operations to prevent .git/index.lock races.
 
-let gitQueuePromise = Promise.resolve<unknown>(undefined);
+const gitQueue = new GitQueue();
 
 function enqueueGitOp<T>(fn: () => Promise<T>): Promise<T> {
-  const p = gitQueuePromise.then(fn, fn);
-  gitQueuePromise = p.catch(() => {});
-  return p;
+  return gitQueue.enqueue(fn);
+}
+
+export function cancelGitPolling(): void { gitQueue.cancelBackground(); }
+export async function drainGitOperations(): Promise<void> {
+  if (commitTimer) clearTimeout(commitTimer);
+  commitTimer = null;
+  await gitQueue.drain();
+}
+
+async function stageWorkspace(workspaceRoot: string): Promise<void> {
+  const paths = (await runGitOutput(workspaceRoot, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']))
+    .split('\0').filter(Boolean);
+  const large: string[] = [];
+  for (const file of new Set(paths)) {
+    try {
+      const stat = await fs.promises.lstat(path.join(workspaceRoot, file));
+      if (stat.isFile() && stat.size > 50 * 1024 * 1024) large.push(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  // Exclude BEFORE add: hashing a giant file and then resetting it is too late.
+  await runGit(workspaceRoot, ['add', '-A', '--', '.', ...large.map(file => `:(top,exclude,literal)${file}`)]);
+  if (large.length) {
+    const staged = new Set((await runGitOutput(workspaceRoot, ['diff', '--cached', '--name-only', '-z'])).split('\0'));
+    const stagedLarge = large.filter(file => staged.has(file));
+    let hasHead = true;
+    try { await runGit(workspaceRoot, ['rev-parse', '--verify', 'HEAD']); }
+    catch { hasHead = false; }
+    if (stagedLarge.length) await runGit(workspaceRoot, hasHead
+      ? ['restore', '--staged', '--', ...stagedLarge]
+      : ['rm', '--cached', '--ignore-unmatch', '--', ...stagedLarge]);
+    console.warn('[workspace] Excluded oversized files from auto-commit:', { count: large.length, limitBytes: 50 * 1024 * 1024 });
+  }
 }
 
 async function doCommit(workspaceRoot: string): Promise<void> {
@@ -384,26 +421,12 @@ async function doCommit(workspaceRoot: string): Promise<void> {
       await runGit(workspaceRoot, ['rev-parse', '--git-dir']);
 
       // Stage the .whim/ dir (event log) and all tracked/new files (space folders)
-      await runGit(workspaceRoot, ['add', '-A']);
-
-      // Large file guard: unstage files >50MB to avoid LFS issues
-      try {
-        const staged = await runGitOutput(workspaceRoot, ['diff', '--cached', '--name-only']);
-        const largeFiles: string[] = [];
-        for (const file of staged.split('\n').filter(f => f.trim())) {
-          const fullPath = path.join(workspaceRoot, file);
-          try {
-            const stat = fs.statSync(fullPath);
-            if (stat.size > 50 * 1024 * 1024) {
-              largeFiles.push(file);
-            }
-          } catch { /* file may have been deleted */ }
-        }
-        if (largeFiles.length > 0) {
-          await runGit(workspaceRoot, ['reset', 'HEAD', '--', ...largeFiles]);
-          console.warn(`[workspace] Skipped large files (>50MB): ${largeFiles.join(', ')}`);
-        }
-      } catch { /* non-critical — proceed with commit */ }
+      const storage = await import('./storage');
+      if (storage.isInitialized()) {
+        await storage.withStorageBarrier(() => stageWorkspace(workspaceRoot));
+      } else {
+        await stageWorkspace(workspaceRoot);
+      }
 
       // Check if there's anything to commit
       try {
@@ -431,6 +454,7 @@ async function doCommit(workspaceRoot: string): Promise<void> {
         return;
       }
       console.warn('[workspace] Auto-commit failed:', err?.message || err);
+      throw err;
     } finally {
       commitInFlight = false;
     }
@@ -445,7 +469,7 @@ export function scheduleAutoCommit(workspaceRoot: string): void {
   if (commitTimer) clearTimeout(commitTimer);
   commitTimer = setTimeout(() => {
     commitTimer = null;
-    doCommit(workspaceRoot);
+    void doCommit(workspaceRoot).catch(error => console.error('[workspace] Scheduled commit failed:', error));
   }, COMMIT_DEBOUNCE_MS);
 }
 
@@ -468,7 +492,6 @@ const UNAVAILABLE: GitSyncStatus = { available: false, branch: null, ahead: 0, b
 
 /** Get sync status relative to the upstream tracking branch. */
 export async function getGitSyncStatus(workspaceRoot: string): Promise<GitSyncStatus> {
-  return enqueueGitOp(async () => {
     try {
       // Check if git repo
       await runGit(workspaceRoot, ['rev-parse', '--git-dir']);
@@ -492,7 +515,8 @@ export async function getGitSyncStatus(workspaceRoot: string): Promise<GitSyncSt
       }
 
       // Get ahead/behind counts
-      const output = (await runGitOutput(workspaceRoot, ['rev-list', '--count', '--left-right', `HEAD...${branch}@{upstream}`])).trim();
+      const refs = (await runGitOutput(workspaceRoot, ['rev-parse', 'HEAD', `${branch}@{upstream}`])).trim().split(/\s+/);
+      const output = (await runGitOutput(workspaceRoot, ['rev-list', '--count', '--left-right', `${refs[0]}...${refs[1]}`])).trim();
       const [aheadStr, behindStr] = output.split(/\s+/);
       const ahead = parseInt(aheadStr, 10) || 0;
       const behind = parseInt(behindStr, 10) || 0;
@@ -501,14 +525,13 @@ export async function getGitSyncStatus(workspaceRoot: string): Promise<GitSyncSt
     } catch {
       return { ...UNAVAILABLE, unavailableReason: 'not-a-repo' };
     }
-  });
 }
 
 /** Fetch from origin. */
-export async function gitFetchOrigin(workspaceRoot: string): Promise<void> {
-  return enqueueGitOp(async () => {
-    await runGitNetwork(workspaceRoot, ['fetch', 'origin', '--quiet']);
-  });
+export async function gitFetchOrigin(workspaceRoot: string, background = false): Promise<void> {
+  return gitQueue.enqueue(async signal => {
+    await runGitNetwork(workspaceRoot, ['fetch', 'origin', '--quiet'], signal);
+  }, background);
 }
 
 /** Push current branch to origin. Flushes pending auto-commit first. */
@@ -539,7 +562,25 @@ export async function gitPull(workspaceRoot: string): Promise<{ ok: true } | { e
   return enqueueGitOp(async () => {
     try {
       const branch = (await runGitOutput(workspaceRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
-      await runGitNetwork(workspaceRoot, ['pull', '--ff-only', 'origin', branch]);
+      const { withStorageBarrier, applyIncomingChanges, syncCanvasContent, mergeSessionIds, getStorageGeneration } = await import('./storage');
+      const generation = getStorageGeneration();
+      await runGitNetwork(workspaceRoot, ['fetch', 'origin', branch]);
+      if (generation !== getStorageGeneration()) throw new Error('Workspace changed during fetch');
+      await withStorageBarrier(async () => {
+        const endReconcile = startTiming('git.reconcile');
+        try {
+        await runGit(workspaceRoot, ['merge', '--ff-only', 'FETCH_HEAD']);
+        await applyIncomingChanges();
+        const { getConfigValue } = await import('./config');
+        await mergeSessionIds(getConfigValue('sessions'));
+        await syncCanvasContent(workspaceRoot);
+        const { syncAllSkills } = await import('./skill-watcher');
+        await syncAllSkills(workspaceRoot);
+        const { refreshWatchedCanvases } = await import('./canvas-watcher');
+        await refreshWatchedCanvases();
+        endReconcile();
+        } catch (error) { endReconcile(false); throw error; }
+      });
 
       // Notify renderer so history/canvas can refresh
       for (const win of BrowserWindow.getAllWindows()) {
@@ -616,6 +657,7 @@ export async function getSpaceHistory(workspaceRoot: string, folder: string, lim
 
 /** Restore an space folder to a specific commit's state. */
 export async function restoreSpaceVersion(workspaceRoot: string, folder: string, sha: string): Promise<{ success: boolean; error?: string }> {
+  return enqueueGitOp(async () => {
   try {
     // Validate sha looks legit
     if (!/^[0-9a-f]{7,40}$/.test(sha)) {
@@ -626,7 +668,7 @@ export async function restoreSpaceVersion(workspaceRoot: string, folder: string,
     await runGit(workspaceRoot, ['checkout', sha, '--', `${folder}/`]);
 
     // Auto-commit the restoration
-    await runGit(workspaceRoot, ['add', '-A']);
+    await stageWorkspace(workspaceRoot);
     try {
       await runGit(workspaceRoot, ['diff', '--cached', '--quiet']);
       // No changes — already at this version
@@ -643,6 +685,7 @@ export async function restoreSpaceVersion(workspaceRoot: string, folder: string,
   } catch (err: any) {
     return { success: false, error: err?.message || 'Restore failed' };
   }
+  });
 }
 
 // ── Attachment handling ─────────────────────────────────

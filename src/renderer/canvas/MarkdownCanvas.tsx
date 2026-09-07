@@ -8,6 +8,7 @@ import React, {
   forwardRef,
 } from 'react';
 import { MilkdownEditor, type MilkdownEditorHandle } from './editor/MilkdownEditor';
+import { startTiming } from '../../shared/performance';
 import type {
   CanvasUser,
   CanvasPresence,
@@ -26,6 +27,7 @@ import { FrontmatterEditor } from './FrontmatterEditor';
 import { VoiceRecorderButton, type VoiceRecordingResult } from './VoiceRecorderButton';
 import { SpaceLinkPicker, type SpaceResult } from './SpaceLinkPicker';
 import { merge3 } from '../../shared/text-merge';
+import { mergeCanvasDocument } from './document-merge';
 import { hasDisplayableFrontmatter, serializeFrontmatter, tryParseFrontmatter } from '../../shared/frontmatter';
 import { deriveMarkdownTitle } from '../../shared/markdown-title';
 import { isWebRemote } from '../transport-mode';
@@ -263,11 +265,6 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       return hasFrontmatterRef.current ? serializeFm(frontmatterRef.current, withComments) : withComments;
     }, []);
 
-    /** Strip frontmatter, returning the body+comments region. */
-    const stripFm = useCallback((full: string) => {
-      return hasFrontmatterRef.current ? (tryParseFm(full)?.body ?? full) : full;
-    }, []);
-
     const initialFull = useMemo(
       () => buildFull(initialSplit.body, initialSplit.threads),
       [buildFull, initialSplit],
@@ -277,6 +274,11 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     const lastDiskContentRef = useRef(initialFull);
     const pendingSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const savingRef = useRef(false);
+    const mergeControllerRef = useRef<AbortController | null>(null);
+    const mergeRevisionRef = useRef(0);
+    const mountedRef = useRef(true);
+    const unresolvedMergeRef = useRef<{ disk: string; base: string; acknowledgement: boolean } | null>(null);
+    const reconcileRef = useRef<((disk: string, base: string, acknowledgement: boolean) => Promise<boolean>) | null>(null);
 
     const [isDragging, setIsDragging] = useState(false);
     const [personas, setPersonas] = useState<AgentPersona[]>(initialPersonas || []);
@@ -368,46 +370,53 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       if (savingPromiseRef.current) {
         saveRequestedDuringSaveRef.current = true;
         const inFlightResult = await savingPromiseRef.current;
-        if (getFullContent() !== lastSavedRef.current) {
+        if (getFullContent() !== lastSavedRef.current || unresolvedMergeRef.current) {
           return doSaveRef.current?.() ?? { success: false, error: 'save_failed' };
         }
         return inFlightResult;
+      }
+      const unresolved = unresolvedMergeRef.current;
+      if (unresolved && !(await reconcileRef.current?.(unresolved.disk, unresolved.base, unresolved.acknowledgement))) {
+        return { success: false, error: 'merge_unresolved: Both versions retained; save a separate copy before closing.' };
       }
       const fullContent = getFullContent();
       if (fullContent === lastSavedRef.current) return { success: true };
 
       savingRef.current = true;
+      const endSave = startTiming('save.document');
       const savePromise = (async (): Promise<CanvasSaveResult> => {
         try {
           const result = await whimAPI.writeCanvas(spaceId, fullContent);
           if (!result?.success) {
-            onSaveStatus('✗ save failed');
-            setTimeout(() => onSaveStatus(''), 3000);
+            endSave(false);
+            onSaveStatus(`✗ save failed${result?.error ? `: ${result.error}` : ''}`);
             return result ?? { success: false, error: 'save_failed' };
           }
           const savedContent = result.content ?? fullContent;
+          endSave();
+          if (!mountedRef.current) return { success: true, content: result.content };
           lastSavedRef.current = savedContent;
-          lastDiskContentRef.current = savedContent;
           if (savedContent !== fullContent) {
-            const region = stripFm(savedContent);
-            const { body, threads: savedThreads } = splitComments(region);
-            setContent(body);
-            contentRef.current = body;
-            emitTitleChange(body);
-            setThreads(savedThreads);
-            threadsRef.current = savedThreads;
-            if (editorModeRef.current === 'raw') {
-              setRawContent(savedContent);
-              rawContentRef.current = savedContent;
-            } else {
-              editorRef.current?.replaceAll(body);
+            // Rebase edits made while the durable save was in flight. Never
+            // apply an acknowledgement directly over a newer local revision.
+            if (unresolvedMergeRef.current ||
+              !(await reconcileRef.current?.(savedContent, fullContent, true))) {
+              onSaveStatus('Saved version differs; external merge unresolved. Local edits retained.');
+              return { success: false, error: 'merge_unresolved' };
             }
+          } else if (!unresolvedMergeRef.current) {
+            lastDiskContentRef.current = savedContent;
           }
-          onDirtyChange(getFullContent() !== lastSavedRef.current);
-          onSaveStatus('Saved ✓');
-          setTimeout(() => onSaveStatus(''), 1500);
+          if (unresolvedMergeRef.current) return { success: false, error: 'merge_unresolved' };
+          const dirty = getFullContent() !== lastSavedRef.current;
+          onDirtyChange(dirty);
+          onSaveStatus(dirty ? 'Saving…' : 'Saved ✓');
+          setTimeout(() => {
+            if (!unresolvedMergeRef.current && getFullContent() === lastSavedRef.current) onSaveStatus('');
+          }, 1500);
           return { success: true, content: result.content };
         } catch {
+          endSave(false);
           onSaveStatus('✗ save failed');
           setTimeout(() => onSaveStatus(''), 3000);
           return { success: false, error: 'save_failed' };
@@ -427,7 +436,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
           }
         }
       }
-    }, [spaceId, onDirtyChange, onSaveStatus, getFullContent, stripFm, emitTitleChange]);
+    }, [spaceId, onDirtyChange, onSaveStatus, getFullContent]);
     doSaveRef.current = doSave;
 
     const scheduleSave = useCallback(() => {
@@ -443,10 +452,19 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
         clearTimeout(pendingSaveRef.current);
         pendingSaveRef.current = null;
       }
-      return doSave();
-    }, [doSave]);
+      // Explicit save/close must acknowledge the latest revision, not just the
+      // document that happened to be in flight when the user clicked Save.
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const result = await doSave();
+        if (!result.success) return result;
+        if (getFullContent() === lastSavedRef.current && !unresolvedMergeRef.current) return result;
+      }
+      onSaveStatus('Document is still changing; local edits retained. Try saving again.');
+      return { success: false, error: 'document_still_changing' };
+    }, [doSave, getFullContent, onSaveStatus]);
 
     const markDirtyAndSave = useCallback(() => {
+      mergeRevisionRef.current++;
       const dirty = getFullContent() !== lastSavedRef.current;
       onDirtyChange(dirty);
       if (dirty) {
@@ -503,6 +521,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     }, [markDirtyAndSave]);
 
     const handleToggleMode = useCallback((): { mode: EditorMode; error?: string } => {
+      mergeRevisionRef.current++;
       if (editorModeRef.current === 'rendered') {
         const full = buildFull(contentRef.current, threadsRef.current);
         setRawContent(full);
@@ -555,6 +574,70 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       markDirtyAndSave();
     }, [emitTitleChange, hasFrontmatter, markDirtyAndSave]);
 
+    const reconcileExternal = useCallback(async (disk: string, base: string, acknowledgement: boolean): Promise<boolean> => {
+      mergeControllerRef.current?.abort();
+      const controller = new AbortController();
+      mergeControllerRef.current = controller;
+      const pending = { disk, base, acknowledgement };
+      unresolvedMergeRef.current = pending;
+      if (pendingSaveRef.current) {
+        clearTimeout(pendingSaveRef.current);
+        pendingSaveRef.current = null;
+      }
+      try {
+        // A typing burst may invalidate a result. Recompute from the unchanged
+        // ancestor, but bound retries so continuous typing cannot queue copies.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const local = getFullContent();
+          const revision = mergeRevisionRef.current;
+          const mode = editorModeRef.current;
+          const rawDirty = mode === 'raw' && local !== lastSavedRef.current;
+          const merged = await mergeCanvasDocument(
+            base, local, disk, rawDirty || acknowledgement,
+            hasFrontmatterRef.current, controller.signal,
+          );
+          if (controller.signal.aborted || !mountedRef.current || unresolvedMergeRef.current !== pending) return false;
+          if (revision !== mergeRevisionRef.current || local !== getFullContent() || mode !== editorModeRef.current) continue;
+          if (acknowledgement && mode !== 'raw' && hasFrontmatterRef.current && !merged.frontmatter) {
+            throw new Error('Merged frontmatter is invalid; save a separate copy and resolve it in raw mode');
+          }
+          setContent(merged.body);
+          contentRef.current = merged.body;
+          setThreads(merged.threads);
+          threadsRef.current = merged.threads;
+          if (hasFrontmatterRef.current && (merged.frontmatter || !rawDirty)) {
+            setFrontmatter(merged.frontmatter ?? {});
+            frontmatterRef.current = merged.frontmatter ?? {};
+          }
+          if (mode === 'raw') {
+            setRawContent(merged.full);
+            rawContentRef.current = merged.full;
+          } else {
+            editorRef.current?.replaceAll(merged.body, { animate: true });
+          }
+          mergeRevisionRef.current++;
+          lastDiskContentRef.current = merged.synchronizedDisk;
+          unresolvedMergeRef.current = null;
+          emitTitleChange(merged.body);
+          const dirty = (rawDirty && !acknowledgement) || merged.full !== merged.synchronizedDisk;
+          if (!dirty) lastSavedRef.current = merged.full;
+          onDirtyChange(dirty);
+          if (dirty && mode === 'raw' && !acknowledgement) {
+            onSaveStatus('External changes merged — review and save');
+          } else if (dirty) {
+            scheduleSave();
+          }
+          return true;
+        }
+        onSaveStatus('Merge paused while editing. Both versions retained; press Save to retry.');
+      } catch (error) {
+        if (controller.signal.aborted || !mountedRef.current) return false;
+        onSaveStatus(`Merge failed: ${error instanceof Error ? error.message : 'merge_failed'}. Local edits and disk version retained.`);
+      }
+      return false;
+    }, [getFullContent, onDirtyChange, onSaveStatus, scheduleSave, emitTitleChange]);
+    reconcileRef.current = reconcileExternal;
+
     useImperativeHandle(ref, () => ({
       saveNow,
       getContent: () => getFullContent(),
@@ -577,95 +660,8 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       },
       updateFrontmatter: handleFrontmatterChange,
       replaceContent: (newDiskContent: string) => {
-        if (editorModeRef.current === 'raw' && rawContentRef.current !== lastSavedRef.current) {
-          const merged = mergeDirtyRawExternalChange(lastDiskContentRef.current, rawContentRef.current, newDiskContent);
-          setRawContent(merged);
-          rawContentRef.current = merged;
-          const parsed = hasFrontmatterRef.current ? tryParseFm(merged) : null;
-          const region = parsed?.body ?? merged;
-          const { body, threads: mergedThreads } = splitComments(region);
-          setContent(body);
-          contentRef.current = body;
-          setThreads(mergedThreads);
-          threadsRef.current = mergedThreads;
-          if (parsed) {
-            setFrontmatter(parsed.frontmatter);
-            frontmatterRef.current = parsed.frontmatter;
-          }
-          lastDiskContentRef.current = newDiskContent;
-          emitTitleChange(body);
-          onDirtyChange(true);
-          onSaveStatus('External changes merged — review and save');
-          return;
-        }
-
-        // Strip frontmatter first for frontmatter-backed canvases, so the
-        // comments split + merge operate on the body region (not the YAML block).
-        let region = newDiskContent;
-        if (hasFrontmatterRef.current) {
-          const parsed = tryParseFm(newDiskContent);
-          if (parsed) {
-            setFrontmatter(parsed.frontmatter);
-            frontmatterRef.current = parsed.frontmatter;
-            region = parsed.body;
-          } else {
-            setFrontmatter({});
-            frontmatterRef.current = {};
-          }
-        }
-        const { body: diskBody, threads: diskThreads } = splitComments(region);
-
-        // Comments are authoritative from disk.
-        setThreads(diskThreads);
-        threadsRef.current = diskThreads;
-
-        if (editorModeRef.current === 'raw') {
-          const full = buildFull(diskBody, diskThreads);
-          if (pendingSaveRef.current) { clearTimeout(pendingSaveRef.current); pendingSaveRef.current = null; }
-          setRawContent(full);
-          rawContentRef.current = full;
-          setContent(diskBody);
-          contentRef.current = diskBody;
-          emitTitleChange(diskBody);
-          lastSavedRef.current = full;
-          lastDiskContentRef.current = full;
-          onDirtyChange(false);
-          return;
-        }
-
-        const currentBody = contentRef.current;
-        const baseBody = splitComments(stripFm(lastDiskContentRef.current)).body;
-        const fullDisk = buildFull(diskBody, diskThreads);
-        lastDiskContentRef.current = fullDisk;
-
-        // Fast path: no local edits since last disk sync.
-        if (currentBody === baseBody) {
-          if (pendingSaveRef.current) { clearTimeout(pendingSaveRef.current); pendingSaveRef.current = null; }
-          setContent(diskBody);
-          contentRef.current = diskBody;
-          emitTitleChange(diskBody);
-          editorRef.current?.replaceAll(diskBody, { animate: true });
-          lastSavedRef.current = fullDisk;
-          onDirtyChange(false);
-          return;
-        }
-
-        // Merge path: three-way merge of the body.
-        const { merged } = merge3(baseBody, currentBody, diskBody);
-        if (pendingSaveRef.current) { clearTimeout(pendingSaveRef.current); pendingSaveRef.current = null; }
-        setContent(merged);
-        contentRef.current = merged;
-        emitTitleChange(merged);
-        editorRef.current?.replaceAll(merged, { animate: true });
-
-        const fullMerged = buildFull(merged, diskThreads);
-        if (fullMerged !== fullDisk) {
-          onDirtyChange(true);
-          scheduleSave();
-        } else {
-          lastSavedRef.current = fullMerged;
-          onDirtyChange(false);
-        }
+        mergeRevisionRef.current++;
+        void reconcileExternal(newDiskContent, lastDiskContentRef.current, false);
       },
       appendLink: (label: string, url: string) => {
         const link = `[${label}](${url})`;
@@ -692,7 +688,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
         if (editorModeRef.current === 'raw') rawTextareaRef.current?.focus();
         else editorRef.current?.focus();
       },
-    }), [saveNow, applyProgrammaticContent, updateThreads, scheduleSave, buildFull, stripFm, onDirtyChange, getFullContent, handleToggleMode, handleFrontmatterChange, emitTitleChange]);
+    }), [saveNow, applyProgrammaticContent, updateThreads, getFullContent, handleToggleMode, handleFrontmatterChange, reconcileExternal]);
 
     // Cmd+S handler
     useEffect(() => {
@@ -1063,7 +1059,10 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
 
     // Cleanup pending save on unmount
     useEffect(() => {
+      mountedRef.current = true;
       return () => {
+        mountedRef.current = false;
+        mergeControllerRef.current?.abort();
         if (pendingSaveRef.current) clearTimeout(pendingSaveRef.current);
       };
     }, []);

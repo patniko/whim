@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import type { SubagentInfo, SubagentType } from '../../shared/subagent-types';
 import type { ChatMessage } from '../../shared/chat-types';
 import { MessageList } from './MessageList';
@@ -107,41 +107,63 @@ function agentToMessages(agent: SubagentInfo): ChatMessage[] {
   return msgs;
 }
 
-export function SubagentDetailOverlay({ parentAgentId, agentId, onClose }: SubagentDetailOverlayProps) {
+const noop = () => {};
+
+export function SubagentDetailOverlay(props: SubagentDetailOverlayProps) {
+  return <SubagentDetailSession key={`${props.parentAgentId}:${props.agentId}`} {...props} />;
+}
+
+function SubagentDetailSession({ parentAgentId, agentId, onClose }: SubagentDetailOverlayProps) {
   const [agent, setAgent] = useState<SubagentInfo | null>(null);
   const [steerInput, setSteerInput] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const hasInitiallyScrolled = useRef(false);
-
-  const refresh = useCallback(async () => {
-    if (!agentId) return;
-    const info = await whimAPI.subagentAPI.read(parentAgentId, agentId);
-    setAgent(info);
-  }, [parentAgentId, agentId]);
+  const [readError, setReadError] = useState<string | null>(null);
+  const messages = useMemo(() => agent ? agentToMessages(agent) : [], [agent]);
 
   // Poll + listen for changes
   useEffect(() => {
-    hasInitiallyScrolled.current = false;
     if (!agentId) return;
+    let cancelled = false;
+    let inFlight = false;
+    let dirty = false;
+    let frame: number | undefined;
+    const refresh = async () => {
+      if (cancelled) return;
+      if (inFlight) { dirty = true; return; }
+      inFlight = true;
+      try {
+        const info = await whimAPI.subagentAPI.read(parentAgentId, agentId);
+        if (!cancelled) {
+          setAgent(info);
+          setReadError(null);
+        }
+      } catch (error) {
+        if (!cancelled) setReadError(error instanceof Error ? error.message : 'Failed to read subagent');
+      } finally {
+        inFlight = false;
+        if (dirty && !cancelled) {
+          dirty = false;
+          scheduleRefresh();
+        }
+      }
+    };
+    const scheduleRefresh = () => {
+      if (frame !== undefined || cancelled) return;
+      frame = requestAnimationFrame(() => { frame = undefined; void refresh(); });
+    };
     refresh();
     // A safety net behind the subscription below, not the primary source.
     const interval = setInterval(refresh, backupPollIntervalMs(1500));
-    const unsubscribe = whimAPI.subagentAPI.onChanged(parentAgentId, refresh);
+    const unsubscribe = whimAPI.subagentAPI.onChanged(parentAgentId, scheduleRefresh);
     return () => {
+      cancelled = true;
+      if (frame !== undefined) cancelAnimationFrame(frame);
       clearInterval(interval);
       unsubscribe();
     };
-  }, [parentAgentId, agentId, refresh]);
-
-  // Auto-scroll on agent updates
-  useEffect(() => {
-    const behavior = hasInitiallyScrolled.current ? 'smooth' : 'instant';
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior });
-    hasInitiallyScrolled.current = true;
-  }, [agent]);
+  }, [parentAgentId, agentId]);
 
   // Focus input on open
   useEffect(() => {
@@ -190,12 +212,10 @@ export function SubagentDetailOverlay({ parentAgentId, agentId, onClose }: Subag
     await whimAPI.subagentAPI.cancel(parentAgentId, agentId);
   };
 
-  const messages = agent ? agentToMessages(agent) : [];
   // The subagent overlay is read-only: subagents can't currently surface
   // approvals/user-input/elicitation/sandbox-blocks back to the parent UI
   // (parent agent does that). Provide no-op handlers so MessageList renders
   // tiles but interactions are inert.
-  const noop = () => {};
 
   return (
     <>
@@ -249,7 +269,7 @@ export function SubagentDetailOverlay({ parentAgentId, agentId, onClose }: Subag
           )}
 
           {/* Conversation body */}
-          <div className="chat-subagent-overlay-body" ref={scrollRef}>
+          <div className="chat-subagent-overlay-body" style={{ display: 'flex', overflow: 'hidden' }}>
             <MessageList
               messages={messages}
               onApprovalRespond={noop}
@@ -260,6 +280,7 @@ export function SubagentDetailOverlay({ parentAgentId, agentId, onClose }: Subag
           </div>
 
           {/* Error banner */}
+          {readError && <div className="chat-subagent-overlay-error" role="alert">{readError}</div>}
           {agent?.error && (
             <div className="chat-subagent-overlay-error">⚠️ {agent.error}</div>
           )}

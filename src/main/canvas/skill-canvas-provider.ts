@@ -15,20 +15,8 @@
  */
 import * as fs from 'fs';
 import { createCanvas, type Canvas } from '@github/copilot-sdk';
-import {
-  ARTIFACT_FILE,
-  CANVASES_DIR,
-  MAX_DATA_BYTES,
-  bindArtifact,
-  getArtifact,
-  publishArtifact,
-  resolveArtifactDir,
-  resolveInsideSpace,
-  toArtifactId,
-  isValidArtifactId,
-  CanvasArtifactError,
-  writeArtifactFile,
-} from './artifact-store';
+import { ARTIFACT_FILE, CANVASES_DIR, MAX_DATA_BYTES, resolveArtifactDir, resolveInsideSpace, toArtifactId, isValidArtifactId, CanvasArtifactError } from './artifact-store';
+import { bindArtifact, getArtifact, publishArtifact, writeArtifactFile } from '../storage';
 import { renderSkillCanvas, type SkillCanvasDefinition } from './skill-canvas-template';
 import type { CanvasProviderEvents, CanvasRunContext } from './sdk-canvas-provider';
 
@@ -144,7 +132,7 @@ export function createSkillTemplateCanvas(
           try {
             const artifactId = resolveArtifactId(input, run);
             const title = readString(input, 'title')
-              ?? getArtifact(run.workspaceRoot, run.folder, artifactId)?.title
+              ?? (await getArtifact(run.workspaceRoot, run.folder, artifactId))?.title
               ?? definition.displayName;
             const data = readRenderData(run, relativeDataPath);
             const html = renderSkillCanvas(definition, data);
@@ -152,7 +140,7 @@ export function createSkillTemplateCanvas(
             // Render straight into the artifact's own directory so publishing
             // is an import of a file that already lives where it belongs.
             const dir = resolveArtifactDir(run.workspaceRoot, run.folder, artifactId);
-            writeArtifactFile(dir, ARTIFACT_FILE, html);
+            (await writeArtifactFile(dir, ARTIFACT_FILE, html));
 
             const { artifact, changed } = await publishArtifact({
               workspaceRoot: run.workspaceRoot,
@@ -167,7 +155,7 @@ export function createSkillTemplateCanvas(
               ...(run.skillId ? { skillId: run.skillId } : {}),
             });
 
-            events.onPublished?.(artifact, { instanceId: ctx.instanceId, run, changed });
+            await events.onPublished?.(artifact, { instanceId: ctx.instanceId, run, changed });
             return {
               ok: true,
               artifactId: artifact.artifactId,
@@ -197,7 +185,7 @@ export function createSkillTemplateCanvas(
         ...(run.skillId ? { skillId: run.skillId } : {}),
       });
 
-      events.onBound?.(artifact, { instanceId: ctx.instanceId, run });
+      await events.onBound?.(artifact, { instanceId: ctx.instanceId, run });
 
       return {
         // Deliberately no `url` — see the note in sdk-canvas-provider.ts.
@@ -205,8 +193,8 @@ export function createSkillTemplateCanvas(
         status: artifact.published ? (artifact.status ?? 'Ready') : 'Waiting for content',
       };
     },
-    onClose: ctx => {
-      events.onClosed?.({ instanceId: ctx.instanceId, run });
+    onClose: async ctx => {
+      await events.onClosed?.({ instanceId: ctx.instanceId, run });
     },
   });
 }

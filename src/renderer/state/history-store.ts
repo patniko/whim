@@ -1,6 +1,8 @@
 import type { SpaceEvent } from '../../shared/ipc-contract';
+import { reconcileByKey } from './reconcile';
 
 export interface HistoryState {
+  page: import('../../shared/paging').Page<import('../../shared/activity-types').ActivityRow> | null;
   /** Most-recent timeline events (matches `whimAPI.listEvents(limit)`). */
   events: SpaceEvent[];
 }
@@ -8,7 +10,7 @@ export interface HistoryState {
 type Listener = () => void;
 
 function createInitialHistoryState(): HistoryState {
-  return { events: [] };
+  return { events: [], page: null };
 }
 
 class HistoryStore {
@@ -21,15 +23,21 @@ class HistoryStore {
     return this.state;
   }
 
+  setPage(page: NonNullable<HistoryState['page']>): void {
+    this.state = { ...this.state, page };
+    this.notify();
+  }
+
   setEvents(events: SpaceEvent[]): void {
+    events = reconcileByKey(this.state.events, events, event => event.id);
+    if (events === this.state.events) return;
     this.state = { ...this.state, events };
     this.notify();
   }
 
   reset(): void {
     this.state = createInitialHistoryState();
-    this.requestCounter = 0;
-    this.latestRequestId = 0;
+    this.nextRequestId();
     this.notify();
   }
 

@@ -2,6 +2,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+vi.mock('./storage', async () => {
+  const db = await import('./database');
+  const { resolveContent } = await import('./subagent-content-store');
+  return {
+    ...db,
+    listSubagentRecords: (id: string) => db.listSubagentRecords(id).map(row => ({
+      ...row,
+      streaming_content: resolveContent({ inline: row.streaming_content, path: row.streaming_content_path }),
+      turns_json: resolveContent({ inline: row.turns_json, path: row.turns_path }),
+    })),
+    listSubagentToolCalls: (id: string) => db.listSubagentToolCalls(id).map(row => ({
+      ...row, result: resolveContent({ inline: row.result, path: row.result_path }),
+    })),
+  };
+});
 
 vi.mock('electron', () => ({
   app: { getPath: () => '/mock/electron-path' },
@@ -113,8 +128,8 @@ describe('subagent payload off-loading (DB ↔ event log ↔ side files)', () =>
 
     const rows = listSubagentRecords('p1');
     expect(rows[0].streaming_content).toBe('');
-    expect(rows[0].streaming_content_path).toBe('a2.streaming.txt');
-    const onDisk = fs.readFileSync(path.join(contentDir, 'a2.streaming.txt'), 'utf8');
+    expect(rows[0].streaming_content_path).toMatch(/^a2\.streaming\.txt\.[a-f0-9]{64}$/);
+    const onDisk = fs.readFileSync(path.join(contentDir, rows[0].streaming_content_path!), 'utf8');
     expect(onDisk).toBe(big);
   });
 
@@ -144,12 +159,12 @@ describe('subagent payload off-loading (DB ↔ event log ↔ side files)', () =>
 
     const rows = listSubagentRecords('p1');
     expect(rows[0].turns_json).toBe('[]');
-    expect(rows[0].turns_path).toBe('a3.turns.json');
-    const onDisk = fs.readFileSync(path.join(contentDir, 'a3.turns.json'), 'utf8');
+    expect(rows[0].turns_path).toMatch(/^a3\.turns\.json\.[a-f0-9]{64}$/);
+    const onDisk = fs.readFileSync(path.join(contentDir, rows[0].turns_path!), 'utf8');
     expect(JSON.parse(onDisk)).toEqual([turn]);
   });
 
-  it('updateSubagentRecord rewrites the side file when content grows', () => {
+  it('updateSubagentRecord publishes an immutable side file when content grows', () => {
     createSubagentRecord({
       id: 'a4',
       parent_agent_id: 'p1',
@@ -184,9 +199,9 @@ describe('subagent payload off-loading (DB ↔ event log ↔ side files)', () =>
 
     const after = listSubagentRecords('p1');
     expect(after[0].streaming_content).toBe('');
-    expect(after[0].streaming_content_path).toBe('a4.streaming.txt');
+    expect(after[0].streaming_content_path).toMatch(/^a4\.streaming\.txt\.[a-f0-9]{64}$/);
     expect(after[0].status).toBe('completed');
-    expect(fs.readFileSync(path.join(contentDir, 'a4.streaming.txt'), 'utf8')).toBe(big);
+    expect(fs.readFileSync(path.join(contentDir, after[0].streaming_content_path!), 'utf8')).toBe(big);
   });
 
   it('off-loads large tool call results', () => {
@@ -235,11 +250,11 @@ describe('subagent payload off-loading (DB ↔ event log ↔ side files)', () =>
     const calls = listSubagentToolCalls('s1');
     expect(calls).toHaveLength(1);
     expect(calls[0].result).toBeNull();
-    expect(calls[0].result_path).toBe('s1.tool-tcall-1.txt');
+    expect(calls[0].result_path).toMatch(/^s1\.tool-tcall-1\.txt\.[a-f0-9]{64}$/);
     expect(fs.readFileSync(path.join(contentDir, calls[0].result_path!), 'utf8')).toBe(big);
   });
 
-  it('loadPersistedSubagents stitches inline + side-file content back together', () => {
+  it('loadPersistedSubagents stitches inline + side-file content back together', async () => {
     const big = 'h'.repeat(INLINE_THRESHOLD + 100);
     const turn = { turnIndex: 0, response: 'k'.repeat(INLINE_THRESHOLD + 100), timestamp: 5 };
     createSubagentRecord({
@@ -264,7 +279,7 @@ describe('subagent payload off-loading (DB ↔ event log ↔ side files)', () =>
     });
 
     const tracker = new SubagentTracker();
-    const loaded = tracker.loadPersistedSubagents('p2');
+    const loaded = (await tracker.loadPersistedSubagents('p2'));
     expect(loaded).toHaveLength(1);
     expect(loaded[0].streamingContent).toBe(big);
     expect(loaded[0].turns).toEqual([turn]);
@@ -298,7 +313,7 @@ describe('subagent payload off-loading (DB ↔ event log ↔ side files)', () =>
       .map((f) => fs.readFileSync(f, 'utf8'))
       .join('');
     // The log should reference the path, not embed the big string.
-    expect(raw).toContain('"streaming_content_path":"a6.streaming.txt"');
+    expect(raw).toMatch(/"streaming_content_path":"a6\.streaming\.txt\.[a-f0-9]{64}"/);
     expect(raw).not.toContain(big);
     // And it must be much smaller than the inlined alternative.
     expect(raw.length).toBeLessThan(big.length / 2);

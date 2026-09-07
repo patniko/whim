@@ -31,16 +31,8 @@
  * reconstructed its agent records.
  */
 import { createCanvas, type Canvas } from '@github/copilot-sdk';
-import {
-  bindArtifact,
-  getArtifact,
-  publishArtifact,
-  setArtifactStatus,
-  toArtifactId,
-  isValidArtifactId,
-  CanvasArtifactError,
-  type CanvasArtifact,
-} from './artifact-store';
+import { toArtifactId, isValidArtifactId, CanvasArtifactError, type CanvasArtifact } from './artifact-store';
+import { bindArtifact, getArtifact, publishArtifact, setArtifactStatus } from '../storage';
 
 export const WHIM_REPORT_CANVAS_ID = 'whim-report';
 export const WHIM_CANVAS_PROVIDER_ID = 'whim';
@@ -72,16 +64,16 @@ export interface CanvasRunContext {
 
 export interface CanvasProviderEvents {
   /** An instance was bound to an artifact. */
-  onBound?: (artifact: CanvasArtifact, ctx: { instanceId: string; run: CanvasRunContext }) => void;
+  onBound?: (artifact: CanvasArtifact, ctx: { instanceId: string; run: CanvasRunContext }) => void | Promise<void>;
   /** Content was published. `changed` is false when the bytes were identical. */
   onPublished?: (
     artifact: CanvasArtifact,
     ctx: { instanceId?: string; run: CanvasRunContext; changed: boolean },
-  ) => void;
+  ) => void | Promise<void>;
   /** Status or title changed without a republish. */
-  onStatusChanged?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext }) => void;
+  onStatusChanged?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext }) => void | Promise<void>;
   /** The agent, user or runtime closed an instance. */
-  onClosed?: (ctx: { instanceId: string; run: CanvasRunContext }) => void;
+  onClosed?: (ctx: { instanceId: string; run: CanvasRunContext }) => void | Promise<void>;
 }
 
 const DEFAULT_ARTIFACT_ID = 'report';
@@ -184,7 +176,7 @@ export function createArtifactCanvas(run: CanvasRunContext, events: CanvasProvid
 
           try {
             const artifactId = resolveArtifactId(input, run);
-            const title = readString(input, 'title') ?? getArtifact(run.workspaceRoot, run.folder, artifactId)?.title
+            const title = readString(input, 'title') ?? (await getArtifact(run.workspaceRoot, run.folder, artifactId))?.title
               ?? 'Report';
             const { artifact, changed } = await publishArtifact({
               workspaceRoot: run.workspaceRoot,
@@ -200,7 +192,7 @@ export function createArtifactCanvas(run: CanvasRunContext, events: CanvasProvid
               ...(run.skillId ? { skillId: run.skillId } : {}),
             });
 
-            events.onPublished?.(artifact, { instanceId: ctx.instanceId, run, changed });
+            await events.onPublished?.(artifact, { instanceId: ctx.instanceId, run, changed });
             return {
               ok: true,
               artifactId: artifact.artifactId,
@@ -245,7 +237,7 @@ export function createArtifactCanvas(run: CanvasRunContext, events: CanvasProvid
             });
             if (!artifact) return { ok: false, error: `No report named "${artifactId}" yet.` };
 
-            events.onStatusChanged?.(artifact, { run });
+            await events.onStatusChanged?.(artifact, { run });
             return { ok: true, artifactId: artifact.artifactId };
           } catch (err) {
             return { ok: false, error: describeError(err) };
@@ -269,7 +261,7 @@ export function createArtifactCanvas(run: CanvasRunContext, events: CanvasProvid
         ...(run.skillId ? { skillId: run.skillId } : {}),
       });
 
-      events.onBound?.(artifact, { instanceId: ctx.instanceId, run });
+      await events.onBound?.(artifact, { instanceId: ctx.instanceId, run });
 
       return {
         // Deliberately no `url` — see the note at the top of this file.
@@ -279,8 +271,8 @@ export function createArtifactCanvas(run: CanvasRunContext, events: CanvasProvid
         status: artifact.published ? (artifact.status ?? 'Ready') : 'Waiting for content',
       };
     },
-    onClose: ctx => {
-      events.onClosed?.({ instanceId: ctx.instanceId, run });
+    onClose: async ctx => {
+      await events.onClosed?.({ instanceId: ctx.instanceId, run });
     },
   });
 }

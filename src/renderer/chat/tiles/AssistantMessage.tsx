@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { memo } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -7,7 +7,7 @@ interface AssistantMessageProps {
   isStreaming: boolean;
 }
 
-export function AssistantMessage({ content, isStreaming }: AssistantMessageProps) {
+export const AssistantMessage = memo(function AssistantMessage({ content, isStreaming }: AssistantMessageProps) {
   return (
     <div className="chat-assistant-message">
       <div className="chat-assistant-content">
@@ -36,4 +36,4 @@ export function AssistantMessage({ content, isStreaming }: AssistantMessageProps
       </div>
     </div>
   );
-}
+});

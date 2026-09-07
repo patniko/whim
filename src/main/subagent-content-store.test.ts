@@ -22,6 +22,19 @@ beforeEach(() => {
   initContentStore(path.join(tmpDir, 'subagent-content'));
 });
 
+it('keeps earlier durable versions when the same logical key is written again', () => {
+  const previous = storeContent('versioned.txt', 'a'.repeat(INLINE_THRESHOLD + 1));
+  const next = storeContent('versioned.txt', 'b'.repeat(INLINE_THRESHOLD + 1));
+  expect(previous.path).not.toBe(next.path);
+  expect(resolveContent(previous)).toBe('a'.repeat(INLINE_THRESHOLD + 1));
+  expect(resolveContent(next)).toBe('b'.repeat(INLINE_THRESHOLD + 1));
+});
+
+it('still reads legacy mutable-key side files', () => {
+  fs.writeFileSync(path.join(getContentDir()!, 'legacy.streaming.txt'), 'legacy bytes');
+  expect(readContent('legacy.streaming.txt')).toBe('legacy bytes');
+});
+
 afterEach(() => {
   closeContentStore();
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -75,7 +88,7 @@ describe('storeContent', () => {
   it('off-loads content above the threshold to a side file', () => {
     const big = 'x'.repeat(INLINE_THRESHOLD + 100);
     const ref = storeContent('agent-1.streaming.txt', big);
-    expect(ref.path).toBe('agent-1.streaming.txt');
+    expect(ref.path).toBe(`agent-1.streaming.txt.${ref.digest.sha256}`);
     expect(ref.inline).toBeUndefined();
     const disk = fs.readFileSync(path.join(getContentDir()!, ref.path!), 'utf8');
     expect(disk).toBe(big);
@@ -88,10 +101,24 @@ describe('storeContent', () => {
     expect(ref.digest.sha256).toBe(crypto.createHash('sha256').update(text, 'utf8').digest('hex'));
   });
 
+  it('uses UTF-8 bytes rather than character count for the inline limit', () => {
+    const text = '\u20ac'.repeat(INLINE_THRESHOLD / 2);
+    const ref = storeContent('unicode.txt', text);
+    expect(ref.path).toBe(`unicode.txt.${ref.digest.sha256}`);
+    expect(resolveContent(ref)).toBe(text);
+  });
+
+  it('rejects keys that would escape or alias the content directory', () => {
+    const text = 'x'.repeat(INLINE_THRESHOLD + 1);
+    for (const key of ['', '.', '..']) expect(() => storeContent(key, text)).toThrow('Invalid content key');
+    expect(() => readContent('../outside.txt')).toThrow('Invalid content path');
+    expect(() => deleteContent('../outside.txt')).toThrow('Invalid content path');
+  });
+
   it('sanitises unsafe characters in the key', () => {
     const big = 'z'.repeat(INLINE_THRESHOLD + 1);
     const ref = storeContent('weird/key:with*chars', big);
-    expect(ref.path).toBe('weird_key_with_chars');
+    expect(ref.path).toBe(`weird_key_with_chars.${ref.digest.sha256}`);
     expect(fs.existsSync(path.join(getContentDir()!, ref.path!))).toBe(true);
   });
 
@@ -106,7 +133,7 @@ describe('storeContent', () => {
   it('atomic write: side file appears in full or not at all', () => {
     const big = 'm'.repeat(INLINE_THRESHOLD + 200);
     const ref = storeContent('atomic.txt', big);
-    expect(ref.path).toBe('atomic.txt');
+    expect(ref.path).toBe(`atomic.txt.${ref.digest.sha256}`);
     const disk = fs.readFileSync(path.join(getContentDir()!, ref.path!), 'utf8');
     expect(disk).toBe(big);
     // No stray .tmp files left behind.

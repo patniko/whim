@@ -21,6 +21,8 @@
  */
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { withWorkspaceContext } from '../storage';
+import { runWorkspaceCommand } from '../producer-tasks';
 
 type AnyHandler = (event: IpcMainInvokeEvent, ...args: any[]) => unknown;
 
@@ -32,8 +34,10 @@ const handlers = new Map<string, AnyHandler>();
  * Drop-in replacement for `ipcMain.handle`.
  */
 export function registerIpcHandler(channel: string, handler: AnyHandler): void {
-  handlers.set(channel, handler);
-  ipcMain.handle(channel, handler);
+  const scoped: AnyHandler = async (event, ...args) => withWorkspaceContext(
+    () => runWorkspaceCommand(channel, () => handler(event, ...args)));
+  handlers.set(channel, scoped);
+  ipcMain.handle(channel, scoped);
 }
 
 export function hasRegisteredHandler(channel: string): boolean {

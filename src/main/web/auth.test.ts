@@ -60,7 +60,7 @@ describe('lockout persistence', () => {
     const saved: unknown[][] = [];
     const auth = new WebRemoteAuthenticator(() => 'expected', undefined, (records) => saved.push(records));
     for (let i = 0; i < 5; i += 1) auth.authenticate('wrong', '10.0.0.5');
-    expect(saved.at(-1)).toEqual([{ key: '10.0.0.5', lockedUntil: expect.any(Number) }]);
+    expect(saved.slice(-1)[0]).toEqual([{ key: '10.0.0.5', lockedUntil: expect.any(Number) }]);
   });
 
   it('does not persist anything before the threshold is reached', () => {
@@ -74,6 +74,6 @@ describe('lockout persistence', () => {
     const saved: unknown[][] = [];
     const auth = new WebRemoteAuthenticator(() => 'expected', undefined, (records) => saved.push(records));
     auth.reset();
-    expect(saved.at(-1)).toEqual([]);
+    expect(saved.slice(-1)[0]).toEqual([]);
   });
 });

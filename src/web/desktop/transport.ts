@@ -10,6 +10,7 @@
 import type { IpcTransport } from '../../shared/whim-api';
 import { webAccessFor } from '../../shared/web-access';
 import type { WebRemoteEvent } from '../../main/web/event-hub';
+import { workspaceRequestScope } from '../lib/workspace-epoch';
 
 type Listener = (event: unknown, ...args: any[]) => void;
 
@@ -133,7 +134,7 @@ export function createWebTransport(options: WebTransportOptions = {}): WebTransp
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channel, args }),
+      body: JSON.stringify({ channel, args, ...workspaceRequestScope() }),
     });
     const body = res.status === 401
       ? null

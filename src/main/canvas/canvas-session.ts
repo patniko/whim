@@ -22,13 +22,13 @@ import {
 
 export interface CanvasSessionHooks {
   /** Fired once per publish that changed the artifact's bytes. */
-  onArtifactPublished?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext; instanceId?: string }) => void;
+  onArtifactPublished?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext; instanceId?: string }) => void | Promise<void>;
   /** Fired when an instance is bound to an artifact, including on reconnect. */
-  onArtifactBound?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext; instanceId: string }) => void;
+  onArtifactBound?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext; instanceId: string }) => void | Promise<void>;
   /** Fired when an artifact is bound, published again unchanged, or restyled. */
-  onArtifactChanged?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext }) => void;
+  onArtifactChanged?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext }) => void | Promise<void>;
   /** Fired when an instance is closed by the agent, user or runtime. */
-  onInstanceClosed?: (ctx: { instanceId: string; run: CanvasRunContext }) => void;
+  onInstanceClosed?: (ctx: { instanceId: string; run: CanvasRunContext }) => void | Promise<void>;
 }
 
 /** The canvas-related fields to spread into `createSession` / `resumeSession`. */
@@ -70,13 +70,13 @@ export function buildCanvasSessionConfig(
 
   try {
     const events: CanvasProviderEvents = {
-      onBound: (artifact, ctx) => {
-        hooks.onArtifactBound?.(artifact, { run, instanceId: ctx.instanceId });
-        hooks.onArtifactChanged?.(artifact, { run });
+      onBound: async (artifact, ctx) => {
+        await hooks.onArtifactBound?.(artifact, { run, instanceId: ctx.instanceId });
+        await hooks.onArtifactChanged?.(artifact, { run });
       },
-      onPublished: (artifact, ctx) => {
-        hooks.onArtifactChanged?.(artifact, { run });
-        if (ctx.changed) hooks.onArtifactPublished?.(artifact, { run, instanceId: ctx.instanceId });
+      onPublished: async (artifact, ctx) => {
+        await hooks.onArtifactChanged?.(artifact, { run });
+        if (ctx.changed) await hooks.onArtifactPublished?.(artifact, { run, instanceId: ctx.instanceId });
       },
       onStatusChanged: (artifact) => hooks.onArtifactChanged?.(artifact, { run }),
       onClosed: (ctx) => hooks.onInstanceClosed?.({ instanceId: ctx.instanceId, run }),

@@ -96,7 +96,7 @@ function withConfig(values: Record<string, unknown>): void {
 function resetSessionMocks(): void {
   startupBehavior.start.mockReset().mockResolvedValue();
   vi.mocked(fs.existsSync).mockReturnValue(true);
-  vi.mocked(resolveConfiguredCliPath).mockImplementation((p: string | null) => p || null);
+  vi.mocked(resolveConfiguredCliPath).mockImplementation(p => p || null);
   vi.mocked(resolveAutoDetectedCliPath).mockReturnValue(null);
   vi.mocked(probeCliVersion).mockReturnValue('1.0.71');
 }
@@ -257,7 +257,7 @@ describe('client lifecycle', () => {
   });
 
   it('coalesces concurrent initCopilot() calls into one spawn', async () => {
-    await Promise.all([initCopilot(), initCopilot(), initCopilot()]);
+    await Promise.all([(await initCopilot()), (await initCopilot()), (await initCopilot())]);
     expect(spawned).toHaveLength(1);
   });
 
@@ -284,7 +284,7 @@ describe('client lifecycle', () => {
 
   it('coalesces concurrent ephemeral starts into one spawn', async () => {
     await initCopilot();
-    const [a, b] = await Promise.all([ensureEphemeralCopilotClient(), ensureEphemeralCopilotClient()]);
+    const [a, b] = await Promise.all([(await ensureEphemeralCopilotClient()), (await ensureEphemeralCopilotClient())]);
     expect(a).toBe(b);
     expect(spawned).toHaveLength(2);
   });
@@ -377,12 +377,13 @@ describe('scheduleCopilotReinit', () => {
     expect(spawned).toHaveLength(1);
 
     // Mimics the settings UI writing cliPath then cliSource back to back.
-    scheduleCopilotReinit();
+    const first = scheduleCopilotReinit();
     withConfig({ cliSource: 'path', cliPath: '/other/copilot' });
     const pending = scheduleCopilotReinit();
 
     await vi.advanceTimersByTimeAsync(600);
     await pending;
+    await first;
     expect(spawned).toHaveLength(2);
   });
 });

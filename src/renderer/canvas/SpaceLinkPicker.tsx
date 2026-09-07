@@ -1,4 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { getAPI } from '../ipc-client';
+import { PageControls } from '../views/PageControls';
+import type { SpacePage } from '../../shared/paging';
 
 export interface SpaceResult {
   id: string;
@@ -15,52 +18,34 @@ export function SpaceLinkPicker({ onSelect, onDismiss }: SpaceLinkPickerProps) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SpaceResult[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [allSpaces, setAllSpaces] = useState<SpaceResult[]>([]);
+  const [page, setPage] = useState<SpacePage | null>(null);
+  const [error, setError] = useState('');
+  const request = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Load all spaces on mount
-  useEffect(() => {
-    (window as any).whimAPI.list().then((spaces: SpaceResult[]) => {
-      setAllSpaces(spaces);
-      setResults(spaces);
-    });
-  }, []);
+  const loadPage = useCallback(async (cursor?: string) => {
+    const generation = ++request.current;
+    const result = await getAPI().listSpacePage({ query, cursor, filter: 'all' });
+    if (generation !== request.current) return;
+    setPage(result);
+    setResults(result.items);
+    setSelectedIndex(0);
+  }, [query]);
 
   // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
-  // Filter results as query changes
   useEffect(() => {
-    if (!query.trim()) {
-      setResults(allSpaces);
-      setSelectedIndex(0);
-      return;
-    }
-
-    const lower = query.toLowerCase();
-    const filtered = allSpaces.filter(s =>
-      s.description.toLowerCase().includes(lower)
-    );
-    setResults(filtered);
-    setSelectedIndex(0);
-
-    // Also do a server-side search for deeper results
+    request.current++;
     const timer = setTimeout(() => {
-      (window as any).whimAPI.searchSpaces(query).then((serverResults: SpaceResult[]) => {
-        // Merge: server results may include matches not in allSpaces (archived, etc.)
-        const ids = new Set(filtered.map(s => s.id));
-        const extra = serverResults.filter(s => !ids.has(s.id));
-        if (extra.length > 0) {
-          setResults(prev => [...prev, ...extra]);
-        }
-      });
+      setError('');
+      void loadPage().catch(failure => setError(failure instanceof Error ? failure.message : 'Search failed'));
     }, 200);
-
-    return () => clearTimeout(timer);
-  }, [query, allSpaces]);
+    return () => { clearTimeout(timer); request.current++; };
+  }, [loadPage]);
 
   // Click outside to dismiss
   useEffect(() => {
@@ -110,6 +95,7 @@ export function SpaceLinkPicker({ onSelect, onDismiss }: SpaceLinkPickerProps) {
           onKeyDown={handleKeyDown}
         />
         <div className="space-link-picker-results">
+          {error && <p role="alert">{error}</p>}
           {results.length === 0 && query && (
             <div className="space-link-picker-empty">No spaces found</div>
           )}
@@ -127,6 +113,7 @@ export function SpaceLinkPicker({ onSelect, onDismiss }: SpaceLinkPickerProps) {
             </div>
           ))}
         </div>
+        {page && <PageControls nextCursor={page.nextCursor} total={page.total} count={results.length} scope={query} load={loadPage} />}
       </div>
     </div>
   );

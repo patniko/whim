@@ -1,5 +1,5 @@
 import { evaluateRecurrence } from '../ai';
-import { updateSpaceCAS, logSpaceEvent } from '../database';
+import { updateSpaceCAS, logSpaceEvent } from '../storage';
 import { notifyAllWindows } from '../notify';
 import { Space, RecurrenceResult } from '../../shared/types';
 
@@ -25,8 +25,8 @@ export async function handleRecurrence(space: Space, version: string): Promise<v
     notifyAllWindows('space:recurrence', space.id, result);
 
     // Start undo window — apply recurrence after 5 seconds
-    const timer = setTimeout(() => {
-      applyRecurrence(space.id, version, result);
+    const timer = setTimeout(async () => {
+      (await applyRecurrence(space.id, version, result));
       pendingRecurrences.delete(space.id);
     }, 5000);
 
@@ -36,20 +36,20 @@ export async function handleRecurrence(space: Space, version: string): Promise<v
   }
 }
 
-export function applyRecurrence(spaceId: string, expectedVersion: string, result: RecurrenceResult): void {
-  const updated = updateSpaceCAS(spaceId, expectedVersion, {
+export async function applyRecurrence(spaceId: string, expectedVersion: string, result: RecurrenceResult): Promise<void> {
+  const updated = (await updateSpaceCAS(spaceId, expectedVersion, {
     status: 'captured',
     due_at: result.next_due,
     due_at_utc: result.next_due_utc,
     recurrence: JSON.stringify(result),
-  });
+  }));
 
   if (updated) {
-    logSpaceEvent(spaceId, 'recycled', {
+    (await logSpaceEvent(spaceId, 'recycled', {
       due_at: result.next_due,
       due_at_utc: result.next_due_utc,
       recurrence_json: JSON.stringify(result),
-    });
+    }));
     notifyAllWindows('space:recurrence-applied', spaceId);
     console.log(`[recurrence] Applied for ${spaceId}: next due ${result.next_due}`);
   } else {
@@ -57,14 +57,14 @@ export function applyRecurrence(spaceId: string, expectedVersion: string, result
   }
 }
 
-export function dismissRecurrence(spaceId: string): void {
+export async function dismissRecurrence(spaceId: string): Promise<void> {
   const pending = pendingRecurrences.get(spaceId);
   if (pending) {
     clearTimeout(pending.timer);
     pendingRecurrences.delete(spaceId);
-    logSpaceEvent(spaceId, 'recurrence_dismissed', {
+    (await logSpaceEvent(spaceId, 'recurrence_dismissed', {
       recurrence_json: JSON.stringify(pending.result),
-    });
+    }));
     console.log(`[recurrence] Dismissed for ${spaceId}`);
   }
 }

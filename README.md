@@ -151,7 +151,7 @@ src/
     └── tray-icon.png          # System tray icon
 ```
 
-See [docs/architecture.md](./docs/architecture.md) for detailed component descriptions, [docs/user-guide.md](./docs/user-guide.md) for usage instructions, and [docs/canvas-artifacts.md](./docs/canvas-artifacts.md) for scheduled skills that publish visual reports.
+See [docs/architecture.md](./docs/architecture.md) for detailed component descriptions, [docs/user-guide.md](./docs/user-guide.md) for scheduled skills and other usage instructions, and [docs/canvas-artifacts.md](./docs/canvas-artifacts.md) for optional visual reports.
 
 ## Getting Started
 

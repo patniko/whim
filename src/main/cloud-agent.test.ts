@@ -73,9 +73,9 @@ describe('cloud-agent', () => {
     }
 
     function setupFetch(handler: (url: string, init?: RequestInit) => Promise<Response>): void {
-      vi.stubGlobal('fetch', vi.fn((input: any, init?: any) => {
+      vi.stubGlobal('fetch', vi.fn(async (input: any, init?: any) => {
         const url = typeof input === 'string' ? input : input.url;
-        return handler(url, init);
+        return (await handler(url, init));
       }));
     }
 

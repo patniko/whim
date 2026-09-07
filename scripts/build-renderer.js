@@ -12,8 +12,12 @@ const RENDERER_ASSETS = ['index.html', 'styles.css', 'copilot.png', 'fonts'];
 const rendererOptions = {
   entryPoints: [path.join(__dirname, '..', 'src', 'renderer', 'app.ts')],
   bundle: true,
-  outfile: path.join(__dirname, '..', 'dist', 'renderer', 'app.js'),
-  format: 'iife',
+  outdir: path.join(__dirname, '..', 'dist', 'renderer'),
+  entryNames: '[name].[hash]',
+  chunkNames: 'chunks/[name].[hash]',
+  format: 'esm',
+  splitting: true,
+  metafile: true,
   platform: 'browser',
   target: 'es2020',
   sourcemap: true,
@@ -35,8 +39,35 @@ const rendererOptions = {
 const webOptions = {
   ...rendererOptions,
   entryPoints: [path.join(__dirname, '..', 'src', 'web', 'index.tsx')],
-  outfile: path.join(__dirname, '..', 'dist', 'web', 'app.js'),
+  entryNames: 'app.[hash]',
+  outdir: path.join(__dirname, '..', 'dist', 'web'),
 };
+
+// Classic workers work under Electron's app scheme and both browser shells.
+// Emit each URL explicitly rather than relying on import.meta.url in an IIFE.
+const mergeWorkerOptions = ['renderer', 'web', 'web/desktop'].map(directory => ({
+  entryPoints: [path.join(__dirname, '..', 'src', 'renderer', 'canvas', 'merge-worker.ts')],
+  bundle: true,
+  outfile: path.join(__dirname, '..', 'dist', directory, 'merge-worker.js'),
+  format: 'iife',
+  platform: 'browser',
+  target: 'es2020',
+  sourcemap: true,
+  minify,
+  logLevel: 'info',
+}));
+
+function fingerprintMergeWorkers(options = mergeWorkerOptions) {
+  const filename = `merge-worker.${contentHash(options[0].outfile)}.js`;
+  for (const option of options) {
+    const directory = path.dirname(option.outfile);
+    for (const existing of fs.readdirSync(directory)) {
+      if (/^merge-worker\.[0-9a-f]{12}\.js$/.test(existing)) fs.unlinkSync(path.join(directory, existing));
+    }
+    fs.copyFileSync(option.outfile, path.join(directory, filename));
+  }
+  return filename;
+}
 
 /**
  * The loader that lets the *desktop* renderer run in a browser. It installs a
@@ -46,7 +77,7 @@ const webOptions = {
 const desktopBootOptions = {
   ...rendererOptions,
   entryPoints: [path.join(__dirname, '..', 'src', 'web', 'desktop', 'boot.ts')],
-  outfile: path.join(__dirname, '..', 'dist', 'web', 'desktop', 'boot.js'),
+  outdir: path.join(__dirname, '..', 'dist', 'web', 'desktop'),
 };
 
 /**
@@ -61,27 +92,31 @@ function assembleDesktopBundle() {
   const rendererDist = path.join(__dirname, '..', 'dist', 'renderer');
   const target = path.join(__dirname, '..', 'dist', 'web', 'desktop');
   const source = path.join(__dirname, '..', 'src', 'renderer');
-  if (!fs.existsSync(path.join(rendererDist, 'app.js'))) return;
-
   fs.mkdirSync(target, { recursive: true });
-  fs.copyFileSync(path.join(rendererDist, 'app.js'), path.join(target, 'app.js'));
+  for (const asset of fs.readdirSync(rendererDist)) {
+    if (asset.endsWith('.js') || asset.endsWith('.css') || asset.endsWith('.map') || asset === 'chunks' || asset === 'asset-manifest.json') {
+      fs.cpSync(path.join(rendererDist, asset), path.join(target, asset), { recursive: true });
+    }
+  }
   for (const asset of ['styles.css', 'copilot.png']) {
     fs.copyFileSync(path.join(source, asset), path.join(target, asset));
   }
   // styles.css references fonts relative to itself, so they land beside it.
   fs.cpSync(path.join(source, 'fonts'), path.join(target, 'fonts'), { recursive: true });
 
-  let html = fs.readFileSync(path.join(source, 'index.html'), 'utf-8');
-  html = html.replace(/<script src="app\.js"><\/script>\s*/, '');
+  let html = fs.readFileSync(path.join(rendererDist, 'index.html'), 'utf-8');
+  html = html.replace(/<script type="module" src="[^"]+"><\/script>\s*/, '');
   // Rewrite the renderer's relative asset URLs to absolute /desktop/ paths.
   // A <base> tag would be the obvious fix, but the web remote sends
   // `base-uri 'none'`, which silently neutralises it — and weakening a CSP to
   // save a string replace is a bad trade.
   html = html.replace(/(src|href)="(?!https?:|\/\/|\/|data:|#)([^"]+)"/g, '$1="/desktop/$2"');
-  html = html.replace('</head>', '  <link rel="stylesheet" href="/desktop/boot.css">\n  <script src="/desktop/boot.js" defer></script>\n</head>');
+  const bootManifest = JSON.parse(fs.readFileSync(path.join(target, 'boot-manifest.json'), 'utf-8'));
+  const bootCss = `boot.${contentHash(path.join(__dirname, '..', 'src', 'web', 'desktop', 'boot.css'))}.css`;
+  html = html.replace('</head>', `  <link rel="stylesheet" href="/desktop/${bootCss}">\n  <script type="module" src="/desktop/${bootManifest.entry}"></script>\n</head>`);
   assertDesktopBundleSane(html);
   fs.writeFileSync(path.join(target, 'index.html'), html);
-  fs.copyFileSync(path.join(__dirname, '..', 'src', 'web', 'desktop', 'boot.css'), path.join(target, 'boot.css'));
+  fs.copyFileSync(path.join(__dirname, '..', 'src', 'web', 'desktop', 'boot.css'), path.join(target, bootCss));
 }
 
 /**
@@ -156,7 +191,7 @@ function fingerprintWebAssets() {
   const htmlPath = path.join(distDir, 'index.html');
   let html = fs.readFileSync(htmlPath, 'utf-8');
 
-  for (const asset of ['app.js', 'styles.css']) {
+  for (const asset of ['styles.css']) {
     const assetPath = path.join(distDir, asset);
     if (!fs.existsSync(assetPath)) continue;
 
@@ -198,15 +233,76 @@ function writeServiceWorkerShell(distDir, html) {
     .filter((href) => /^(?!https?:|\/\/)/.test(href) && /\.(js|css)$/.test(href))
     .map((href) => (href.startsWith('/') ? href : `/${href}`));
 
-  const shell = ['/index.html', ...hashed, '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'];
+  const manifest = JSON.parse(fs.readFileSync(path.join(distDir, 'asset-manifest.json'), 'utf-8'));
+  const shell = [...new Set(['/index.html', ...hashed, ...manifest.initial.map(name => `/${name}`),
+    '/manifest.webmanifest', '/icon-192.png', '/icon-512.png'])];
+  const lazy = manifest.lazy.map(name => `/${name}`);
+  const desktopShell = ['/desktop/index.html'];
+  let desktopEntry;
+  for (const file of ['asset-manifest.json', 'boot-manifest.json']) {
+    const desktop = JSON.parse(fs.readFileSync(path.join(distDir, 'desktop', file), 'utf-8'));
+    lazy.push(...desktop.all.map(name => `/desktop/${name}`));
+    desktopShell.push(...desktop.initial.map(name => `/desktop/${name}`));
+    if (file === 'asset-manifest.json') desktopEntry = `/desktop/${desktop.entry}`;
+  }
+  const desktopHtml = fs.readFileSync(path.join(distDir, 'desktop', 'index.html'), 'utf-8');
+  const desktopStyles = [...desktopHtml.matchAll(/href="([^"]+\.css)"/g)].map(match => match[1]);
+  lazy.push(...desktopStyles);
+  desktopShell.push(...desktopStyles);
   const buildId = crypto
     .createHash('sha256')
-    .update([...shell, ...desktopAssetFingerprints(distDir)].join('|'))
+    .update(html)
+    .update([...shell, ...lazy, ...desktopAssetFingerprints(distDir)].join('|'))
     .digest('hex')
     .slice(0, 12);
-  const preamble = `self.__WHIM_SHELL__ = ${JSON.stringify(shell)};\nself.__WHIM_BUILD__ = ${JSON.stringify(buildId)};\n`;
+  const preamble = `self.__WHIM_SHELL__ = ${JSON.stringify(shell)};\nself.__WHIM_LAZY__ = ${JSON.stringify(lazy)};\nself.__WHIM_BUILD__ = ${JSON.stringify(buildId)};\n`
+    + `self.__WHIM_DESKTOP_SHELL__ = ${JSON.stringify(desktopShell)};\nself.__WHIM_DESKTOP_ENTRY__ = ${JSON.stringify(desktopEntry)};\n`
+    + `self.__WHIM_HTML__ = ${JSON.stringify({ mobile: html, desktop: desktopHtml })};\n`;
 
   fs.writeFileSync(swPath, preamble + fs.readFileSync(swPath, 'utf-8'));
+}
+
+/** The initial graph excludes dynamic imports; lazy features never become preload hints. */
+function writeAssetManifest(result, options, workerFilename, manifestName = 'asset-manifest.json') {
+  const outputs = result.metafile.outputs;
+  const root = path.resolve(options.outdir);
+  const relative = file => path.relative(root, path.resolve(file)).split(path.sep).join('/');
+  const entry = Object.keys(outputs).find(file => outputs[file].entryPoint &&
+    path.resolve(outputs[file].entryPoint) === path.resolve(options.entryPoints[0]));
+  if (!entry) throw new Error('Missing renderer entry point');
+  const initial = new Set();
+  function visit(file) {
+    if (initial.has(file)) return;
+    if (!outputs[file]) throw new Error(`Missing split output: ${file}`);
+    initial.add(file);
+    for (const dependency of outputs[file].imports) {
+      if (!dependency.external && dependency.kind !== 'dynamic-import') visit(dependency.path);
+    }
+  }
+  visit(entry);
+  const all = Object.keys(outputs).filter(file => file.endsWith('.js')).map(relative);
+  if (workerFilename) all.push(workerFilename);
+  const manifest = {
+    entry: relative(entry),
+    initial: [...initial].map(relative),
+    lazy: all.filter(file => ![...initial].some(initialFile => relative(initialFile) === file)),
+    all,
+    imports: Object.fromEntries(Object.entries(outputs).filter(([file]) => file.endsWith('.js'))
+      .map(([file, output]) => [relative(file), output.imports.filter(item => !item.external)
+        .map(item => ({ path: relative(item.path), dynamic: item.kind === 'dynamic-import' }))])),
+  };
+  fs.writeFileSync(path.join(root, manifestName), JSON.stringify(manifest, null, 2));
+  return manifest;
+}
+
+function pointHtmlAtEntry(directory, entry) {
+  const htmlPath = path.join(directory, 'index.html');
+  const stylesheet = `styles.${contentHash(path.join(directory, 'styles.css'))}.css`;
+  fs.copyFileSync(path.join(directory, 'styles.css'), path.join(directory, stylesheet));
+  const html = fs.readFileSync(htmlPath, 'utf-8')
+    .replace('href="styles.css"', `href="${stylesheet}"`)
+    .replace(/<script(?: type="module")? src="app\.js"><\/script>/, `<script type="module" src="${entry}"></script>`);
+  fs.writeFileSync(htmlPath, html);
 }
 
 /**
@@ -300,35 +396,57 @@ function assertPreloadSelfContained(outfile = preloadOptions.outfile) {
 
 async function main() {
   if (watch) {
-    copyRendererAssets();
-    copyWebAssets();
-    const rendererCtx = await esbuild.context(rendererOptions);
-    const webCtx = await esbuild.context(webOptions);
-    const desktopCtx = await esbuild.context(desktopBootOptions);
-    const preloadCtx = await esbuild.context(preloadOptions);
-    await Promise.all([rendererCtx.watch(), webCtx.watch(), desktopCtx.watch(), preloadCtx.watch()]);
-    assembleDesktopBundle();
-    for (const asset of ['index.html', 'styles.css']) {
-      fs.watchFile(path.join(__dirname, '..', 'src', 'renderer', asset), { interval: 300 }, assembleDesktopBundle);
-    }
-    for (const asset of ['index.html', 'styles.css', 'manifest.webmanifest', 'sw.js']) {
-      fs.watchFile(path.join(__dirname, '..', 'src', 'web', asset), { interval: 300 }, copyWebAssets);
+    // Serialize graph publication so HTML never points at a half-built graph.
+    let running = false;
+    let again = false;
+    const rebuild = async () => {
+      if (running) { again = true; return; }
+      running = true;
+      do {
+        again = false;
+        try { await buildAll(); } catch (error) { console.error(error); }
+      } while (again);
+      running = false;
+    };
+    await rebuild();
+    let timer;
+    for (const directory of ['renderer', 'web', 'shared', 'main']) {
+      fs.watch(path.join(__dirname, '..', 'src', directory), { recursive: true }, () => {
+        clearTimeout(timer);
+        timer = setTimeout(rebuild, 100);
+      });
     }
     console.log('[esbuild] Watching renderer and web remote...');
   } else {
-    await Promise.all([
-      esbuild.build(rendererOptions),
-      esbuild.build(webOptions),
-      esbuild.build(desktopBootOptions),
+    await buildAll();
+  }
+}
+
+async function buildAll() {
+    await Promise.all(mergeWorkerOptions.map(options => esbuild.build(options)));
+    const workerFilename = fingerprintMergeWorkers();
+    const workerDefine = { __WHIM_MERGE_WORKER_FILE__: JSON.stringify(workerFilename) };
+    const [renderer, web] = await Promise.all([
+      esbuild.build({ ...rendererOptions, define: workerDefine }),
+      esbuild.build({ ...webOptions, define: workerDefine }),
       esbuild.build(preloadOptions),
     ]);
+    const rendererManifest = writeAssetManifest(renderer, rendererOptions, workerFilename);
+    const webManifest = writeAssetManifest(web, webOptions, workerFilename);
+    const boot = await esbuild.build({
+      ...desktopBootOptions,
+      define: { __WHIM_DESKTOP_ENTRY__: JSON.stringify(`/desktop/${rendererManifest.entry}`) },
+    });
+    writeAssetManifest(boot, desktopBootOptions, undefined, 'boot-manifest.json');
     copyRendererAssets();
     copyWebAssets();
+    pointHtmlAtEntry(rendererOptions.outdir, rendererManifest.entry);
+    pointHtmlAtEntry(webOptions.outdir, webManifest.entry);
     // Before fingerprinting: the service worker's build id folds in the hashes
     // of the desktop assets, so they have to exist first.
     assembleDesktopBundle();
     fingerprintWebAssets();
-  }
+    require('./verify-renderer-assets').verifyRendererAssets(path.join(__dirname, '..', 'dist'));
 }
 
 if (require.main === module) {
@@ -338,4 +456,5 @@ if (require.main === module) {
   });
 }
 
-module.exports = { assertPreloadSelfContained, assertDesktopBundleSane };
+module.exports = { assertPreloadSelfContained, assertDesktopBundleSane, mergeWorkerOptions, fingerprintMergeWorkers,
+  rendererOptions, webOptions, writeAssetManifest, writeServiceWorkerShell };

@@ -20,13 +20,12 @@ export function getSpaceActivityLogPath(workspaceRoot: string, spaceFolder: stri
 
 /** Append an event to the per-space activity log. */
 export function appendSpaceActivity(workspaceRoot: string, spaceFolder: string, type: string, data: Record<string, any>): void {
-  if (!workspaceRoot || !spaceFolder) return;
+  if (!workspaceRoot || !spaceFolder) throw new Error('Activity log requires a workspace and space folder');
 
   const folderRoot = resolveSpaceFolder(workspaceRoot, spaceFolder);
   const logDir = path.join(folderRoot, '.whim');
   const logPath = path.join(logDir, 'events.jsonl');
 
-  try {
     if (!fs.existsSync(logDir)) {
       fs.mkdirSync(logDir, { recursive: true });
     }
@@ -44,9 +43,6 @@ export function appendSpaceActivity(workspaceRoot: string, spaceFolder: string, 
     } finally {
       fs.closeSync(fd);
     }
-  } catch {
-    // Non-fatal — don't break agent execution for logging failures
-  }
 }
 
 /** Read all events from the per-space activity log. */

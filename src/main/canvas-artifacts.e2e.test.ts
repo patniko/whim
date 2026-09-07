@@ -27,7 +27,15 @@ vi.mock('./config', () => ({
   getConfigValue: (key: string) => (key === 'workspace' ? workspace : undefined),
 }));
 
-vi.mock('./database', () => ({
+vi.mock('./storage', async () => ({
+  ...(await import('./workspace')),
+  ...(await import('./services/skill-schedule-store')),
+  ...(await import('./canvas/artifact-store')),
+  documentMatches: (await import('./storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   createSpace: (input: any, skillId?: string) => {
     const space = { id: `space-${spaces.length + 1}`, description: input.body, source_skill_id: skillId, folder: null };
     spaces.push(space);

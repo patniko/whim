@@ -2,10 +2,15 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getConfigValue } from './config';
-import { assignSpaceFolder, createSpace, getSkill, updateCanvasContent } from './database';
+import { assignSpaceFolder, createSpace, getSkill, getSpace, updateCanvasContent } from './storage';
 import { parseFrontmatter, serializeFrontmatter } from './frontmatter';
-import { createSpaceFolder, scheduleAutoCommit } from './workspace';
-import { listArtifacts, ARTIFACT_FILE, ARTIFACT_DATA_FILE, CANVASES_DIR } from './canvas/artifact-store';
+import { createSpaceFolder, resolveSpaceFolder, scheduleAutoCommit } from './workspace';
+import { getSkillSchedule } from './storage';
+import { buildScheduledInstructions } from './services/scheduled-instructions';
+import { notifyAllWindows } from './notify';
+import type { ScheduledInvocation } from '../shared/skill-schedule';
+import { ARTIFACT_FILE, ARTIFACT_DATA_FILE, CANVASES_DIR } from './canvas/artifact-store';
+import { listArtifacts } from './storage';
 import { buildRefreshFraming, resolveSpaceForSkill } from './services/skill-space-reuse';
 import { withCanvasContract } from './canvas/canvas-contract';
 import { WHIM_REPORT_CANVAS_ID } from './canvas/sdk-canvas-provider';
@@ -30,9 +35,9 @@ function buildInvocationInstructions(skillName: string, intent: string): string 
 }
 
 /** Prior artifacts in a reused space, described by path for the prompt. */
-function describePriorArtifacts(workspaceRoot: string, folder: string) {
+async function describePriorArtifacts(workspaceRoot: string, folder: string) {
   try {
-    return listArtifacts(workspaceRoot, folder)
+    return (await listArtifacts(workspaceRoot, folder))
       .filter(a => a.published)
       .map(a => ({
         artifactId: a.artifactId,
@@ -80,14 +85,16 @@ function readSkillCanvasSettings(frontmatter: SkillFrontmatter): {
   };
 }
 
-export async function invokeSkill(input: SkillInvocationInput): Promise<SkillInvocationResult | { error: string }> {
+type InvocationInput = SkillInvocationInput & { scheduledRun?: ScheduledInvocation };
+
+export async function invokeSkill(input: InvocationInput): Promise<SkillInvocationResult | { error: string }> {
   // Serialize per skill. Reuse asks "is a run already using this space?" and
   // then writes canvas.md and launches — but the launch is what makes the run
   // visible to that question. Two overlapping occurrences of the same skill (a
   // schedule firing while the user runs it by hand) would both see an idle
   // space, both claim it, and the second would overwrite the first's
   // instructions before it had even started.
-  return withSkillLock(input.skillId, () => invokeSkillSerialized(input));
+  return withSkillLock(input.skillId, async () => (await invokeSkillSerialized(input)));
 }
 
 /**
@@ -110,42 +117,64 @@ async function withSkillLock<T>(skillId: string, fn: () => Promise<T>): Promise<
   return next;
 }
 
-async function invokeSkillSerialized(input: SkillInvocationInput): Promise<SkillInvocationResult | { error: string }> {
+async function invokeSkillSerialized(input: InvocationInput): Promise<SkillInvocationResult | { error: string }> {
   const workspace = getConfigValue('workspace');
   if (!workspace) return { error: 'no_workspace' };
 
-  const skill = getSkill(input.skillId);
+  const skill = (await getSkill(input.skillId));
   if (!skill) return { error: 'not_found' };
 
-  const intent = normalizeIntent(input.intent);
+  const savedSchedule = input.run && !input.scheduledRun && input.source !== 'schedule'
+    ? (await getSkillSchedule(workspace, skill.id))
+    : null;
+  const scheduledRun: ScheduledInvocation | undefined = input.scheduledRun ?? (savedSchedule?.enabled && savedSchedule.output === 'canvas'
+    ? {
+      scheduleId: savedSchedule.id,
+      runId: crypto.randomUUID(),
+      scheduledAt: new Date().toISOString(),
+      timeZone: savedSchedule.timeZone,
+      readOnlyServers: savedSchedule.readOnlyServers,
+      previousSpaceId: savedSchedule.lastSuccessfulRun?.spaceId,
+      lastSuccessfulAt: savedSchedule.lastSuccessfulRun?.completedAt,
+      manual: true,
+    }
+    : undefined);
+  const resultFirst = !!scheduledRun && scheduledRun.output !== 'legacy';
+  const intent = normalizeIntent(input.intent || (resultFirst ? savedSchedule?.intent : undefined));
   const createdAt = new Date().toISOString();
   let skillPreferredAgent: string | undefined;
   let canvasSettings: ReturnType<typeof readSkillCanvasSettings> = {};
+  let skillContent: string;
   try {
-    const skillContent = fs.readFileSync(skill.filePath, 'utf-8');
+    skillContent = fs.readFileSync(skill.filePath, 'utf-8');
     const { frontmatter } = parseFrontmatter<SkillFrontmatter>(skillContent);
     if (typeof frontmatter.preferred_agent === 'string' && frontmatter.preferred_agent.trim()) {
       skillPreferredAgent = frontmatter.preferred_agent.trim();
     }
     canvasSettings = readSkillCanvasSettings(frontmatter);
-  } catch {
-    // Skill metadata is already indexed; missing optional preferred_agent should not block invocation.
+  } catch (error) {
+    console.error(`[skill] Could not read ${skill.id}:`, error);
+    return { error: 'Could not read the skill instructions. Restore the skill file before running it.' };
   }
 
   const preferredAgent = input.preferredAgent?.trim() || skillPreferredAgent;
-  const canvasArtifacts = canvasSettings.canvasArtifacts;
+  const canvasArtifacts = resultFirst ? false : canvasSettings.canvasArtifacts;
   const wantsCanvas = typeof canvasArtifacts === 'string';
   const source = input.source ?? 'api';
   // Distinguishes this occurrence from earlier ones, so completion can tell a
   // freshly published report from one left by a previous run.
-  const runId = crypto.randomUUID();
-  const titleSeed = intent ? `${skill.name}: ${intent}` : skill.name;
+  const runId = scheduledRun?.runId ?? crypto.randomUUID();
+  const titleSeed = resultFirst
+    ? `${skill.name} - ${new Date(scheduledRun.scheduledAt).toLocaleDateString('en-US', {
+      timeZone: scheduledRun.timeZone, year: 'numeric', month: 'short', day: 'numeric',
+    })}`
+    : intent ? `${skill.name}: ${intent}` : skill.name;
 
   // Only skills that produce artifacts reuse their space by default. A skill
   // that runs daily would otherwise leave a space per occurrence, and a hundred
   // near-identical spaces is worse than no report: the user stops reading them.
-  const wantsReuse = canvasSettings.spaceMode === 'reuse'
-    || (wantsCanvas && canvasSettings.spaceMode !== 'new');
+  const wantsReuse = !resultFirst && (canvasSettings.spaceMode === 'reuse'
+    || (wantsCanvas && canvasSettings.spaceMode !== 'new'));
   const resolution = wantsReuse
     ? await resolveSpaceForSkill({
       skillId: skill.id,
@@ -160,9 +189,9 @@ async function invokeSkillSerialized(input: SkillInvocationInput): Promise<Skill
     space = resolution.space;
     folder = resolution.space.folder;
   } else {
-    space = createSpace({ body: titleSeed }, skill.id);
+    space = (await createSpace({ body: titleSeed }, skill.id));
     folder = createSpaceFolder(workspace, space.id, skill.name);
-    assignSpaceFolder(space.id, folder);
+    (await assignSpaceFolder(space.id, folder));
     space.folder = folder;
   }
 
@@ -183,7 +212,15 @@ async function invokeSkillSerialized(input: SkillInvocationInput): Promise<Skill
   if (reusedSpace) {
     // Without this the agent treats the space as blank and rewrites the report
     // from scratch, losing what the user had already read and acted on.
-    instructions += buildRefreshFraming(describePriorArtifacts(workspace, folder));
+    instructions += buildRefreshFraming((await describePriorArtifacts(workspace, folder)));
+  }
+  if (resultFirst) {
+    const previousSpace = scheduledRun.previousSpaceId ? (await getSpace(scheduledRun.previousSpaceId)) : null;
+    const previousCanvas = previousSpace?.folder
+      ? path.join(resolveSpaceFolder(workspace, previousSpace.folder), 'canvas.md')
+      : undefined;
+    instructions = buildScheduledInstructions(skill.name, intent, scheduledRun, previousCanvas);
+    fs.writeFileSync(path.join(workspace, folder, 'skill-instructions.md'), skillContent, 'utf-8');
   }
 
   const frontmatter: SkillInvocationFrontmatter = {
@@ -191,20 +228,35 @@ async function invokeSkillSerialized(input: SkillInvocationInput): Promise<Skill
     instructions,
     ...(preferredAgent ? { preferred_agent: preferredAgent } : {}),
     ...(canvasArtifacts !== undefined ? { canvas_artifacts: canvasArtifacts } : {}),
-    ...(canvasSettings.spaceMode ? { space_mode: canvasSettings.spaceMode } : {}),
+    ...(resultFirst ? { space_mode: 'new' } : canvasSettings.spaceMode ? { space_mode: canvasSettings.spaceMode } : {}),
     skill_invocation: {
       skill_id: skill.id,
       source,
       ...(intent ? { source_prompt: intent } : {}),
       created_at: createdAt,
       run_id: runId,
+      ...(scheduledRun ? {
+        schedule_id: scheduledRun.scheduleId,
+        scheduled_at: scheduledRun.scheduledAt,
+        manual: scheduledRun.manual === true,
+        ...(resultFirst ? {
+          instruction_snapshot: 'skill-instructions.md',
+          instruction_sha256: crypto.createHash('sha256').update(skillContent).digest('hex'),
+        } : {}),
+      } : {}),
     },
   };
 
-  const canvasContent = serializeFrontmatter(frontmatter, buildCanvasBody(titleSeed));
   const canvasPath = path.join(workspace, folder, 'canvas.md');
+  const existing = reusedSpace && fs.existsSync(canvasPath)
+    ? parseFrontmatter<Record<string, unknown>>(fs.readFileSync(canvasPath, 'utf-8'))
+    : null;
+  const body = existing?.body ?? (resultFirst
+    ? `${buildCanvasBody(titleSeed)}\nPreparing your result. The skill is linked above; findings will appear here.\n`
+    : buildCanvasBody(titleSeed));
+  const canvasContent = serializeFrontmatter({ ...existing?.frontmatter, ...frontmatter }, body);
   fs.writeFileSync(canvasPath, canvasContent, 'utf-8');
-  updateCanvasContent(space.id, canvasContent);
+  (await updateCanvasContent(space.id, canvasContent));
   scheduleAutoCommit(workspace);
 
   if (!input.run) {
@@ -215,8 +267,18 @@ async function invokeSkillSerialized(input: SkillInvocationInput): Promise<Skill
   const agentResult = await launchDocumentAgent(space.id, workspace, folder, {
     ...(preferredAgent ? { personaHandle: preferredAgent } : {}),
     promptOverride: instructions,
+    ...(scheduledRun ? { scheduledRun } : {}),
   });
   if ('error' in agentResult) {
+    if (resultFirst) {
+      const current = fs.readFileSync(canvasPath, 'utf-8');
+      const failedContent = `${current.trimEnd()}\n\n## Run could not start\n\n${agentResult.error}\n`;
+      fs.writeFileSync(canvasPath, failedContent, 'utf-8');
+      (await updateCanvasContent(space.id, failedContent));
+      notifyAllWindows('canvas:content-updated', { spaceId: space.id, content: failedContent });
+      scheduleAutoCommit(workspace);
+      return { space, canvasContent: failedContent, error: agentResult.error };
+    }
     return { space, canvasContent, error: agentResult.error };
   }
 

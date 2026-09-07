@@ -3,8 +3,16 @@ import * as path from 'path';
 import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { Space, Attachment, CanvasAgent, AgentSession, AgentChatEvent, CreateSpaceInput, Skill, SkillFrontmatter } from '../shared/types';
-import { appendEvent, replayLog } from './eventlog';
-import { readCanvas, slugify } from './workspace';
+import { appendEvent as appendLogEvent, replayLog, recoverLogTails, type AppendReceipt } from './eventlog';
+import { createPersistenceSchema } from './persistence-schema';
+import { createQueryIndexes, verifySearchCapabilities } from './query-index';
+import { querySpacePage, querySpaceEventPage, queryAgentPage, queryActivityPage } from './paged-queries';
+import type { SpacePageRequest, PageRequest, AgentPageRequest } from '../shared/paging';
+import { queryChatHistoryPage } from './chat-history-page';
+import { syncDirectory } from './persistence-snapshot';
+import { hashFile } from './persistence-snapshot';
+import { listLogFiles, SNAPSHOT_FILENAME } from './log-store';
+import { readCanvas, slugify, resolveSpaceFolder } from './workspace';
 import { deriveMarkdownTitle, ensureMarkdownH1Title } from '../shared/markdown-title';
 import { initContentStore, closeContentStore, storeContent, type ContentRef } from './subagent-content-store';
 import {
@@ -12,7 +20,9 @@ import {
   computeFingerprint,
   fingerprintPathFor,
   readFingerprint,
+  sameLogState,
   writeFingerprint,
+  type Fingerprint,
 } from './db-fingerprint';
 
 let db: Database.Database;
@@ -23,6 +33,44 @@ let logRoot: string;
  *  the fingerprint sidecar to reflect any events appended during this
  *  session. */
 let dbFilePath: string;
+/** Baseline replay inputs; acknowledged local appends are tracked separately. */
+let appliedFingerprint: Fingerprint | undefined;
+let expectedLogFiles = new Map<string, { size: number; mtimeMs: number }>();
+let pendingAppend: AppendReceipt | undefined;
+let fingerprintEligible = false;
+const canvasMetadata = new Map<string, { size: number; mtimeMs: number }>();
+
+function rememberAppliedInputs(fingerprint: Fingerprint): void {
+  appliedFingerprint = fingerprint;
+  expectedLogFiles = new Map(fingerprint.logFiles.map(file => [file.path, file]));
+  pendingAppend = undefined;
+  fingerprintEligible = true;
+}
+
+function appendEvent(root: string, op: string, data: Record<string, any>): void {
+  if (pendingAppend) fingerprintEligible = false;
+  // Until both the append and SQL application succeed, the cache is untrusted.
+  const wasEligible = fingerprintEligible;
+  fingerprintEligible = false;
+  pendingAppend = appendLogEvent(root, op, data);
+  const expected = expectedLogFiles.get(pendingAppend.path);
+  const before = pendingAppend.before;
+  fingerprintEligible = wasEligible &&
+    (before ? expected?.size === before.size && expected.mtimeMs === before.mtimeMs : expected === undefined) &&
+    pendingAppend.after.size === (before?.size ?? 0) + pendingAppend.bytesWritten;
+}
+
+/** Called only after the corresponding SQL mutation (and any cascades) succeeded. */
+function acknowledgeAppliedEvent(): void {
+  if (pendingAppend) expectedLogFiles.set(pendingAppend.path, pendingAppend.after);
+  pendingAppend = undefined;
+}
+
+function requireUpdateTarget(table: 'spaces' | 'canvas_agents' | 'agent_sessions' | 'subagent_records', id: string): void {
+  if (!db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(id)) {
+    throw new Error(`Cannot durably update missing ${table} row`);
+  }
+}
 
 export function isInitialized(): boolean {
   return db !== undefined;
@@ -30,34 +78,114 @@ export function isInitialized(): boolean {
 
 export function closeDatabase(): void {
   if (db) {
-    // Refresh the fingerprint sidecar with the current on-disk state of
-    // the log + DB so the next initDatabase can take the fast path.
-    // Without this step the sidecar would only reflect the state at the
-    // end of the previous init, missing every event we appended during
-    // the session.
+    db.close();
+    db = undefined as any;
     if (dbFilePath && logRoot) {
       try {
         const sidecar = fingerprintPathFor(dbFilePath);
-        const previous = readFingerprint(sidecar);
-        db.close();
-        db = undefined as any;
-        const fp = computeFingerprint(logRoot, dbFilePath, previous);
-        writeFingerprint(sidecar, fp);
+        if (appliedFingerprint) {
+          const current = computeFingerprint(logRoot, dbFilePath, appliedFingerprint);
+          const matchesAcknowledged = fingerprintEligible && !pendingAppend &&
+            current.logFiles.length === expectedLogFiles.size &&
+            current.logFiles.every(file => {
+              const expected = expectedLogFiles.get(file.path);
+              return expected?.size === file.size && expected.mtimeMs === file.mtimeMs;
+            });
+          // A file added/changed by sync was not necessarily applied to SQLite.
+          writeFingerprint(sidecar, {
+            ...(matchesAcknowledged ? current : appliedFingerprint),
+            db: current.db,
+          });
+        }
       } catch (err) {
         console.warn('[database] Failed to refresh fingerprint at close:', err);
       }
-    } else {
-      db.close();
-      db = undefined as any;
     }
     logRoot = '';
     dbFilePath = '';
   }
+  appliedFingerprint = undefined;
+  expectedLogFiles.clear();
+  pendingAppend = undefined;
+  fingerprintEligible = false;
   closeContentStore();
 }
 
 export function getDatabase(): Database.Database {
   return db;
+}
+
+/** Capture only state already acknowledged by SQLite, before a sync mutates files. */
+export function checkpointAppliedState(): void {
+  if (!appliedFingerprint || !fingerprintEligible || pendingAppend) {
+    throw new Error('Storage requires recovery before synchronization');
+  }
+  const current = computeFingerprint(logRoot, dbFilePath);
+  if (current.logFiles.length !== expectedLogFiles.size || current.logFiles.some(file => {
+    const expected = expectedLogFiles.get(file.path);
+    return expected?.size !== file.size || expected.mtimeMs !== file.mtimeMs;
+  })) throw new Error('Unapplied external log changes; recover before synchronization');
+  rememberAppliedInputs(current);
+}
+
+/** Only append-only suffixes after the last applied segment may replay incrementally. */
+export function applyIncomingChanges(): void {
+  const previous = appliedFingerprint;
+  const current = computeFingerprint(logRoot, dbFilePath);
+  const files = listLogFiles(logRoot);
+  const previousFiles = previous?.logFiles.filter(file => !file.path.includes(`${path.sep}snapshots${path.sep}`)) ?? [];
+  const offsets = new Map<string, number>();
+  let incremental = !!previous && fingerprintEligible && !pendingAppend;
+  // Local SQL acknowledgements may be newer than the last hashed checkpoint.
+  // If there are no external changes, checkpoint directly instead of replaying
+  // those events. Otherwise rebuild rather than double-applying a local suffix.
+  const hasLocalAppends = previous && (expectedLogFiles.size !== previous.logFiles.length ||
+    previous.logFiles.some(file => expectedLogFiles.get(file.path)?.size !== file.size));
+  if (hasLocalAppends) {
+    const matches = fingerprintEligible && !pendingAppend &&
+      current.logFiles.length === expectedLogFiles.size && current.logFiles.every(file => {
+        const expected = expectedLogFiles.get(file.path);
+        return expected?.size === file.size && expected.mtimeMs === file.mtimeMs;
+      }) && previous.logFiles.every(file => hashFile(file.path, file.size) === file.sha256);
+    if (matches) { rememberAppliedInputs(current); return; }
+    incremental = false;
+  }
+  for (let i = 0; i < previousFiles.length && incremental; i++) {
+    const prior = previousFiles[i];
+    const next = current.logFiles.find(file => file.path === prior.path);
+    if (files[i] !== prior.path || !next || next.size < prior.size) { incremental = false; break; }
+    const mayAppend = i === previousFiles.length - 1 && path.basename(prior.path) !== SNAPSHOT_FILENAME;
+    if ((!mayAppend && next.size !== prior.size) || hashFile(prior.path, prior.size) !== prior.sha256) {
+      incremental = false;
+      break;
+    }
+    if (prior.size > 0) {
+      const fd = fs.openSync(prior.path, 'r');
+      try {
+        const last = Buffer.alloc(1);
+        fs.readSync(fd, last, 0, 1, prior.size - 1);
+        if (last[0] !== 10) incremental = false;
+      } finally { fs.closeSync(fd); }
+    }
+    offsets.set(prior.path, prior.size);
+  }
+  // Immutable shard replacements require the fully validating rebuild path.
+  if (previous?.logFiles.some(prior => prior.path.includes(`${path.sep}snapshots${path.sep}`) &&
+      !current.logFiles.some(next => next.path === prior.path && next.sha256 === prior.sha256))) incremental = false;
+  if (incremental) {
+    const result = replayLog(logRoot, db, offsets);
+    const after = computeFingerprint(logRoot, dbFilePath);
+    if (!result.complete || !sameLogState(current, after)) {
+      fingerprintEligible = false;
+      throw new Error('Event log changed or was incomplete during synchronization');
+    }
+    rememberAppliedInputs(after);
+    canvasMetadata.clear();
+    return;
+  }
+  const location: [string, string] = [dbFilePath, logRoot];
+  closeDatabase();
+  initDatabase(...location);
 }
 
 /**
@@ -70,12 +198,21 @@ export function getDatabase(): Database.Database {
  * touching the log at all. This is the common case on a hot restart.
  *
  * Slow path (changed log, missing fingerprint, schema bump, tampered DB
- * file): drop the DB, recreate the schema, replay every event, and
- * write a fresh fingerprint sidecar.
+ * file): build a replacement cache, replay every event, then atomically
+ * publish it with a fresh fingerprint sidecar.
  */
 export function initDatabase(dbPath: string, eventLogRoot: string): void {
+  canvasMetadata.clear();
+  if (db?.open) {
+    db.close();
+    db = undefined as any;
+  }
   logRoot = eventLogRoot;
   dbFilePath = dbPath;
+  appliedFingerprint = undefined;
+  expectedLogFiles.clear();
+  pendingAppend = undefined;
+  fingerprintEligible = false;
 
   // Heavy sub-agent payloads (turn responses, large tool results) live in
   // <workspace>/.whim/subagent-content/ as side files instead of inline in
@@ -83,11 +220,16 @@ export function initDatabase(dbPath: string, eventLogRoot: string): void {
   // handler can read paths that pre-existing events reference.
   initContentStore(path.join(path.dirname(dbPath), 'subagent-content'));
 
+  recoverLogTails(eventLogRoot);
   const sidecarPath = fingerprintPathFor(dbPath);
   const previous = readFingerprint(sidecarPath);
   const current = computeFingerprint(eventLogRoot, dbPath, previous);
 
-  if (fs.existsSync(dbPath) && canSkipReplay(previous, current)) {
+  const reuseCache = fs.existsSync(dbPath) && canSkipReplay(previous, current);
+  if (process.env.WHIM_PERF === '1') console.info('[perf:storage-open]', {
+    reuseCache, logFiles: current.logFiles.length,
+  });
+  if (reuseCache) {
     // Hot restart — the cache is still in sync with the log. Open the
     // existing DB and write a refreshed fingerprint: opening SQLite
     // touches the file (journal_mode pragma), so the recorded mtime
@@ -95,126 +237,73 @@ export function initDatabase(dbPath: string, eventLogRoot: string): void {
     // DB had been tampered with.
     db = new Database(dbPath);
     db.pragma('journal_mode = DELETE');
+    db.pragma('recursive_triggers = ON');
+    verifySearchCapabilities(db);
     const refreshed = computeFingerprint(eventLogRoot, dbPath, previous);
-    writeFingerprint(sidecarPath, refreshed);
+    if (sameLogState(current, refreshed)) {
+      rememberAppliedInputs(refreshed);
+      writeFingerprint(sidecarPath, refreshed);
+    } else {
+      db.close();
+      db = undefined as any;
+      throw new Error('Event log changed while opening the cache; retry initialization');
+    }
     return;
   }
 
-  // Cold rebuild path.
-  for (const f of [dbPath, dbPath + '-journal', dbPath + '-wal', dbPath + '-shm']) {
-    if (fs.existsSync(f)) fs.unlinkSync(f);
+  // Build beside the existing cache. Unsupported/corrupt logs must not destroy
+  // the last usable database, nor publish a success-shaped fingerprint.
+  const temporaryPath = `${dbPath}.rebuild-${process.pid}-${uuidv4()}`;
+  try {
+    db = new Database(temporaryPath);
+    db.pragma('journal_mode = DELETE');
+    createSchema(db);
+    const replayResult = replayLog(eventLogRoot, db);
+    createQueryIndexes(db);
+    db.close();
+    db = undefined as any;
+    const afterReplay = computeFingerprint(eventLogRoot, temporaryPath, current);
+    if (!sameLogState(current, afterReplay)) {
+      throw new Error('Event log changed during replay; retry initialization');
+    }
+    fs.renameSync(temporaryPath, dbPath);
+    // Journals belong to the replaced derived cache, never to the new DB.
+    for (const suffix of ['-journal', '-wal', '-shm']) {
+      const file = dbPath + suffix;
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+    syncDirectory(path.dirname(dbPath));
+    db = new Database(dbPath);
+    db.pragma('journal_mode = DELETE');
+    db.pragma('recursive_triggers = ON');
+    verifySearchCapabilities(db);
+    const stat = fs.statSync(dbPath);
+    if (replayResult?.complete !== false) {
+      const fingerprint = {
+        ...afterReplay,
+        db: { path: dbPath, size: stat.size, mtimeMs: stat.mtimeMs },
+      };
+      rememberAppliedInputs(fingerprint);
+      writeFingerprint(sidecarPath, fingerprint);
+    } else if (fs.existsSync(sidecarPath)) {
+      fs.unlinkSync(sidecarPath);
+    }
+  } catch (err) {
+    if (db?.open) db.close();
+    db = undefined as any;
+    appliedFingerprint = undefined;
+    closeContentStore();
+    throw err;
+  } finally {
+    for (const file of [temporaryPath, `${temporaryPath}-journal`]) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
   }
-
-  db = new Database(dbPath);
-  db.pragma('journal_mode = DELETE');
-
-  createSchema(db);
-
-  // Rebuild state from event log
-  replayLog(eventLogRoot, db);
-
-  // Close + reopen so the DB's mtime/size on disk match what we record in
-  // the fingerprint (SQLite buffers writes in journal/WAL space otherwise,
-  // and we want the fingerprint to reflect the final persisted state).
-  db.close();
-  db = new Database(dbPath);
-  db.pragma('journal_mode = DELETE');
-
-  // Re-stat the DB after close so the fingerprint records the post-replay state.
-  const fingerprint = computeFingerprint(eventLogRoot, dbPath, previous);
-  writeFingerprint(sidecarPath, fingerprint);
 }
 
-/** Idempotent schema creation, factored out so the fast path can skip it. */
+/** Log-backed schema plus the separately file-backed skills cache. */
 function createSchema(database: Database.Database): void {
-  database.exec(`
-    CREATE TABLE spaces (
-      id TEXT PRIMARY KEY,
-      description TEXT NOT NULL,
-      body TEXT,
-      raw_text TEXT,
-      client TEXT,
-      due_at TEXT,
-      due_at_utc TEXT,
-      recurrence TEXT,
-      completed_at TEXT,
-      folder TEXT,
-      session_id TEXT,
-      source_skill_id TEXT,
-      attachments TEXT DEFAULT '[]',
-      canvas_content TEXT DEFAULT '',
-      status TEXT NOT NULL DEFAULT 'captured',
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-  `);
-
-  database.exec(`
-    CREATE TABLE canvas_agents (
-      id TEXT PRIMARY KEY,
-      space_id TEXT NOT NULL,
-      selected_text TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      pid INTEGER,
-      status TEXT NOT NULL DEFAULT 'running',
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      FOREIGN KEY (space_id) REFERENCES spaces(id) ON DELETE CASCADE
-    )
-  `);
-
-  database.exec(`
-    CREATE TABLE agent_sessions (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      space_id TEXT,
-      prompt TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'running',
-      summary TEXT DEFAULT '',
-      working_dir TEXT,
-      source TEXT NOT NULL DEFAULT 'sdk',
-      persona_handle TEXT,
-      quoted_text TEXT,
-      comment_thread_id TEXT,
-      run_location TEXT NOT NULL DEFAULT 'local',
-      cca_job_id TEXT,
-      cca_repository TEXT,
-      cca_effective_repository TEXT,
-      cca_fallback_json TEXT,
-      cca_result_json TEXT,
-      yolo_mode INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-  `);
-
-  database.exec(`
-    CREATE TABLE agent_chat_events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      agent_id TEXT NOT NULL,
-      seq INTEGER NOT NULL,
-      event_id TEXT,
-      type TEXT NOT NULL,
-      timestamp TEXT NOT NULL,
-      payload TEXT NOT NULL,
-      UNIQUE(agent_id, seq)
-    )
-  `);
-  database.exec('CREATE INDEX idx_agent_chat_events_agent_seq ON agent_chat_events(agent_id, seq)');
-
-  database.exec(`
-    CREATE TABLE space_events (
-      id TEXT PRIMARY KEY,
-      space_id TEXT NOT NULL,
-      event_type TEXT NOT NULL,
-      due_at TEXT,
-      due_at_utc TEXT,
-      completed_at TEXT,
-      recurrence_json TEXT,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (space_id) REFERENCES spaces(id) ON DELETE CASCADE
-    )
-  `);
+  createPersistenceSchema(database);
 
   database.exec(`
     CREATE TABLE IF NOT EXISTS skills (
@@ -231,52 +320,6 @@ function createSchema(database: Database.Database): void {
       last_run_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
-    )
-  `);
-
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS subagent_records (
-      id TEXT PRIMARY KEY,
-      parent_agent_id TEXT NOT NULL,
-      tool_call_id TEXT,
-      agent_name TEXT NOT NULL,
-      display_name TEXT,
-      description TEXT,
-      agent_type TEXT,
-      status TEXT NOT NULL DEFAULT 'running',
-      started_at INTEGER NOT NULL,
-      completed_at INTEGER,
-      duration_ms INTEGER,
-      model TEXT,
-      total_tokens INTEGER,
-      total_tool_calls INTEGER,
-      error TEXT,
-      streaming_content TEXT DEFAULT '',
-      streaming_content_path TEXT,
-      turns_json TEXT DEFAULT '[]',
-      turns_path TEXT,
-      progress_json TEXT DEFAULT '{}',
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )
-  `);
-
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS subagent_tool_calls (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      subagent_id TEXT NOT NULL,
-      parent_agent_id TEXT NOT NULL,
-      tool_call_id TEXT,
-      tool_name TEXT NOT NULL,
-      arguments_json TEXT,
-      result TEXT,
-      result_path TEXT,
-      success INTEGER DEFAULT 1,
-      error TEXT,
-      started_at INTEGER,
-      completed_at INTEGER,
-      created_at TEXT NOT NULL,
-      FOREIGN KEY (subagent_id) REFERENCES subagent_records(id)
     )
   `);
 }
@@ -345,6 +388,7 @@ export function createSpace(input: CreateSpaceInput, sourceSkillId?: string): Sp
     `INSERT INTO spaces (id, description, body, raw_text, client, due_at, due_at_utc, recurrence, completed_at, folder, session_id, source_skill_id, attachments, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(space.id, space.description, space.body, space.raw_text, space.client, space.due_at, space.due_at_utc, space.recurrence, space.completed_at, space.folder, space.session_id, space.source_skill_id, JSON.stringify(space.attachments), space.status, space.created_at, space.updated_at);
+  acknowledgeAppliedEvent();
 
   return space;
 }
@@ -372,7 +416,38 @@ export function listSpaces(): Space[] {
   return rows.map(r => ({ ...r, attachments: parseAttachments(r.attachments) }));
 }
 
+export function listSpaceSummaries(request: SpacePageRequest = {}) {
+  return querySpacePage(db, request);
+}
+
+export function listSpaceEventsPage(request: PageRequest = {}) {
+  return querySpaceEventPage(db, request);
+}
+
+export function listAgentSummaries(request: AgentPageRequest = {}) {
+  return queryAgentPage(db, request);
+}
+
+export function listAgentHistoryPage(agentId: string, request: PageRequest = {}) {
+  return queryChatHistoryPage(db, agentId, request);
+}
+
+export function listActivityPage(request: import('../shared/paging').ActivityPageRequest = {}) {
+  return queryActivityPage(db, request);
+}
+
+export function getSpaceSummary(id: string) {
+  return db.prepare(`SELECT id, description, client, due_at, due_at_utc, recurrence, completed_at, folder,
+    session_id, source_skill_id, status, created_at, updated_at FROM spaces WHERE id=?`).get(id) as import('../shared/paging').SpaceSummary | undefined ?? null;
+}
+
+export function invalidateCanvasMetadata(file?: string): void {
+  if (file) canvasMetadata.delete(file);
+  else canvasMetadata.clear();
+}
+
 export function updateSpace(id: string, updates: Partial<Pick<Space, 'description' | 'body' | 'client' | 'due_at' | 'due_at_utc' | 'recurrence' | 'completed_at' | 'status' | 'attachments'>>): Space | null {
+  if (!db.prepare('SELECT 1 FROM spaces WHERE id = ?').get(id)) return null;
   const now = new Date().toISOString();
   const fields: Record<string, string | null> = { updated_at: now };
 
@@ -392,6 +467,7 @@ export function updateSpace(id: string, updates: Partial<Pick<Space, 'descriptio
   const sets = Object.keys(fields).map(k => `${k} = ?`);
   const values = [...Object.values(fields), id];
   db.prepare(`UPDATE spaces SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+  acknowledgeAppliedEvent();
 
   return getSpace(id);
 }
@@ -405,10 +481,12 @@ export function updateSpaceCAS(id: string, expectedVersion: string, updates: Par
 
 /** Assign a workspace folder to an space. Logged as a dedicated event. */
 export function assignSpaceFolder(spaceId: string, folder: string): void {
-  appendEvent(logRoot, 'space.assign_folder', { id: spaceId, folder });
+  requireUpdateTarget('spaces', spaceId);
   const now = new Date().toISOString();
+  appendEvent(logRoot, 'space.assign_folder', { id: spaceId, folder, updated_at: now });
   db.prepare('UPDATE spaces SET folder = ?, updated_at = ? WHERE id = ?')
     .run(folder, now, spaceId);
+  acknowledgeAppliedEvent();
 }
 
 export function logSpaceEvent(spaceId: string, eventType: string, data: { due_at?: string | null; due_at_utc?: string | null; completed_at?: string | null; recurrence_json?: string | null } = {}): void {
@@ -430,6 +508,7 @@ export function logSpaceEvent(spaceId: string, eventType: string, data: { due_at
     `INSERT INTO space_events (id, space_id, event_type, due_at, due_at_utc, completed_at, recurrence_json, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(eventId, spaceId, eventType, data.due_at ?? null, data.due_at_utc ?? null, data.completed_at ?? null, data.recurrence_json ?? null, now);
+  acknowledgeAppliedEvent();
 }
 
 export interface SpaceEvent {
@@ -466,20 +545,37 @@ export function setSpaceSessionId(spaceId: string, sessionId: string): void {
 export function deleteSpace(id: string): boolean {
   appendEvent(logRoot, 'space.delete', { id });
   const result = db.prepare('DELETE FROM spaces WHERE id = ?').run(id);
+  acknowledgeAppliedEvent();
   return result.changes > 0;
 }
 
 /** Read all canvas files from disk and populate the canvas_content column. */
 export function syncCanvasContent(workspaceRoot: string): void {
-  const rows = db.prepare('SELECT id, folder FROM spaces WHERE folder IS NOT NULL').all() as { id: string; folder: string }[];
+  let cursor: string | undefined;
+  do { cursor = syncCanvasBatch(workspaceRoot, cursor).cursor; } while (cursor);
+}
+
+export function syncCanvasBatch(workspaceRoot: string, cursor = ''): { cursor?: string } {
+  const rows = db.prepare('SELECT id, folder FROM spaces WHERE folder IS NOT NULL AND id > ? ORDER BY id LIMIT 16')
+    .all(cursor) as { id: string; folder: string }[];
   const stmt = db.prepare('UPDATE spaces SET canvas_content = ? WHERE id = ?');
   for (const row of rows) {
+    const file = path.join(resolveSpaceFolder(workspaceRoot, row.folder), 'canvas.md');
     try {
+      const stat = fs.statSync(file);
+      const previous = canvasMetadata.get(file);
+      if (previous?.size === stat.size && previous.mtimeMs === stat.mtimeMs) continue;
       const content = readCanvas(workspaceRoot, row.folder);
       stmt.run(content, row.id);
       if (content.trim()) syncDerivedSpaceTitle(row.id, content);
-    } catch { /* folder may not exist yet */ }
+      canvasMetadata.set(file, { size: stat.size, mtimeMs: stat.mtimeMs });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      canvasMetadata.delete(file);
+      stmt.run('', row.id);
+    }
   }
+  return rows.length === 16 ? { cursor: rows[rows.length - 1].id } : {};
 }
 
 function syncDerivedSpaceTitle(spaceId: string, content: string): { title: string; changed: boolean } {
@@ -554,11 +650,16 @@ export function createCanvasAgent(agent: CanvasAgent): void {
     `INSERT INTO canvas_agents (id, space_id, selected_text, session_id, pid, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(agent.id, agent.space_id, agent.selected_text, agent.session_id, agent.pid, agent.status, agent.created_at, agent.updated_at);
+  acknowledgeAppliedEvent();
 }
 
 export function updateCanvasAgentStatus(id: string, status: 'running' | 'waiting-approval' | 'completed' | 'failed', pid?: number | null): void {
+  // Quick/comment agents own a session but no canvas-agent projection.
+  if (!db.prepare('SELECT 1 FROM canvas_agents WHERE id = ?').get(id) &&
+      db.prepare('SELECT 1 FROM agent_sessions WHERE id = ?').get(id)) return;
+  requireUpdateTarget('canvas_agents', id);
   const now = new Date().toISOString();
-  appendEvent(logRoot, 'canvas_agent.updated', { id, status, pid: pid ?? null, updated_at: now });
+  appendEvent(logRoot, 'canvas_agent.updated', { id, status, pid: pid ?? null, pid_provided: pid !== undefined, updated_at: now });
   const updates: any[] = [status, now];
   let sql = 'UPDATE canvas_agents SET status = ?, updated_at = ?';
   if (pid !== undefined) {
@@ -568,6 +669,7 @@ export function updateCanvasAgentStatus(id: string, status: 'running' | 'waiting
   sql += ' WHERE id = ?';
   updates.push(id);
   db.prepare(sql).run(...updates);
+  acknowledgeAppliedEvent();
 }
 
 export function listCanvasAgents(spaceId: string): CanvasAgent[] {
@@ -626,9 +728,11 @@ export function createAgentSession(session: AgentSession): void {
     session.yolo_mode ? 1 : 0,
     session.created_at, session.updated_at,
   );
+  acknowledgeAppliedEvent();
 }
 
 export function updateAgentSessionStatus(id: string, status: string, summary?: string): void {
+  requireUpdateTarget('agent_sessions', id);
   const now = new Date().toISOString();
   appendEvent(logRoot, 'agent_session.updated', { id, status, summary: summary ?? null, updated_at: now });
 
@@ -639,21 +743,26 @@ export function updateAgentSessionStatus(id: string, status: string, summary?: s
     db.prepare('UPDATE agent_sessions SET status = ?, updated_at = ? WHERE id = ?')
       .run(status, now, id);
   }
+  acknowledgeAppliedEvent();
 }
 
 export function updateAgentSessionCcaResult(id: string, result: string): void {
+  requireUpdateTarget('agent_sessions', id);
   const now = new Date().toISOString();
   appendEvent(logRoot, 'agent_session.cca_result', { id, cca_result_json: result, updated_at: now });
   db.prepare('UPDATE agent_sessions SET cca_result_json = ?, updated_at = ? WHERE id = ?')
     .run(result, now, id);
+  acknowledgeAppliedEvent();
 }
 
 /** Persist the per-session yolo (auto-approve) flag so it survives app restart. */
 export function updateAgentSessionYolo(id: string, enabled: boolean): void {
+  requireUpdateTarget('agent_sessions', id);
   const now = new Date().toISOString();
   appendEvent(logRoot, 'agent_session.yolo', { id, yolo_mode: enabled, updated_at: now });
   db.prepare('UPDATE agent_sessions SET yolo_mode = ?, updated_at = ? WHERE id = ?')
     .run(enabled ? 1 : 0, now, id);
+  acknowledgeAppliedEvent();
 }
 
 export function getAgentSession(id: string): AgentSession | null {
@@ -665,25 +774,24 @@ export function getAgentSession(id: string): AgentSession | null {
   return { ...row, yolo_mode: !!row.yolo_mode };
 }
 
-export function listAgentSessions(): AgentSession[] {
+export function listAgentSessions(spaceId?: string): AgentSession[] {
   const rows = db.prepare(
     `SELECT id, session_id, space_id, prompt, status, summary, working_dir, source, persona_handle, quoted_text, comment_thread_id, run_location, cca_job_id, cca_repository, cca_effective_repository, cca_fallback_json, cca_result_json, yolo_mode, created_at, updated_at
-     FROM agent_sessions ORDER BY created_at DESC`
-  ).all() as Array<Omit<AgentSession, 'yolo_mode'> & { yolo_mode: number }>;
+     FROM agent_sessions ${spaceId === undefined ? '' : 'WHERE space_id = ?'} ORDER BY created_at DESC`
+  ).all(...(spaceId === undefined ? [] : [spaceId])) as Array<Omit<AgentSession, 'yolo_mode'> & { yolo_mode: number }>;
   return rows.map((r) => ({ ...r, yolo_mode: !!r.yolo_mode }));
 }
 
 /** Update the session_id for an agent across both tables (e.g. after session recreation). */
 export function updateAgentSessionId(id: string, newSessionId: string): void {
+  requireUpdateTarget('agent_sessions', id);
   const now = new Date().toISOString();
   appendEvent(logRoot, 'agent_session.updated', { id, session_id: newSessionId, updated_at: now });
   db.prepare('UPDATE agent_sessions SET session_id = ?, updated_at = ? WHERE id = ?')
     .run(newSessionId, now, id);
-  // Also update canvas_agents if present (best-effort)
-  try {
-    db.prepare('UPDATE canvas_agents SET session_id = ?, updated_at = ? WHERE id = ?')
-      .run(newSessionId, now, id);
-  } catch { /* non-fatal — row may not exist for quick agents */ }
+  db.prepare('UPDATE canvas_agents SET session_id = ?, updated_at = ? WHERE id = ?')
+    .run(newSessionId, now, id);
+  acknowledgeAppliedEvent();
 }
 
 export function deleteAgentSession(id: string): void {
@@ -691,6 +799,7 @@ export function deleteAgentSession(id: string): void {
   db.prepare('DELETE FROM agent_sessions WHERE id = ?').run(id);
   // Cascade chat events when the session goes away.
   db.prepare('DELETE FROM agent_chat_events WHERE agent_id = ?').run(id);
+  acknowledgeAppliedEvent();
 }
 
 // ── Agent Chat Events ────────────────────────────────────
@@ -737,6 +846,7 @@ export function appendAgentChatEvent(
     `INSERT INTO agent_chat_events (agent_id, seq, event_id, type, timestamp, payload)
      VALUES (?, ?, ?, ?, ?, ?)`
   ).run(agentId, seq, event.event_id, event.type, event.timestamp, event.payload);
+  acknowledgeAppliedEvent();
 
   return seq;
 }
@@ -751,7 +861,9 @@ export function listAgentChatEvents(agentId: string): AgentChatEvent[] {
 
 /** Remove all persisted chat events for an agent. */
 export function clearAgentChatEvents(agentId: string): void {
+  appendEvent(logRoot, 'agent_chat.cleared', { agent_id: agentId });
   db.prepare('DELETE FROM agent_chat_events WHERE agent_id = ?').run(agentId);
+  acknowledgeAppliedEvent();
 }
 
 // ── Skills ────────────────────────────────────────────────
@@ -1047,12 +1159,14 @@ export function createSubagentRecord(record: Omit<SubagentRecordRow, 'created_at
     off.dbFields.turns_json, off.dbFields.turns_path,
     record.progress_json ?? '{}', now, now,
   );
+  acknowledgeAppliedEvent();
 }
 
 export function updateSubagentRecord(
   id: string,
   updates: Partial<Pick<SubagentRecordRow, 'status' | 'completed_at' | 'duration_ms' | 'model' | 'total_tokens' | 'total_tool_calls' | 'error' | 'streaming_content' | 'turns_json' | 'progress_json'>>,
 ): void {
+  requireUpdateTarget('subagent_records', id);
   const now = new Date().toISOString();
 
   // Off-load heavy fields when they're being updated.
@@ -1096,6 +1210,7 @@ export function updateSubagentRecord(
   }
   values.push(id);
   db.prepare(`UPDATE subagent_records SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+  acknowledgeAppliedEvent();
 }
 
 export function listSubagentRecords(parentAgentId: string): SubagentRecordRow[] {
@@ -1128,6 +1243,7 @@ export function createSubagentToolCall(tc: Omit<SubagentToolCallRow, 'id' | 'cre
     tc.arguments_json, inlineResult, resultPath, tc.success, tc.error ?? null,
     tc.started_at ?? null, tc.completed_at ?? null, now,
   );
+  acknowledgeAppliedEvent();
 }
 
 export function updateSubagentToolCall(
@@ -1135,6 +1251,9 @@ export function updateSubagentToolCall(
   toolCallId: string,
   updates: { success: number; result?: string; error?: string; completed_at?: number },
 ): void {
+  if (!db.prepare('SELECT 1 FROM subagent_tool_calls WHERE subagent_id = ? AND tool_call_id = ?').get(subagentId, toolCallId)) {
+    throw new Error('Cannot durably update missing subagent tool call');
+  }
   const sets: string[] = [];
   const values: any[] = [];
 
@@ -1170,6 +1289,7 @@ export function updateSubagentToolCall(
   });
   values.push(subagentId, toolCallId);
   db.prepare(`UPDATE subagent_tool_calls SET ${sets.join(', ')} WHERE subagent_id = ? AND tool_call_id = ?`).run(...values);
+  acknowledgeAppliedEvent();
 }
 
 export function listSubagentToolCalls(subagentId: string): SubagentToolCallRow[] {

@@ -15,7 +15,15 @@ vi.mock('./cloud-agent', () => ({
   launchCloudAgentWithFallback: vi.fn(),
 }));
 
-vi.mock('./database', () => ({
+vi.mock('./storage', async () => ({
+  ...(await import('./workspace')),
+  ...(await import('./services/skill-schedule-store')),
+  ...(await import('./canvas/artifact-store')),
+  documentMatches: (await import('./storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   createAgentSession: vi.fn(),
   isInitialized: vi.fn(() => true),
   listAgentSessions: vi.fn(() => []),
@@ -38,7 +46,7 @@ import {
   listAgentSessions,
   updateAgentSessionCcaResult,
   updateAgentSessionStatus,
-} from './database';
+} from './storage';
 import {
   getCloudJobPollResult,
   launchTrackedCloudAgent,
@@ -69,8 +77,8 @@ describe('cloud-agent-poller', () => {
   });
 
   it('polls immediately, persists results, and starts idempotently', async () => {
-    startCloudJobPoller('agent-1', 'owner', 'repo', 'job-1', 'token');
-    startCloudJobPoller('agent-1', 'owner', 'repo', 'job-1', 'token');
+    (await startCloudJobPoller('agent-1', 'owner', 'repo', 'job-1', 'token'));
+    (await startCloudJobPoller('agent-1', 'owner', 'repo', 'job-1', 'token'));
     await vi.advanceTimersByTimeAsync(0);
 
     expect(getCloudJobStatus).toHaveBeenCalledTimes(1);
@@ -87,10 +95,10 @@ describe('cloud-agent-poller', () => {
       resolveStatus = resolve;
     }));
 
-    startCloudJobPoller('agent-1', 'owner', 'repo', 'job-1', 'token');
+    const pending = startCloudJobPoller('agent-1', 'owner', 'repo', 'job-1', 'token');
     expect(stopCloudJobPoller('agent-1')).toBe(true);
     resolveStatus(runningStatus);
-    await Promise.resolve();
+    await pending;
 
     expect(updateAgentSessionStatus).not.toHaveBeenCalled();
     expect(updateAgentSessionCcaResult).not.toHaveBeenCalled();
@@ -98,7 +106,7 @@ describe('cloud-agent-poller', () => {
 
   it('keeps live jobs recoverable and backs off after consecutive polling errors', async () => {
     vi.mocked(getCloudJobStatus).mockResolvedValue({ error: 'unauthorized' });
-    startCloudJobPoller('agent-1', 'owner', 'repo', 'job-1', 'token');
+    (await startCloudJobPoller('agent-1', 'owner', 'repo', 'job-1', 'token'));
 
     await vi.advanceTimersByTimeAsync(70_000);
 
@@ -116,7 +124,7 @@ describe('cloud-agent-poller', () => {
   });
 
   it('leaves active sessions persisted when auth is missing and retries recovery', async () => {
-    vi.mocked(listAgentSessions).mockReturnValue([{
+    vi.mocked(listAgentSessions).mockResolvedValue([{
       id: 'recoverable', session_id: 'session-1', space_id: null, prompt: 'p',
       status: 'running', summary: 'Cloud job job-1', working_dir: '/ws', source: 'cca',
       persona_handle: null, quoted_text: null, run_location: 'cloud',
@@ -140,7 +148,7 @@ describe('cloud-agent-poller', () => {
   });
 
   it('restores recoverable CCA sessions without falsely failing legacy rows', async () => {
-    vi.mocked(listAgentSessions).mockReturnValue([
+    vi.mocked(listAgentSessions).mockResolvedValue([
       {
         id: 'recoverable', session_id: 'session-1', space_id: null, prompt: 'p',
         status: 'running', summary: '', working_dir: '/ws', source: 'cca',

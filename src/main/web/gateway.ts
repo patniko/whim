@@ -13,14 +13,20 @@ import {
   isInitialized,
   listSpaceEvents,
   listSpaces,
+  listSpaceSummaries,
+  listSpaceEventsPage,
+  listActivityPage,
   searchSpaces,
-} from '../database';
+  withWorkspaceContext,
+} from '../storage';
 import { classifyInput, listAvailableModels, resolveDateWithAI } from '../ai';
 import { getConfigValue, DEFAULT_PERSONAS, type AgentPersona } from '../config';
-import { materializeSpaceCanvas, scheduleAutoCommit } from '../workspace';
+import { scheduleAutoCommit } from '../workspace';
+import { materializeSpaceCanvas } from '../storage';
 import { processSpaceInBackground } from '../services/space-processing';
 import { notifyAllWindows } from '../notify';
 import { resolveCommentLaunchTarget } from '../services/comment-launch-target';
+import { runWorkspaceCommand } from '../producer-tasks';
 
 /**
  * Which commands the web remote actually implements.
@@ -57,31 +63,53 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
   'space:create': createSpaceFromArgs,
   'space:classify': classifySpaceFromArgs,
   'space:resolve-date': resolveDateFromArgs,
-  'space:list': () => isInitialized() ? listSpaces() : [],
-  'space:search': (args) => isInitialized() ? searchSpaces(expectString(args, 0, 'query')) : [],
-  'space:events': (args) => listSpaceEvents(expectOptionalNumber(args, 0, 'limit') ?? 100),
+  'space:list': async () => isInitialized() ? (await listSpaces()) : [],
+  'space:list-page': async (args) => isInitialized()
+    ? listSpaceSummaries(args[0] === undefined ? {} : expectRecord(args[0], 'page'))
+    : { items: [], total: 0, counts: { open: 0, closed: 0 }, nextCursor: null },
+  'space:get': async (args) => isInitialized() ? getSpace(expectString(args, 0, 'id')) : null,
+  'space:events-page': async (args) => isInitialized()
+    ? listSpaceEventsPage(args[0] === undefined ? {} : expectRecord(args[0], 'page'))
+    : { items: [], total: 0, nextCursor: null },
+  'activity:list-page': async (args) => isInitialized()
+    ? listActivityPage(args[0] === undefined ? {} : expectRecord(args[0], 'page'))
+    : { items: [], total: 0, nextCursor: null },
+  'space:search': async (args) => isInitialized() ? (await searchSpaces(expectString(args, 0, 'query'))) : [],
+  'space:events': async (args) => (await listSpaceEvents(expectOptionalNumber(args, 0, 'limit') ?? 100)),
   'space:update': async (args) => {
     if (!isInitialized()) return null;
     const { applySpaceUpdate } = await import('../services/space-mutations');
-    return applySpaceUpdate(expectString(args, 0, 'id'), expectRecord(args[1], 'updates'));
+    return (await applySpaceUpdate(expectString(args, 0, 'id'), expectRecord(args[1], 'updates')));
   },
   'space:delete': async (args) => {
     if (!isInitialized()) return false;
     const { deleteSpaceFull } = await import('../services/space-mutations');
-    return deleteSpaceFull(expectString(args, 0, 'id'));
+    return (await deleteSpaceFull(expectString(args, 0, 'id')));
   },
   'space:unarchive': async (args) => {
     if (!isInitialized()) return null;
     const { unarchiveSpaceFull } = await import('../services/space-mutations');
-    return unarchiveSpaceFull(expectString(args, 0, 'id'));
+    return (await unarchiveSpaceFull(expectString(args, 0, 'id')));
   },
   'agent:list-all': async () => {
     const { listAllAgents } = await import('../agent-service');
-    return listAllAgents();
+    return (await listAllAgents());
+  },
+  'agent:list-page': async (args) => {
+    const { listAgentsPage } = await import('../agent-service');
+    return listAgentsPage(args[0] === undefined ? {} : expectRecord(args[0], 'page'));
+  },
+  'agent:get': async (args) => {
+    const { getAgentDetail } = await import('../agent-service');
+    return getAgentDetail(expectString(args, 0, 'agentId'));
+  },
+  'agent:history-page': async (args) => {
+    const { getAgentHistoryPage } = await import('../agent-service');
+    return getAgentHistoryPage(expectString(args, 0, 'agentId'), args[1] === undefined ? {} : expectRecord(args[1], 'page'));
   },
   'agent:get-history': async (args) => {
     const { getAgentHistory } = await import('../agent-service');
-    return getAgentHistory(expectString(args, 0, 'agentId'));
+    return (await getAgentHistory(expectString(args, 0, 'agentId')));
   },
   'agent:abort': async (args) => {
     const { abortAgent } = await import('../agent-service');
@@ -95,11 +123,11 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
   },
   'chat:send-message': async (args) => {
     const { sendChatMessage } = await import('../agent-service');
-    return sendChatMessage(
+    return (await sendChatMessage(
       expectString(args, 0, 'agentId'),
       expectString(args, 1, 'prompt'),
       expectOptionalAttachments(args[2]),
-    );
+    ));
   },
   'agent:approve': async (args) => {
     const { approveAgent } = await import('../agent-service');
@@ -146,7 +174,7 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
   'agent:launch-from-comment': launchFromCommentArgs,
   'agent:list': async (args) => {
     const { listAgents } = await import('../agent-service');
-    return listAgents(expectString(args, 0, 'spaceId'));
+    return (await listAgents(expectString(args, 0, 'spaceId')));
   },
   'models:list-detailed': async () => {
     const { listModelsDetailed } = await import('../ai');
@@ -161,11 +189,11 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
     const spaceId = expectString(args, 0, 'spaceId');
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { hasContent: false };
-    const space = getSpace(spaceId);
+    const space = (await getSpace(spaceId));
     if (!space) return { hasContent: false };
     if (!space.folder) return { hasContent: !!(space.body && space.body.trim()) };
-    const { readCanvas } = await import('../workspace');
-    return { hasContent: readCanvas(workspace, space.folder).trim().length > 0 };
+    const { readCanvas } = await import('../storage');
+    return { hasContent: (await readCanvas(workspace, space.folder)).trim().length > 0 };
   },
   // `canvas:read`, `canvas:write` and `canvas:close` deliberately have no
   // entry here. They used to, written when the only web client was the
@@ -180,7 +208,7 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
     const spaceId = expectString(args, 0, 'spaceId');
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { commits: [], error: 'no_workspace' };
-    const space = getSpace(spaceId);
+    const space = (await getSpace(spaceId));
     if (!space || !space.folder) return { commits: [], error: 'not_found' };
     const { getSpaceHistory } = await import('../workspace');
     return { commits: await getSpaceHistory(workspace, space.folder) };
@@ -190,7 +218,7 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
     const sha = expectString(args, 1, 'sha');
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { content: '', error: 'no_workspace' };
-    const space = getSpace(spaceId);
+    const space = (await getSpace(spaceId));
     if (!space || !space.folder) return { content: '', error: 'not_found' };
     const { getSpaceVersionContent } = await import('../workspace');
     return getSpaceVersionContent(workspace, space.folder, sha);
@@ -200,41 +228,36 @@ const HANDLERS: Partial<Record<IpcCommandChannel, Handler>> = {
     const sha = expectString(args, 1, 'sha');
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { success: false, error: 'no_workspace' };
-    const space = getSpace(spaceId);
+    const space = (await getSpace(spaceId));
     if (!space || !space.folder) return { success: false, error: 'not_found' };
-    const { restoreSpaceVersion, readCanvas } = await import('../workspace');
-    const { updateCanvasContent } = await import('../database');
+    const { restoreSpaceVersion } = await import('../workspace');
+    const { updateCanvasContent, readCanvas } = await import('../storage');
     const result = await restoreSpaceVersion(workspace, space.folder, sha);
-    if (result.success) updateCanvasContent(spaceId, readCanvas(workspace, space.folder));
+    if (result.success) await updateCanvasContent(spaceId, await readCanvas(workspace, space.folder));
     return result;
   },
   'canvas:list-pages': async (args) => {
     const resolved = await resolveCanvasFolder(expectString(args, 0, 'spaceId'));
     if ('error' in resolved) return { pages: [], error: resolved.error };
-    const { listPages } = await import('../workspace');
-    return { pages: listPages(resolved.workspace, resolved.folder) };
+    const { listPages } = await import('../storage');
+    return { pages: await listPages(resolved.workspace, resolved.folder) };
   },
   'canvas:read-page': async (args) => {
-    const resolved = await resolveCanvasFolder(expectString(args, 0, 'spaceId'));
-    if ('error' in resolved) return { content: '', error: resolved.error };
-    const { readPage } = await import('../workspace');
-    const result = readPage(resolved.workspace, resolved.folder, expectString(args, 1, 'pageName'));
-    return 'error' in result ? { content: '', error: result.error } : { content: result.content };
+    return callRegisteredHandler('canvas:read-page', [
+      expectString(args, 0, 'spaceId'), expectString(args, 1, 'pageName'),
+    ]);
   },
   'canvas:write-page': async (args) => {
-    const resolved = await resolveCanvasFolder(expectString(args, 0, 'spaceId'));
-    if ('error' in resolved) return { error: resolved.error };
-    const { writePage, scheduleAutoCommit } = await import('../workspace');
-    const result = writePage(resolved.workspace, resolved.folder, expectString(args, 1, 'pageName'), expectStringAllowEmpty(args, 2, 'content'));
-    if ('error' in result) return { error: result.error };
-    scheduleAutoCommit(resolved.workspace);
-    return { success: true };
+    return callRegisteredHandler('canvas:write-page', [
+      expectString(args, 0, 'spaceId'), expectString(args, 1, 'pageName'), expectStringAllowEmpty(args, 2, 'content'),
+    ]);
   },
   'canvas:create-page': async (args) => {
     const resolved = await resolveCanvasFolder(expectString(args, 0, 'spaceId'));
     if ('error' in resolved) return { success: false, page: '', error: resolved.error };
-    const { createPage, scheduleAutoCommit } = await import('../workspace');
-    const result = createPage(resolved.workspace, resolved.folder, expectString(args, 1, 'pageName'));
+    const { scheduleAutoCommit } = await import('../workspace');
+    const { createPage } = await import('../storage');
+    const result = await createPage(resolved.workspace, resolved.folder, expectString(args, 1, 'pageName'));
     if ('error' in result) return { success: false, page: '', error: result.error };
     scheduleAutoCommit(resolved.workspace);
     return { success: true, page: result.page };
@@ -312,6 +335,10 @@ function assertArgumentsAllowed(channel: string, args: unknown[]): void {
 }
 
 export async function invokeWebRemoteCommand(channel: string, args: unknown[]): Promise<unknown> {
+  return withWorkspaceContext(() => runWorkspaceCommand(channel, () => invokeScopedWebRemoteCommand(channel, args)));
+}
+
+async function invokeScopedWebRemoteCommand(channel: string, args: unknown[]): Promise<unknown> {
   if (!isAllowedWebRemoteCommand(channel)) {
     // Distinguish the three reasons, so a remote client can degrade sensibly
     // instead of treating "not built yet" as "forbidden".
@@ -363,14 +390,14 @@ export async function invokeWebRemoteCommand(channel: string, args: unknown[]): 
   return redactWebResult(channel, JSON.parse(JSON.stringify(result ?? null)));
 }
 
-function createSpaceFromArgs(args: unknown[]): Space | { error: string } {
+async function createSpaceFromArgs(args: unknown[]): Promise<Space | { error: string }> {
   if (!isInitialized()) return { error: 'no_workspace' };
   const input = expectRecord<CreateSpaceInput>(args[0], 'input');
   if (typeof input.body !== 'string' || !input.body.trim()) {
     throw invalidArg('input.body must be a non-empty string');
   }
 
-  const space = createSpace({ body: input.body });
+  const space = (await createSpace({ body: input.body }));
   const workspace = getConfigValue('workspace');
   if (workspace && space.folder) {
     const folder = space.folder;
@@ -379,14 +406,15 @@ function createSpaceFromArgs(args: unknown[]): Space | { error: string } {
       .catch((err) => console.error('[web-remote] Canvas materialization failed:', err));
   }
 
-  processSpaceInBackground(space.id, space.body || space.description, space.updated_at);
+  void processSpaceInBackground(space.id, space.body || space.description, space.updated_at)
+    .catch(error => console.error('[web-remote] Space enrichment failed:', error));
   return space;
 }
 
 async function classifySpaceFromArgs(args: unknown[]): Promise<{ type: 'space' | 'query'; answer?: string }> {
   const text = expectString(args, 0, 'text');
   if (!isInitialized()) return { type: 'space' };
-  const recent = listSpaces().map(i => ({
+  const recent = (await listSpaces()).map(i => ({
     description: i.description,
     status: i.status,
     due_at: i.due_at,
@@ -413,11 +441,11 @@ async function quickLaunchFromArgs(args: unknown[]): Promise<unknown> {
   }
 
   if (persona?.runLocation === 'cca') {
-    return launchCcaQuickAgent(prompt, workspace, persona);
+    return (await launchCcaQuickAgent(prompt, workspace, persona));
   }
 
   const { launchQuickAgent } = await import('../agent-service');
-  return launchQuickAgent(prompt, workspace, persona);
+  return (await launchQuickAgent(prompt, workspace, persona));
 }
 
 async function launchCloudFromArgs(args: unknown[]): Promise<unknown> {
@@ -425,7 +453,7 @@ async function launchCloudFromArgs(args: unknown[]): Promise<unknown> {
   const prompt = expectString(args, 1, 'prompt');
   const workspace = getConfigValue('workspace');
   if (!workspace) return { error: 'no_workspace' };
-  return launchCloudAgent(spaceId, prompt, workspace, null);
+  return (await launchCloudAgent(spaceId, prompt, workspace, null));
 }
 
 async function launchAgentFromArgs(args: unknown[]): Promise<unknown> {
@@ -435,18 +463,18 @@ async function launchAgentFromArgs(args: unknown[]): Promise<unknown> {
   const options = expectOptionalRecord(args[3]) as { repo?: string; model?: string } | undefined;
   const workspace = getConfigValue('workspace');
   if (!workspace || !isInitialized()) return { error: 'no_workspace' };
-  const space = getSpace(spaceId);
+  const space = (await getSpace(spaceId));
   if (!space) return { error: 'space_not_found' };
 
   let folder = space.folder;
   if (!folder) {
-    const { initSpaceCanvas } = await import('../workspace');
-    folder = initSpaceCanvas(workspace, spaceId, space.description, space.body);
-    assignSpaceFolder(spaceId, folder);
+    const { initSpaceCanvas } = await import('../storage');
+    folder = await initSpaceCanvas(workspace, spaceId, space.description, space.body);
+    (await assignSpaceFolder(spaceId, folder));
   }
 
   const { launchAgent } = await import('../agent-service');
-  return launchAgent(spaceId, selectedText, anchor, workspace, folder, options);
+  return (await launchAgent(spaceId, selectedText, anchor, workspace, folder, options));
 }
 
 /**
@@ -465,7 +493,7 @@ async function launchFromCommentArgs(args: unknown[]): Promise<unknown> {
   const workspace = getConfigValue('workspace');
   if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
-  const target = resolveCommentLaunchTarget(spaceId, workspace);
+  const target = (await resolveCommentLaunchTarget(spaceId, workspace));
   if ('error' in target) return { error: target.error };
 
   const personas = (getConfigValue('personas') as AgentPersona[]) || [];
@@ -475,18 +503,18 @@ async function launchFromCommentArgs(args: unknown[]): Promise<unknown> {
   if (persona.runLocation === 'cca') {
     const documentPath = target.documentPath ? path.relative(workspace, target.documentPath) : `${target.folder}/canvas.md`;
     const prompt = `${persona.instructions}\n\nDocument: ${documentPath}\nComment: "${commentBody}"\nOn text: "${quotedText}"`;
-    return launchCloudAgent(target.launchSpaceId, prompt, workspace, persona.handle, {
+    return (await launchCloudAgent(target.launchSpaceId, prompt, workspace, persona.handle, {
       quotedText,
       threadId,
-    });
+    }));
   }
 
   const { launchCommentAgent } = await import('../agent-service');
-  return launchCommentAgent(target.launchSpaceId, commentBody, quotedText, anchor, persona, threadId, workspace, target.folder, {
+  return (await launchCommentAgent(target.launchSpaceId, commentBody, quotedText, anchor, persona, threadId, workspace, target.folder, {
     documentPath: target.documentPath,
     documentDisplayName: target.documentDisplayName,
     documentLabel: target.documentLabel,
-  });
+  }));
 }
 
 /**
@@ -497,23 +525,23 @@ async function launchFromCommentArgs(args: unknown[]): Promise<unknown> {
 async function resolveCanvasFolder(spaceId: string): Promise<{ workspace: string; folder: string } | { error: string }> {
   const workspace = getConfigValue('workspace');
   if (!workspace || !isInitialized()) return { error: 'no_workspace' };
-  const space = getSpace(spaceId);
+  const space = (await getSpace(spaceId));
   if (!space) return { error: 'space_not_found' };
 
-  const { initSpaceCanvas, ensureSpaceCanvas } = await import('../workspace');
+  const { initSpaceCanvas, ensureSpaceCanvas } = await import('../storage');
   let folder = space.folder;
   if (!folder) {
-    folder = initSpaceCanvas(workspace, spaceId, space.description, space.body);
-    assignSpaceFolder(spaceId, folder);
+    folder = await initSpaceCanvas(workspace, spaceId, space.description, space.body);
+    (await assignSpaceFolder(spaceId, folder));
   } else {
-    ensureSpaceCanvas(workspace, folder, space.body);
+    await ensureSpaceCanvas(workspace, folder, space.body);
   }
   return { workspace, folder };
 }
 
 async function launchCcaQuickAgent(prompt: string, workspace: string, persona: AgentPersona): Promise<unknown> {
   const fullPrompt = `${persona.instructions}\n\n${prompt}`;
-  return launchCloudAgent(null, fullPrompt, workspace, persona.handle);
+  return (await launchCloudAgent(null, fullPrompt, workspace, persona.handle));
 }
 
 async function launchCloudAgent(
@@ -524,14 +552,14 @@ async function launchCloudAgent(
   options?: { quotedText?: string; threadId?: string | null },
 ): Promise<unknown> {
   const { launchTrackedCloudAgent } = await import('../cloud-agent-poller');
-  return launchTrackedCloudAgent({
+  return (await launchTrackedCloudAgent({
     spaceId,
     prompt,
     workspace,
     personaHandle,
     quotedText: options?.quotedText,
     threadId: options?.threadId,
-  });
+  }));
 }
 
 function invalidArg(message: string): GatewayError {

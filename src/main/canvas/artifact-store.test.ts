@@ -44,7 +44,7 @@ function writeSourceFile(relativePath: string, content: string): void {
 
 async function publishHtml(html: string, overrides: Record<string, unknown> = {}) {
   writeSourceFile('report.html', html);
-  return publishArtifact({
+  return (await publishArtifact({
     workspaceRoot: workspace,
     folder: FOLDER,
     spaceId: SPACE_ID,
@@ -52,7 +52,7 @@ async function publishHtml(html: string, overrides: Record<string, unknown> = {}
     title: 'Open questions',
     sourceRelativePath: 'report.html',
     ...overrides,
-  });
+  }));
 }
 
 beforeEach(() => {
@@ -248,7 +248,7 @@ describe('publishArtifact', () => {
     writeSourceFile('b.html', '<p>b</p>');
 
     const results = await Promise.all([
-      publishArtifact({
+      (await publishArtifact({
         workspaceRoot: workspace,
         folder: FOLDER,
         spaceId: SPACE_ID,
@@ -256,8 +256,8 @@ describe('publishArtifact', () => {
         title: 'A',
         runId: 'run-a',
         sourceRelativePath: 'a.html',
-      }),
-      publishArtifact({
+      })),
+      (await publishArtifact({
         workspaceRoot: workspace,
         folder: FOLDER,
         spaceId: SPACE_ID,
@@ -265,7 +265,7 @@ describe('publishArtifact', () => {
         title: 'B',
         runId: 'run-b',
         sourceRelativePath: 'b.html',
-      }),
+      })),
     ]);
 
     const manifest = readManifest(results[0].artifact.dir)!;

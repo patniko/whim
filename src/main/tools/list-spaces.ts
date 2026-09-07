@@ -17,7 +17,7 @@ export function createListSpacesTool(ctx: WhimToolContext) {
     skipPermission: true,
     handler: async (): Promise<string> => {
       try {
-        const spaces = ctx.getSpaces().map((space) => {
+        const spaces = (await ctx.getSpaces()).map((space) => {
           const workers = Array.from(ctx.registry.values()).filter((agent) => agent.spaceId === space.id);
           const activeWorkers = workers.filter(
             (agent) => agent.status === 'running' || agent.status === 'waiting-approval',

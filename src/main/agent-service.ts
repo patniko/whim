@@ -5,11 +5,15 @@ import type { AgentRecord } from './agents/agent-registry';
 import { AgentNotifier } from './agents/agent-notifier';
 import { AgentPersistence } from './agents/agent-persistence';
 import { InteractionBroker } from './agents/interaction-broker';
-import { deleteAgentSession, listAllRunningAgents, updateCanvasAgentStatus } from './database';
+import { deleteAgentSession, listAllRunningAgents, updateCanvasAgentStatus, listAgentSummaries, getAgentSession, listAgentSessions, listAgentHistoryPage, isInitialized } from './storage';
+import type { AgentPageRequest, AgentPage, PageRequest } from '../shared/paging';
+import type { AgentSummaryRow } from './paged-queries';
+import { pageLimit, encodeCursor, decodeCursor } from './paged-queries';
 import { subscribeWebRemoteEvents } from './web/event-hub';
 
 // Import runner modules
-import { initSdkRunner, setupAgentEventListeners } from './agents/sdk-runner';
+import { initSdkRunner, setupAgentEventListeners, finishScheduledAgent, resumeAgentSession } from './agents/sdk-runner';
+import { loadRuntimeHistoryPage } from './agents/runtime-history-loader';
 import { initCliRunner } from './agents/cli-runner';
 import { initCommentWorkflow } from './agents/comment-workflow';
 import { releaseCanvasInstances } from './canvas/canvas-lifecycle';
@@ -98,7 +102,7 @@ function findRemoteSupervisor() {
  * duplicate supervisors from rapid clicks or multiple entry points (UI,
  * tray menu, etc.).  Persists `remoteEnabled` and fires `app:remote-changed`.
  */
-export function setAppRemote(enabled: boolean): Promise<AppRemoteResult> {
+export async function setAppRemote(enabled: boolean): Promise<AppRemoteResult> {
   // Coalesce concurrent calls so multiple entry points (UI + tray + double
   // click) cannot each spawn a workspace supervisor.
   if (appRemoteInFlight) {
@@ -280,13 +284,13 @@ export function respondToElicitation(agentId: string, requestId: string, action:
  * requests are auto-approved without user interaction.  Also auto-approves
  * any currently-pending permission requests.
  */
-export function setAgentYolo(agentId: string, enabled: boolean): { ok: true } | { error: string } {
+export async function setAgentYolo(agentId: string, enabled: boolean): Promise<{ ok: true } | { error: string }> {
   const record = registry.get(agentId);
   if (!record) return { error: 'Agent not found' };
 
   record.yoloMode = enabled;
   console.log(`[agent-service] yolo mode ${enabled ? 'enabled' : 'disabled'} for agent=${agentId}`);
-  persistence.updateYolo(record, enabled);
+  (await persistence.updateYolo(record, enabled));
   notifier.notifyRenderer('agent:yolo-changed', { agentId, enabled });
 
   // When enabling, auto-approve any pending permission requests
@@ -328,9 +332,26 @@ export async function resolveSandboxBlock(
 
 // ── Agent lifecycle ────────────────────────────────────
 
+export async function stopWorkspaceAgents(): Promise<void> {
+  for (const record of [...registry.values()]) {
+    if (record.status === 'running' || record.status === 'waiting-approval') await abortAgent(record.agentId);
+  }
+}
+
+/** Called only after session shutdown and producer drainage, before changing DBs. */
+export function clearWorkspaceAgentState(): void {
+  for (const record of registry.values()) {
+    broker.clearPendingInteractions(record);
+    releaseCanvasInstances(record.agentId);
+    endCanvasRun(record.agentId);
+    subagentTracker.clearParent(record.agentId);
+  }
+  registry.clear();
+}
+
 export async function abortAgent(agentId: string): Promise<void> {
   const record = registry.get(agentId);
-  const persisted = persistence.getSession(agentId);
+  const persisted = (await persistence.getSession(agentId));
   const source = persisted?.source ?? (record ? 'sdk' : null);
   if (!source) return;
   const status = record?.status ?? persisted?.status;
@@ -341,7 +362,7 @@ export async function abortAgent(agentId: string): Promise<void> {
     const { stopCloudJobPoller } = await import('./cloud-agent-poller');
     stopCloudJobPoller(agentId);
     const summary = 'Stopped tracking by user. The cloud job may continue running on GitHub.';
-    persistence.updateSessionStatus(agentId, 'failed', summary);
+    (await persistence.updateSessionStatus(agentId, 'failed', summary));
     notifier.notifyRenderer('agent:status-changed', {
       agentId,
       status: 'failed',
@@ -354,7 +375,7 @@ export async function abortAgent(agentId: string): Promise<void> {
 
   if (source === 'cli') {
     const summary = 'Stopped tracking by user. The terminal session may still be running.';
-    persistence.updateSessionStatus(agentId, 'failed', summary);
+    (await persistence.updateSessionStatus(agentId, 'failed', summary));
     notifier.notifyRenderer('agent:status-changed', {
       agentId,
       status: 'failed',
@@ -373,7 +394,7 @@ export async function abortAgent(agentId: string): Promise<void> {
       const abortResult = await abortRestoredCloudAgent(agentId);
       if (abortResult === 'retry') {
         const summary = 'Could not reconnect to stop this cloud agent. It may still be running; retry before deleting it.';
-        persistence.updateSessionStatus(agentId, persisted.status, summary);
+        (await persistence.updateSessionStatus(agentId, persisted.status, summary));
         notifier.notifyRenderer('agent:status-changed', {
           agentId,
           status: persisted.status,
@@ -385,7 +406,7 @@ export async function abortAgent(agentId: string): Promise<void> {
         throw new Error(summary);
       }
     }
-    persistence.updateSessionStatus(agentId, 'failed', 'Aborted by user');
+    (await persistence.updateSessionStatus(agentId, 'failed', 'Aborted by user'));
     notifier.notifyRenderer('agent:status-changed', {
       agentId,
       status: 'failed',
@@ -400,7 +421,7 @@ export async function abortAgent(agentId: string): Promise<void> {
     record.aborted = true;
     const summary = 'Cancellation is waiting for the cloud session to finish starting. Retry deletion after it stops.';
     record.summary = summary;
-    persistence.updateSessionStatus(agentId, record.status, summary);
+    (await persistence.updateSessionStatus(agentId, record.status, summary));
     notifier.notifyRenderer('agent:status-changed', {
       agentId,
       status: record.status,
@@ -423,7 +444,7 @@ export async function abortAgent(agentId: string): Promise<void> {
       } else {
         const summary = 'Could not stop this cloud agent. It may still be running; retry before deleting it.';
         record.summary = summary;
-        persistence.updateSessionStatus(agentId, record.status, summary);
+        (await persistence.updateSessionStatus(agentId, record.status, summary));
         notifier.notifyRenderer('agent:status-changed', {
           agentId,
           status: record.status,
@@ -447,7 +468,8 @@ export async function abortAgent(agentId: string): Promise<void> {
     record.session = undefined;
     record.status = 'failed';
     record.summary = 'Aborted by user';
-    persistence.updateStatus(record);
+    (await finishScheduledAgent(record, 'Stopped by user'));
+    (await persistence.updateStatus(record));
     notifier.notifyRenderer('agent:status-changed', {
       agentId,
       status: 'failed',
@@ -460,14 +482,15 @@ export async function abortAgent(agentId: string): Promise<void> {
 
 export async function deleteAgent(agentId: string): Promise<void> {
   await abortAgent(agentId);
-  deleteAgentSession(agentId);
-  forgetAgent(agentId);
+  (await deleteAgentSession(agentId));
+  (await forgetAgent(agentId));
 }
 
-export function forgetAgent(agentId: string): void {
+export async function forgetAgent(agentId: string): Promise<void> {
   const record = registry.get(agentId);
   if (record) {
     record.aborted = true;
+    (await finishScheduledAgent(record, 'Agent removed before finishing'));
     broker.clearPendingInteractions(record);
     notifier.notifyRenderer('agent:presence-ended', { agentId, spaceId: record.spaceId });
   }
@@ -481,19 +504,26 @@ export function forgetAgent(agentId: string): void {
 
 // ── Query functions ────────────────────────────────────
 
-export function listAgents(spaceId: string): AgentListSnapshot[] {
-  return listAllAgents().filter(a => a.spaceId === spaceId && a.spaceId !== '__workspace__');
+export async function listAgents(spaceId: string): Promise<AgentListSnapshot[]> {
+  if (spaceId === '__workspace__') return [];
+  const rows = isInitialized() ? (await listAgentSessions(spaceId)).filter(row => row.space_id === spaceId) : [];
+  const seen = new Set(rows.map(row => row.id));
+  const items = rows.map(row => snapshotAgent(row, false));
+  for (const record of registry.values()) {
+    if (record.spaceId === spaceId && !seen.has(record.agentId)) items.push(snapshotAgent(ephemeralRow(record), false));
+  }
+  return items;
 }
 
 export function getAgentSessionId(agentId: string): string | null {
   return registry.get(agentId)?.sessionId ?? null;
 }
 
-export function listAllAgents(): AgentListSnapshot[] {
+export async function listAllAgents(): Promise<AgentListSnapshot[]> {
   // Read persisted sessions from DB (sorted newest first)
   let persisted: AgentSession[] = [];
   try {
-    persisted = persistence.listSessions();
+    persisted = (await persistence.listSessions());
   } catch { /* DB may not be initialized */ }
 
   // Build result: overlay live in-memory state on top of DB records
@@ -526,35 +556,107 @@ export function listAllAgents(): AgentListSnapshot[] {
     });
   }
 
-  // Add any live agents not yet in DB (shouldn't happen, but defensive)
-  for (const [id, a] of registry.entries()) {
-    if (!seen.has(id)) {
-      const pendingApproval = a.pendingApprovalId ? a.pendingApprovals.get(a.pendingApprovalId) : undefined;
-      result.push({
-        agentId: a.agentId,
-        sessionId: a.sessionId,
-        status: a.status,
-        summary: a.summary,
-        selectedText: a.selectedText,
-        quotedText: a.commentContext?.quotedText ?? '',
-        anchor: a.anchor,
-        spaceId: a.spaceId,
-        createdAt: '',
-        pendingApprovalId: a.pendingApprovalId,
-        pendingPermissionKind: a.pendingPermissionKind ?? null,
-        pendingIntention: pendingApproval?.intention ?? null,
-        pendingPath: pendingApproval?.path ?? null,
-        source: 'sdk',
-        personaHandle: a.commentContext?.personaHandle ?? null,
-        yoloMode: a.yoloMode ?? false,
-        sandboxed: a.sandbox?.state === 'on',
-        runLocation: a.runLocation ?? 'local',
-      });
-    }
+  for (const [id, record] of registry.entries()) {
+    if (!seen.has(id)) result.push(snapshotAgent(ephemeralRow(record), false));
   }
-
   return result;
 }
+
+function snapshotAgent(row: AgentSummaryRow, preview: boolean): AgentListSnapshot {
+    const live = registry.get(row.id);
+    const pending = live?.pendingApprovalId ? live.pendingApprovals.get(live.pendingApprovalId) : undefined;
+    const text = (value: string, limit: number) => preview ? value.slice(0, limit) : value;
+    return {
+      agentId: row.id, sessionId: row.session_id,
+      status: live?.status ?? row.status,
+      summary: text(live?.summary ?? row.summary, 300),
+      selectedText: text(live?.selectedText ?? row.prompt, 160),
+      quotedText: text(live?.commentContext?.quotedText ?? row.quoted_text ?? '', 160),
+      anchor: preview ? fallbackAnchor('') : live?.anchor ?? fallbackAnchor(row.quoted_text ?? row.prompt),
+      spaceId: live?.spaceId ?? row.space_id ?? '__workspace__', createdAt: row.created_at,
+      pendingApprovalId: live?.pendingApprovalId ?? null,
+      pendingPermissionKind: live?.pendingPermissionKind ?? null,
+      pendingIntention: pending?.intention ?? null, pendingPath: pending?.path ?? null,
+      source: row.source ?? 'sdk', personaHandle: row.persona_handle ?? null,
+      yoloMode: live?.yoloMode ?? !!row.yolo_mode, sandboxed: live?.sandbox?.state === 'on',
+      runLocation: row.run_location ?? 'local',
+    };
+  }
+
+  function ephemeralRow(record: AgentRecord): AgentSummaryRow {
+    return {
+      id: record.agentId, session_id: record.sessionId, space_id: record.spaceId,
+      prompt: record.selectedText, summary: record.summary, status: record.status,
+      source: 'sdk', persona_handle: record.personaHandle ?? record.commentContext?.personaHandle ?? null,
+      quoted_text: record.commentContext?.quotedText ?? '', run_location: record.runLocation ?? 'local',
+      yolo_mode: !!record.yoloMode, created_at: '',
+    };
+  }
+
+  export async function getAgentDetail(agentId: string): Promise<AgentListSnapshot | null> {
+    const live = registry.get(agentId);
+    const row = live?.ephemeral ? ephemeralRow(live) : isInitialized() ? await getAgentSession(agentId) : null;
+    return row ? snapshotAgent(row, false) : null;
+  }
+
+  export async function listAgentsPage(request: AgentPageRequest = {}): Promise<AgentPage> {
+    const limit = pageLimit(request);
+    if (request.query !== undefined && (typeof request.query !== 'string' || request.query.length > 1024)) throw new Error('Invalid worker query');
+    if (request.spaceId !== undefined && typeof request.spaceId !== 'string') throw new Error('Invalid space ID');
+    if (request.includePages !== undefined && typeof request.includePages !== 'boolean') throw new Error('Invalid page inclusion flag');
+    if (request.cursor !== undefined && (typeof request.cursor !== 'string' || request.cursor.length > 8192)) throw new Error('Invalid page cursor');
+    const ephemeral = [...registry.values()].filter(record => record.ephemeral).map(ephemeralRow);
+    const query = request.query?.toLowerCase() ?? '';
+    const matching = ephemeral.filter(row => (!request.spaceId || row.space_id === request.spaceId
+      || (request.includePages && row.space_id?.startsWith(`__page__${request.spaceId}/`)))
+      && (!query || row.prompt.toLowerCase().includes(query) || row.summary.toLowerCase().includes(query)))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const scope = JSON.stringify(['ephemeral-agents', request.query ?? '', request.spaceId ?? '', !!request.includePages]);
+    const ephemeralCursor = request.cursor?.startsWith('ephemeral:');
+    const page = isInitialized() ? await listAgentSummaries(ephemeralCursor ? { ...request, cursor: undefined, limit: 1 } : request)
+      : { items: [], total: 0, nextCursor: null, counts: { running: 0, waiting: 0, completed: 0, failed: 0 } };
+    for (const row of ephemeral) {
+      const key = row.status === 'waiting-approval' ? 'waiting' : row.status;
+      page.counts[key]++;
+    }
+    if (ephemeralCursor || (page.items.length === 0 && matching.length)) {
+      const keys = ephemeralCursor ? decodeCursor(request.cursor!.slice('ephemeral:'.length), scope, 1) : null;
+      const items = matching.filter(row => !keys || row.id.localeCompare(String(keys[0])) > 0).slice(0, limit + 1);
+      const more = items.length > limit;
+      if (more) items.pop();
+      return {
+        items: items.map(row => snapshotAgent(row, true)), total: page.total + matching.length, counts: page.counts,
+        offset: page.total + (keys ? matching.filter(row => row.id.localeCompare(String(keys[0])) <= 0).length : 0),
+        nextCursor: more ? `ephemeral:${encodeCursor(scope, [items[items.length - 1].id])}` : null,
+      };
+    }
+    return {
+      ...page, items: page.items.map(row => snapshotAgent(row, true)), total: page.total + matching.length,
+      nextCursor: page.nextCursor ?? (matching.length ? `ephemeral:${encodeCursor(scope, [''])}` : null),
+    };
+  }
+
+  export async function getAgentHistoryPage(agentId: string, request: PageRequest = {}) {
+    pageLimit(request);
+    if (typeof agentId !== 'string' || !agentId) throw new Error('Invalid agent ID');
+    if (!isInitialized()) throw new Error('No workspace is open');
+    let record = registry.get(agentId);
+    if (record?.ephemeral || record?.runtimeHistory) {
+      if (!record.session) throw new Error('Agent is still starting; retry history when it is active');
+      return loadRuntimeHistoryPage(agentId, record.session, !!record.ephemeral, request);
+    }
+    const page = await listAgentHistoryPage(agentId, request);
+    if (page.watermark === 0 && await getAgentSession(agentId)) {
+      if (!record) {
+        if (!await resumeAgentSession(agentId, { allowRestart: false })) throw new Error('The runtime session is unavailable; no mirrored history exists');
+        record = registry.get(agentId);
+      }
+      if (!record?.session) throw new Error('Agent history is not available yet; retry when the session is active');
+      record.runtimeHistory = true;
+      return loadRuntimeHistoryPage(agentId, record.session, !!record.ephemeral, request);
+    }
+    return page;
+  }
 
 /** Minimal worker shape consumed by the system tray menu. */
 export interface TrayWorker {
@@ -573,9 +675,15 @@ const ACTIVE_WORKER_STATUSES = new Set<string>(['running', 'waiting-approval']);
  * excluding internal workspace-level supervisors (`spaceId === '__workspace__'`)
  * so the menu shows user-meaningful workers only.
  */
-export function listTrayWorkers(): TrayWorker[] {
-  return listAllAgents()
+export async function listTrayWorkers(): Promise<TrayWorker[]> {
+  const rows = isInitialized() ? (await listAgentSummaries({ limit: 50, activeOnly: true })).items : [];
+  const items = new Map(rows.map(row => [row.id, snapshotAgent(row, true)]));
+  for (const record of registry.values()) {
+    if (ACTIVE_WORKER_STATUSES.has(record.status)) items.set(record.agentId, snapshotAgent(ephemeralRow(record), true));
+  }
+  return [...items.values()]
     .filter((a) => ACTIVE_WORKER_STATUSES.has(a.status) && a.spaceId !== '__workspace__')
+    .slice(0, 50)
     .map((a) => ({
       agentId: a.agentId,
       status: a.status,
@@ -613,13 +721,13 @@ export function onAgentListChanged(listener: () => void): () => void {
  *
  * Call once after DB + agent-service initialization.
  */
-export function reconcileStaleAgents(): void {
+export async function reconcileStaleAgents(): Promise<void> {
   const STALE_STATUSES = new Set(['running', 'waiting-approval']);
 
   // ── agent_sessions table ──────────────────────────────
   let persisted: AgentSession[] = [];
   try {
-    persisted = persistence.listSessions();
+    persisted = (await persistence.listSessions());
   } catch { return; /* DB not ready */ }
 
   for (const row of persisted) {
@@ -639,7 +747,7 @@ export function reconcileStaleAgents(): void {
         continue;
       }
       try {
-        persistence.updateSessionStatus(row.id, 'failed', 'Session lost — app restarted');
+        (await persistence.updateSessionStatus(row.id, 'failed', 'Session lost — app restarted'));
         console.log(`[agent-service] Reconciled stale agent session ${row.id}: ${row.status} → failed`);
       } catch { /* non-fatal */ }
     }
@@ -648,13 +756,13 @@ export function reconcileStaleAgents(): void {
   // ── canvas_agents table ───────────────────────────────
   let runningCanvas: CanvasAgent[] = [];
   try {
-    runningCanvas = listAllRunningAgents();
+    runningCanvas = (await listAllRunningAgents());
   } catch { return; }
 
   for (const row of runningCanvas) {
     if (!registry.has(row.id)) {
       try {
-        updateCanvasAgentStatus(row.id, 'failed');
+        (await updateCanvasAgentStatus(row.id, 'failed'));
         console.log(`[agent-service] Reconciled stale canvas agent ${row.id}: running → failed`);
       } catch { /* non-fatal */ }
     }
@@ -690,10 +798,10 @@ function liveThreadStatus(record: AgentRecord): CanvasAgentStateSnapshot['status
  * Pending interactions are only present for agents still live in this process
  * (the broker holds them in memory); after a restart the array is empty.
  */
-export function getCanvasAgentState(spaceId: string): CanvasAgentStateSnapshot[] {
+export async function getCanvasAgentState(spaceId: string): Promise<CanvasAgentStateSnapshot[]> {
   let persisted: AgentSession[] = [];
   try {
-    persisted = persistence.listSessions();
+    persisted = (await persistence.listSessions());
   } catch {
     return [];
   }

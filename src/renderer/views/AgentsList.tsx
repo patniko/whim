@@ -1,5 +1,5 @@
 import React from 'react';
-import { agentStore } from '../state/agent-store';
+import { agentStore, WORKER_PREVIEW_STEPS } from '../state/agent-store';
 import { spaceStore } from '../state/space-store';
 import { personaStore } from '../state/persona-store';
 import { useStore } from './useStore';
@@ -13,6 +13,10 @@ import {
 } from '../lib/sandbox-incidents';
 import type { AgentListAllItem } from '../../shared/ipc-contract';
 import type { AgentStep, AgentApproval, AgentRemoteInfo, AgentSandboxBlock } from '../state/agent-store';
+import { VirtualRows } from './VirtualRows';
+import { PageControls } from './PageControls';
+import { loadAgentsSnapshot } from '../state/ipc-bridge';
+import { getAPI } from '../ipc-client';
 
 export interface AgentsListActions {
   onAgentClick: (
@@ -71,7 +75,7 @@ const AgentCard = React.memo(function AgentCard({
 
   const title = agent.selectedText.length > 80 ? agent.selectedText.slice(0, 77) + '...' : agent.selectedText;
 
-  const visibleSteps = steps.slice(-6);
+  const visibleSteps = steps.slice(-WORKER_PREVIEW_STEPS);
   const showSummaryBox = (agent.status === 'completed' || agent.status === 'failed')
     && agent.summary
     && !['Completed', 'Failed', 'Starting...', ''].includes(agent.summary);
@@ -357,7 +361,7 @@ export function AgentsList(props: AgentsListProps): React.ReactElement {
   }, [personas]);
 
   let allAgents = agentState.agents;
-  if (props.filterQuery) {
+  if (props.filterQuery && !agentState.page) {
     const q = props.filterQuery.toLowerCase();
     allAgents = allAgents.filter(a =>
       (a.selectedText || '').toLowerCase().includes(q) ||
@@ -366,7 +370,7 @@ export function AgentsList(props: AgentsListProps): React.ReactElement {
   }
 
   if (allAgents.length === 0) {
-    return props.filterQuery ? (
+    const empty = props.filterQuery ? (
       <EmptyState icon="🔍" title="No matching agents" text="Try a different search." />
     ) : (
       <EmptyState
@@ -379,6 +383,9 @@ export function AgentsList(props: AgentsListProps): React.ReactElement {
         }}
       />
     );
+    return <>{agentState.page && <PageControls nextCursor={agentState.page.nextCursor}
+      total={agentState.page.total} count={0} scope={props.filterQuery ?? ''}
+      load={cursor => loadAgentsSnapshot(getAPI(), { cursor, invalidate: true })} />}{empty}</>;
   }
 
   // Newest first
@@ -386,7 +393,11 @@ export function AgentsList(props: AgentsListProps): React.ReactElement {
 
   return (
     <>
-      {sorted.map((agent, idx) => {
+      {agentState.page && <PageControls nextCursor={agentState.page.nextCursor} total={agentState.page.total}
+        count={sorted.length} scope={props.filterQuery ?? ''}
+        load={cursor => loadAgentsSnapshot(getAPI(), { cursor, invalidate: true })} />}
+      <VirtualRows rows={sorted} rowId={agent => agent.agentId} selectedIndex={selectedIndex} total={agentState.page?.total} offset={agentState.page?.offset}
+        render={(agent, idx) => {
         const intentLabel = agent.source === 'cli'
           ? 'CLI Session'
           : agent.source === 'cca'
@@ -414,7 +425,7 @@ export function AgentsList(props: AgentsListProps): React.ReactElement {
             actions={props}
           />
         );
-      })}
+      }} />
     </>
   );
 }

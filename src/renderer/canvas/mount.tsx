@@ -1,5 +1,6 @@
 import React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 import { MarkdownCanvas, type MarkdownCanvasHandle, type AgentPersona, type MentionEvent, type CanvasSaveResult } from './MarkdownCanvas';
 import type { CanvasAgentInteraction, CanvasPresence, CanvasUser, CanvasDecoration, CanvasThreadAgentStatus } from './types';
 
@@ -32,7 +33,7 @@ export function mountCanvas(container: HTMLElement, options: MountCanvasOptions)
 
   canvasRef = React.createRef();
   root = createRoot(container);
-  root.render(
+  flushSync(() => root!.render(
     <MarkdownCanvas
       ref={canvasRef}
       spaceId={options.spaceId}
@@ -52,7 +53,7 @@ export function mountCanvas(container: HTMLElement, options: MountCanvasOptions)
       titleFallback={options.titleFallback}
       onTitleChange={options.onTitleChange}
     />
-  );
+  ));
 }
 
 export async function unmountCanvas(save = true): Promise<CanvasSaveResult> {

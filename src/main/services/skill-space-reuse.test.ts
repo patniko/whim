@@ -10,7 +10,15 @@ const unarchived: string[] = [];
 const cancelledRecurrences: string[] = [];
 let unarchiveResult: 'ok' | 'fails' = 'ok';
 
-vi.mock('../database', () => ({
+vi.mock('../storage', async () => ({
+  ...(await import('../workspace')),
+  ...(await import('./skill-schedule-store')),
+  ...(await import('../canvas/artifact-store')),
+  documentMatches: (await import('../storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   getLatestSpaceForSkill: (skillId: string) =>
     [...spaces].reverse().find(s => s.source_skill_id === skillId) ?? null,
   hasActiveAgentForSpace: (spaceId: string) => activeAgentSpaceIds.has(spaceId),

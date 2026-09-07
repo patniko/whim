@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { Canvas } from '@github/copilot-sdk';
+vi.mock('../storage', async () => await import('./artifact-store'));
 
 vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] },
@@ -40,7 +41,7 @@ function invokeAction(canvas: Canvas, name: string, input: Record<string, unknow
   });
 }
 
-function open(canvas: Canvas, input: Record<string, unknown> = {}, instanceId = 'inst-1') {
+function open(canvas: Canvas, input: Parameters<Canvas['open']>[0]['input'] = {}, instanceId = 'inst-1') {
   return canvas.open({
     sessionId: 'sess-1',
     extensionId: 'whim',

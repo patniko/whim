@@ -21,13 +21,13 @@ export interface WhimToolContext {
   broker: {
     resolvePermission(agentId: string, requestId: string, approved: boolean): void;
   };
-  getSpaces: () => Array<{
+  getSpaces: () => Promise<Array<{
     id: string;
     description: string;
     body: string | null;
     status: string;
     folder: string | null;
-  }>;
+  }>>;
   setYoloMode: (agentId: string, enabled: boolean) => Promise<{ ok: true } | { error: string }>;
   sendChatMessage: (agentId: string, prompt: string) => Promise<{ error?: string }>;
   getAgentHistory: (agentId: string) => Promise<{ events: any[]; restarted?: boolean } | { error: string }>;

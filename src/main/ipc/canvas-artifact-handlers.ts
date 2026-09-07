@@ -5,9 +5,10 @@
  * for artifacts, so they survive a projection rebuild, a git sync, or a
  * workspace moved between machines.
  */
-import { getSpace, listSpaces } from '../database';
+import { getSpaceSummary as getSpace, listSpaceSummaries, isInitialized } from '../storage';
 import { getConfigValue } from '../config';
-import { listArtifacts, type CanvasArtifact } from '../canvas/artifact-store';
+import { type CanvasArtifact } from '../canvas/artifact-store';
+import { listArtifacts } from '../storage';
 import { buildArtifactUrl } from '../canvas/artifact-protocol';
 import { openArtifactWindow } from '../canvas/artifact-window';
 import { registerHandler } from './typed-handler';
@@ -28,15 +29,15 @@ function toPublic(artifact: CanvasArtifact): SpaceCanvasArtifact {
 }
 
 /** Published artifacts of one space, newest first. */
-export function listSpaceArtifacts(spaceId: string): SpaceCanvasArtifact[] {
+export async function listSpaceArtifacts(spaceId: string): Promise<SpaceCanvasArtifact[]> {
   const workspace = getConfigValue('workspace');
   if (!workspace) return [];
 
-  const space = getSpace(spaceId);
+  const space = (await getSpace(spaceId));
   if (!space?.folder) return [];
 
   try {
-    return listArtifacts(workspace, space.folder)
+    return (await listArtifacts(workspace, space.folder))
       .filter(a => a.published)
       .sort((a, b) => (b.publishedAt ?? b.updatedAt).localeCompare(a.publishedAt ?? a.updatedAt))
       .map(toPublic);
@@ -51,31 +52,45 @@ export function listSpaceArtifacts(spaceId: string): SpaceCanvasArtifact[] {
  * Completed spaces are excluded: closing a space is how the user says they are
  * done with its report, and a tray that keeps listing them defeats that.
  */
-export function listActiveArtifacts(): SpaceCanvasArtifact[] {
+export async function listActiveArtifacts(spaceIds?: string[], limit?: number): Promise<SpaceCanvasArtifact[]> {
+  if (spaceIds && (!Array.isArray(spaceIds) || spaceIds.length > 100 || !spaceIds.every(id => typeof id === 'string'))) {
+    throw new Error('Invalid artifact space page');
+  }
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 100)) throw new Error('Invalid artifact limit');
   const workspace = getConfigValue('workspace');
-  if (!workspace) return [];
+  if (!workspace || !isInitialized()) return [];
 
   const artifacts: SpaceCanvasArtifact[] = [];
-  for (const space of listSpaces()) {
-    if (space.status === 'done' || !space.folder) continue;
-    try {
-      for (const artifact of listArtifacts(workspace, space.folder)) {
-        if (artifact.published) artifacts.push(toPublic(artifact));
+  const newestFirst = (a: SpaceCanvasArtifact, b: SpaceCanvasArtifact) => (b.publishedAt ?? b.updatedAt).localeCompare(a.publishedAt ?? a.updatedAt);
+  let cursor: string | undefined;
+  do {
+    const page = spaceIds ? { items: await Promise.all(spaceIds.map(id => getSpace(id))), nextCursor: null }
+      : await listSpaceSummaries({ limit: 100, filter: 'open', cursor });
+    for (const space of page.items) {
+      if (!space || space.status === 'done' || !space.folder) continue;
+      for (const artifact of (await listArtifacts(workspace, space.folder))) {
+        if (!artifact.published) continue;
+        artifacts.push(toPublic(artifact));
+        if (limit !== undefined) {
+          artifacts.sort(newestFirst);
+          if (artifacts.length > limit) artifacts.pop();
+        }
       }
-    } catch { /* a space folder that cannot be read simply has no artifacts */ }
-  }
-  return artifacts.sort((a, b) => (b.publishedAt ?? b.updatedAt).localeCompare(a.publishedAt ?? a.updatedAt));
+    }
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return artifacts.sort(newestFirst);
 }
 
 export function registerCanvasArtifactHandlers(): void {
-  registerHandler('canvas-artifact:list', (_event, spaceId) => ({
-    artifacts: listSpaceArtifacts(spaceId),
+  registerHandler('canvas-artifact:list', async (_event, spaceId) => ({
+    artifacts: (await listSpaceArtifacts(spaceId)),
   }));
 
-  registerHandler('canvas-artifact:list-all', () => ({ artifacts: listActiveArtifacts() }));
+  registerHandler('canvas-artifact:list-all', async (_event, spaceIds) => ({ artifacts: (await listActiveArtifacts(spaceIds)) }));
 
-  registerHandler('canvas-artifact:open', (_event, spaceId, artifactId) => {
-    const artifact = listSpaceArtifacts(spaceId).find(a => a.artifactId === artifactId);
+  registerHandler('canvas-artifact:open', async (_event, spaceId, artifactId) => {
+    const artifact = (await listSpaceArtifacts(spaceId)).find(a => a.artifactId === artifactId);
     if (!artifact) return { error: 'Report not found' };
 
     // The user asked for it, so this one does take focus.

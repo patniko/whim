@@ -12,6 +12,7 @@
 
 import * as fs from 'fs';
 import * as crypto from 'crypto';
+import * as path from 'path';
 
 interface WatchEntry {
   watcher: fs.FSWatcher;
@@ -21,7 +22,7 @@ interface WatchEntry {
   selfWriteHash: string | null;
   /** MD5 of the last content seen on disk (to avoid duplicate notifications). */
   lastSeenHash: string | null;
-  onChange: (content: string) => void;
+  onChange: (content: string) => void | Promise<void>;
 }
 
 const watches = new Map<string, WatchEntry>();
@@ -39,7 +40,7 @@ function contentHash(content: string): string {
 export function startWatching(
   spaceId: string,
   canvasPath: string,
-  onChange: (content: string) => void,
+  onChange: (content: string) => void | Promise<void>,
 ): void {
   stopWatching(spaceId);
 
@@ -52,10 +53,10 @@ export function startWatching(
 
   let watcher: fs.FSWatcher;
   try {
-    watcher = fs.watch(canvasPath, { persistent: false });
-  } catch {
-    // File doesn't exist yet — nothing to watch
-    return;
+    watcher = fs.watch(path.dirname(canvasPath), { persistent: false });
+  } catch (error) {
+    console.error('[canvas-watcher] Unable to watch document directory:', error);
+    throw error;
   }
 
   const entry: WatchEntry = {
@@ -67,30 +68,33 @@ export function startWatching(
     onChange,
   };
 
-  watcher.on('change', () => {
+  watcher.on('change', (_event, filename) => {
+    if (filename && filename.toString() !== path.basename(canvasPath)) return;
     // Debounce rapid changes (agents may write multiple times quickly)
     if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
     entry.debounceTimer = setTimeout(() => {
       entry.debounceTimer = null;
-      handleFileChange(entry);
+      void handleFileChange(entry).catch(error => console.error('[canvas-watcher] Refresh failed:', error));
     }, DEBOUNCE_MS);
   });
 
-  watcher.on('error', () => {
-    // Silently stop on error (file deleted, permissions, etc.)
+  watcher.on('error', error => {
+    console.error('[canvas-watcher] Document watcher failed:', error);
     stopWatching(spaceId);
   });
 
   watches.set(spaceId, entry);
 }
 
-function handleFileChange(entry: WatchEntry): void {
+async function handleFileChange(entry: WatchEntry): Promise<void> {
   let content: string;
   try {
-    content = fs.readFileSync(entry.canvasPath, 'utf-8');
-  } catch {
-    return; // File disappeared — ignore
+    content = await fs.promises.readFile(entry.canvasPath, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
   }
+  if (![...watches.values()].includes(entry)) return;
 
   const hash = contentHash(content);
 
@@ -105,7 +109,12 @@ function handleFileChange(entry: WatchEntry): void {
   }
 
   entry.lastSeenHash = hash;
-  entry.onChange(content);
+  await entry.onChange(content);
+}
+
+/** Sync completion waits for disk-authoritative updates, without changing editor bases. */
+export async function refreshWatchedCanvases(): Promise<void> {
+  for (const entry of watches.values()) await handleFileChange(entry);
 }
 
 /** Stop watching a canvas file. */
@@ -134,10 +143,20 @@ export function clearSelfWrite(spaceId: string): void {
 }
 
 /** Stop all active watchers. Called on app shutdown. */
-export function stopAllWatchers(): void {
+export function stopAllWatchers(): () => Promise<void> {
+  const suspended = [...watches.entries()];
   for (const spaceId of watches.keys()) {
     stopWatching(spaceId);
   }
+  return async () => {
+    for (const [spaceId, previous] of suspended) {
+      startWatching(spaceId, previous.canvasPath, previous.onChange);
+      const restored = watches.get(spaceId)!;
+      restored.lastSeenHash = previous.lastSeenHash;
+      restored.selfWriteHash = previous.selfWriteHash;
+    }
+    await refreshWatchedCanvases();
+  };
 }
 
 /** Check if a space is currently being watched. (Exposed for testing.) */

@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { applyChatEvent, applyChatEvents, parseHistory, type Bubble } from './transcript';
+import { acknowledgeUserMessage, mergeHistoryWithLocal } from '../../shared/chat-identity';
+
+it('retains mobile follow-ups across snapshots and acknowledgements in either order', () => {
+  const local: Bubble = { id: 'local', kind: 'user', text: 'Follow up' };
+  const history: Bubble[] = [{ ...local, id: 'user:sdk' }];
+  const beforeAck = mergeHistoryWithLocal(history, [local], new Set(['local']));
+  expect(acknowledgeUserMessage(beforeAck, 'local', 'sdk')).toEqual(history);
+  const acknowledged = acknowledgeUserMessage([local], 'local', 'sdk');
+  expect(mergeHistoryWithLocal(history, acknowledged, new Set(['user:sdk']))).toEqual(history);
+  expect(mergeHistoryWithLocal([], [local], new Set(['local']))).toEqual([local]);
+});
 
 describe('parseHistory', () => {
   it('builds user, assistant and tool bubbles from SDK events', () => {
@@ -27,6 +38,19 @@ describe('parseHistory', () => {
 });
 
 describe('applyChatEvent', () => {
+  it('deduplicates identified legacy snapshots and live reasoning, text and tool starts', () => {
+    const history = parseHistory([
+      { type: 'assistant.message', data: { messageId: 'a', content: 'Answer' } },
+      { type: 'assistant.reasoning', data: { reasoningId: 'r', content: 'Reasoning' } },
+      { type: 'tool.execution_start', data: { toolCallId: 't', toolName: 'view' } },
+    ]);
+    const merged = applyChatEvents(history, [
+      { type: 'assistant.message_delta', messageId: 'a', delta: 'Answer' },
+      { type: 'assistant.reasoning_delta', reasoningId: 'r', delta: 'Reasoning' },
+      { type: 'tool.start', toolCallId: 't', toolName: 'view', args: {} },
+    ]);
+    expect(merged).toEqual(history);
+  });
   it('accumulates streaming assistant deltas then finalizes', () => {
     let bubbles: Bubble[] = [];
     bubbles = applyChatEvent(bubbles, { type: 'assistant.message_delta', delta: 'Hel' });

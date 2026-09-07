@@ -10,94 +10,76 @@ import {
   appendAgentChatEvent,
   listAgentChatEvents,
   clearAgentChatEvents,
-} from '../database';
+} from '../storage';
 import type { AgentSession, AgentChatEvent, CanvasAgent } from '../../shared/types';
 import type { AgentRecord } from './agent-registry';
 
 export class AgentPersistence {
-  createCanvasAgentRecord(data: CanvasAgent): void {
-    createCanvasAgent(data);
+  async createCanvasAgentRecord(data: CanvasAgent): Promise<void> {
+    (await createCanvasAgent(data));
   }
 
-  createAgentSessionRecord(data: AgentSession): void {
-    dbCreateAgentSession(data);
+  async createAgentSessionRecord(data: AgentSession): Promise<void> {
+    (await dbCreateAgentSession(data));
   }
 
   /** Write status to both canvas_agents and agent_sessions tables. No-op for ephemeral agents. */
-  updateStatus(record: AgentRecord): void {
+  async updateStatus(record: AgentRecord): Promise<void> {
     if (record.ephemeral) return;
-    try {
-      updateCanvasAgentStatus(record.agentId, record.status);
-    } catch { /* non-fatal */ }
-    try {
-      updateAgentSessionStatus(record.agentId, record.status, record.summary);
-    } catch { /* non-fatal */ }
+    const { agentId, status, summary } = record;
+    await updateCanvasAgentStatus(agentId, status);
+    await updateAgentSessionStatus(agentId, status, summary);
   }
 
   /** Write summary to agent_sessions table only. No-op for ephemeral agents. */
-  persistSummary(record: AgentRecord): void {
+  async persistSummary(record: AgentRecord): Promise<void> {
     if (record.ephemeral) return;
-    try {
-      updateAgentSessionStatus(record.agentId, record.status, record.summary);
-    } catch { /* non-fatal */ }
+    await updateAgentSessionStatus(record.agentId, record.status, record.summary);
   }
 
   /** Persist the per-session yolo (auto-approve) flag. No-op for ephemeral agents. */
-  updateYolo(record: AgentRecord, enabled: boolean): void {
+  async updateYolo(record: AgentRecord, enabled: boolean): Promise<void> {
     if (record.ephemeral) return;
-    try {
-      updateAgentSessionYolo(record.agentId, enabled);
-    } catch { /* non-fatal */ }
+    await updateAgentSessionYolo(record.agentId, enabled);
   }
 
-  getSession(agentId: string): AgentSession | null {
-    return getAgentSession(agentId);
+  async getSession(agentId: string): Promise<AgentSession | null> {
+    return (await getAgentSession(agentId));
   }
 
-  listSessions(): AgentSession[] {
-    return listAgentSessions();
+  async listSessions(): Promise<AgentSession[]> {
+    return (await listAgentSessions());
   }
 
-  updateSessionStatus(agentId: string, status: string, summary: string): void {
-    updateAgentSessionStatus(agentId, status, summary);
+  async updateSessionStatus(agentId: string, status: string, summary: string): Promise<void> {
+    (await updateAgentSessionStatus(agentId, status, summary));
   }
 
   /** Update session_id in both agent_sessions and canvas_agents tables. */
-  updateSessionId(agentId: string, newSessionId: string): void {
-    updateAgentSessionId(agentId, newSessionId);
+  async updateSessionId(agentId: string, newSessionId: string): Promise<void> {
+    (await updateAgentSessionId(agentId, newSessionId));
   }
 
   /**
    * Append a chat event to the persisted transcript for `agentId`.
    * No-op for ephemeral agents — they're explicitly not persisted.
-   * Failures are swallowed (transcript is best-effort, not critical
-   * path); they're logged for diagnosis.
+   * The caller observes failures; an acknowledgement means the log is durable.
    */
-  appendChatEvent(
+  async appendChatEvent(
     record: AgentRecord,
     event: { event_id: string | null; type: string; timestamp: string; payload: string },
-  ): void {
+  ): Promise<number | undefined> {
     if (record.ephemeral) return;
-    try {
-      appendAgentChatEvent(record.agentId, event);
-    } catch (err) {
-      console.warn(`[agent-persistence] appendChatEvent failed for ${record.agentId}: ${(err as Error).message}`);
-    }
+    return appendAgentChatEvent(record.agentId, event);
   }
 
   /** Read the persisted transcript for an agent, ordered oldest-first. */
-  listChatEvents(agentId: string): AgentChatEvent[] {
-    try {
-      return listAgentChatEvents(agentId);
-    } catch {
-      return [];
-    }
+  async listChatEvents(agentId: string): Promise<AgentChatEvent[]> {
+    return await listAgentChatEvents(agentId);
   }
 
   /** Discard persisted transcript for an agent. */
-  clearChatEvents(agentId: string): void {
-    try {
-      clearAgentChatEvents(agentId);
-    } catch { /* non-fatal */ }
+  async clearChatEvents(agentId: string): Promise<void> {
+    await clearAgentChatEvents(agentId);
   }
 }

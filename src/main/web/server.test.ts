@@ -4,6 +4,7 @@ import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import type { AddressInfo } from 'net';
+import { advanceWorkspaceGeneration, getWorkspaceEpoch } from '../workspace-context';
 
 const TOKEN = 'test-token-0123456789';
 
@@ -47,7 +48,15 @@ vi.mock('./event-hub', () => ({
 
 const space: { id: string; folder: string } | null = { id: 'sp1', folder: 'space-one' };
 
-vi.mock('../database', () => ({
+vi.mock('../storage', async () => ({
+  ...(await import('../workspace')),
+  ...(await import('../services/skill-schedule-store')),
+  ...(await import('../canvas/artifact-store')),
+  documentMatches: (await import('../storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   isInitialized: () => true,
   getSpace: (id: string) => (space && space.id === id ? space : null),
 }));
@@ -210,6 +219,16 @@ describe('web remote server', () => {
   });
 
   describe('/api/invoke', () => {
+    it('rejects a browser draft scoped to the previous workspace, even with a valid device session', async () => {
+      const workspaceEpoch = getWorkspaceEpoch();
+      advanceWorkspaceGeneration();
+      const res = await request(`/api/invoke?token=${TOKEN}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: 'canvas:write', args: ['shared-id', 'old draft'], workspaceEpoch }),
+      });
+      expect(res.status).toBe(409);
+      expect(res.json()).toMatchObject({ error: { code: 'workspace_changed' } });
+    });
     it('rejects a non-object body', async () => {
       const res = await request('/api/invoke', {
         method: 'POST',
@@ -232,7 +251,7 @@ describe('web remote server', () => {
       const res = await request('/api/invoke', {
         method: 'POST',
         headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channel: 'spaces:list', args: [] }),
+        body: JSON.stringify({ channel: 'spaces:list', args: [], workspaceEpoch: getWorkspaceEpoch() }),
       });
       expect(res.status).toBe(200);
       expect(res.json()).toEqual({ ok: true, result: { echoed: 'spaces:list' } });
@@ -257,7 +276,7 @@ describe('web remote server', () => {
           'Content-Type': 'application/json',
           Origin: 'http://evil.example',
         },
-        body: JSON.stringify({ channel: 'spaces:list', args: [] }),
+        body: JSON.stringify({ channel: 'spaces:list', args: [], workspaceEpoch: getWorkspaceEpoch() }),
       });
       expect(res.status).toBe(403);
       expect(res.json()).toMatchObject({ error: { code: 'origin_not_allowed' } });
@@ -271,7 +290,7 @@ describe('web remote server', () => {
           'Content-Type': 'application/json',
           Origin: `http://127.0.0.1:${port}`,
         },
-        body: JSON.stringify({ channel: 'spaces:list', args: [] }),
+        body: JSON.stringify({ channel: 'spaces:list', args: [], workspaceEpoch: getWorkspaceEpoch() }),
       });
       expect(res.status).toBe(200);
     });
@@ -284,7 +303,7 @@ describe('web remote server', () => {
       const res = await request('/api/invoke', {
         method: 'POST',
         headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'text/plain' },
-        body: JSON.stringify({ channel: 'spaces:list', args: [] }),
+        body: JSON.stringify({ channel: 'spaces:list', args: [], workspaceEpoch: getWorkspaceEpoch() }),
       });
       expect(res.status).toBe(415);
     });
@@ -578,7 +597,7 @@ describe('web remote server', () => {
       await request('/api/invoke', {
         method: 'POST',
         headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channel: 'space:list', args: [] }),
+        body: JSON.stringify({ channel: 'space:list', args: [], workspaceEpoch: getWorkspaceEpoch() }),
       });
       const latest = auditLog.recent(1)[0];
       expect(latest).toMatchObject({ channel: 'space:list', status: 200, outcome: 'ok', identity: 'token' });
@@ -597,11 +616,11 @@ describe('web remote server', () => {
 
   describe('rate limiting', () => {
     it('rejects a caller that floods /api/invoke and tells it when to retry', async () => {
-      const send = () => request('/api/invoke', {
+      const send = async () => (await request('/api/invoke', {
         method: 'POST',
         headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channel: 'space:list', args: [] }),
-      });
+        body: JSON.stringify({ channel: 'space:list', args: [], workspaceEpoch: getWorkspaceEpoch() }),
+      }));
 
       // Derived from the policy rather than hardcoded: the burst allowance is
       // tuned to what a real page load costs, so a literal here would have to

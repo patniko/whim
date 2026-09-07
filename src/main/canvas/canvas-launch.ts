@@ -103,18 +103,18 @@ function defaultHooks(run: CanvasRunContext, agentId: string | undefined, extra?
           artifactId: artifact.artifactId,
         });
       }
-      extra?.onArtifactBound?.(artifact, ctx);
+      return extra?.onArtifactBound?.(artifact, ctx);
     },
     onArtifactPublished: (artifact, ctx) => {
       show(artifact, ctx.instanceId);
       announce(artifact);
       if (agentId) recordCanvasPublication(agentId, artifact);
-      extra?.onArtifactPublished?.(artifact, ctx);
+      return extra?.onArtifactPublished?.(artifact, ctx);
     },
     onArtifactChanged: (artifact, ctx) => {
       setArtifactWindowTitle({ spaceId: run.spaceId, artifactId: artifact.artifactId }, artifact.title);
       announce(artifact);
-      extra?.onArtifactChanged?.(artifact, ctx);
+      return extra?.onArtifactChanged?.(artifact, ctx);
     },
     onInstanceClosed: (ctx) => extra?.onInstanceClosed?.(ctx),
   };

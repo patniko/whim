@@ -11,10 +11,10 @@
  * forgets to link has produced output nobody sees, and that failure is
  * invisible from the outside. Doing it host-side makes it unconditional.
  */
-import * as fs from 'fs';
 import { notifyAllWindows } from '../notify';
-import { readCanvas, resolvePagePath, writePage } from '../workspace';
-import { writeEditorFileWithMerge, writeMainCanvasWithMerge } from '../services/canvas-editor-state';
+import { resolvePagePath } from '../workspace';
+import { readCanvas, readDocument, writeDocument } from '../storage';
+import { writeEditorFileWithMergeAsync, writeMainCanvasWithMergeAsync } from '../services/canvas-editor-state';
 
 /** Heading of the section links are collected under. */
 export const REPORTS_HEADING = '## Reports';
@@ -101,24 +101,22 @@ export interface LinkArtifactParams {
  * started from a comment on it — and a blind write would silently discard
  * whatever they added while the agent was working.
  */
-export function linkArtifactIntoDocument(params: LinkArtifactParams): boolean {
+export async function linkArtifactIntoDocument(params: LinkArtifactParams): Promise<boolean> {
   const { workspaceRoot, spaceId, folder, link, pageName } = params;
 
-  try {
     if (pageName) {
       const resolved = resolvePagePath(workspaceRoot, folder, pageName);
-      if ('error' in resolved) return false;
+      if ('error' in resolved) throw new Error(resolved.error);
 
-      const current = fs.existsSync(resolved.path) ? fs.readFileSync(resolved.path, 'utf-8') : '';
+      const current = await readDocument(resolved.path, workspaceRoot);
       const updated = upsertArtifactLink(current, link);
       if (updated === current) return false;
 
       const editorId = `__page__${spaceId}/${encodeURIComponent(pageName)}`;
-      const result = writeEditorFileWithMerge(editorId, resolved.path, updated, contentToWrite => {
-        const write = writePage(workspaceRoot, folder, pageName, contentToWrite);
-        if ('error' in write) throw new Error(write.error);
-      });
-      if (!result.success) return false;
+      const result = await writeEditorFileWithMergeAsync(editorId, resolved.path, updated, async (contentToWrite, expected) => {
+        await writeDocument({ filePath: resolved.path, root: workspaceRoot, content: contentToWrite, expected });
+      }, current);
+      if (!result.success) throw new Error(result.error || 'Report link could not be saved');
 
       // Child pages have no file watcher, so an open editor only learns about
       // this if we tell it.
@@ -129,23 +127,11 @@ export function linkArtifactIntoDocument(params: LinkArtifactParams): boolean {
       return true;
     }
 
-    const current = readDocument(workspaceRoot, folder);
+    const current = await readCanvas(workspaceRoot, folder);
     const updated = upsertArtifactLink(current, link);
     if (updated === current) return false;
 
-    return writeMainCanvasWithMerge(workspaceRoot, spaceId, folder, updated).success;
-  } catch (err: any) {
-    // A report that published but could not be linked is still a report. Log
-    // and move on rather than failing the run over its last step.
-    console.warn(`[canvas] could not link report ${link.artifactId} into space ${spaceId}: ${err?.message ?? err}`);
-    return false;
-  }
-}
-
-function readDocument(workspaceRoot: string, folder: string): string {
-  try {
-    return readCanvas(workspaceRoot, folder);
-  } catch {
-    return '';
-  }
+    const result = await writeMainCanvasWithMergeAsync(workspaceRoot, spaceId, folder, updated, current);
+    if (!result.success) throw new Error(result.error || 'Report link could not be saved');
+    return true;
 }

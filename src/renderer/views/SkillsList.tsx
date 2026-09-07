@@ -1,7 +1,8 @@
 import React from 'react';
 import { skillStore } from '../state/skill-store';
 import { useStore } from './useStore';
-import { timeAgo } from './list-utils';
+import { formatScheduleDate } from '../scheduled-skills';
+import { scheduledRunLabels } from '../../shared/skill-schedule';
 import { EmptyState } from './EmptyState';
 import type { Skill } from '../../shared/types';
 
@@ -11,6 +12,7 @@ export interface SkillsListProps {
   onSkillClick: (skillId: string) => void;
   onRunNow: (skillId: string) => void;
   onSchedule: (skillId: string) => void;
+  onOpenResult: (spaceId: string) => void;
   onCreateSpace: (skillId: string) => void;
   onOpenFolder: (skillId: string) => void;
   onDelete: (skillId: string) => void;
@@ -38,6 +40,7 @@ const SkillRow = React.memo(function SkillRow({
   onSkillClick,
   onRunNow,
   onSchedule,
+  onOpenResult,
   onCreateSpace,
   onOpenFolder,
   onDelete,
@@ -46,13 +49,18 @@ const SkillRow = React.memo(function SkillRow({
   onSkillClick: (id: string) => void;
   onRunNow: (id: string) => void;
   onSchedule: (id: string) => void;
+  onOpenResult: (id: string) => void;
   onCreateSpace: (id: string) => void;
   onOpenFolder: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
-  const scheduleText = skill.schedule ? `${skill.schedule}${skill.schedule_time ? ` ${skill.schedule_time}` : ''}` : '';
-  const nextRun = nextRunLabel(skill.next_run_at);
-  const lastRun = skill.last_run_at ? timeAgo(skill.last_run_at) : '';
+  const details = skill.schedule_details;
+  const scheduleText = skill.schedule ? `${skill.schedule}${skill.schedule_time ? ` ${skill.schedule_time}` : ''}${details ? ` ${details.timeZone}` : ''}` : '';
+  const nextRun = nextRunLabel(details?.nextRunAt ?? skill.next_run_at);
+  const outcome = details?.lastRun;
+  const outcomeAt = outcome?.completedAt ?? outcome?.startedAt ?? skill.last_run_at;
+  const lastRun = outcomeAt ? formatScheduleDate(outcomeAt) : '';
+  const resultSpaceId = outcome?.spaceId ?? details?.lastSuccessfulRun?.spaceId;
 
   return (
     <div
@@ -112,13 +120,25 @@ const SkillRow = React.memo(function SkillRow({
         <div className="space-meta">
           {scheduleText ? <span className="skill-schedule">⏰ {scheduleText}</span> : null}
           {nextRun ? <span className="skill-next-run">next: {nextRun}</span> : null}
-          {skill.canvas ? (
+          {skill.canvas && details?.output !== 'canvas' ? (
             <span className="skill-report" title="Publishes a report when it runs">
               📊 report
             </span>
           ) : null}
           {lastRun ? <span>last: {lastRun}</span> : null}
         </div>
+        {outcome ? (
+          <div className={`skill-run-outcome skill-run-${outcome.status}`}>
+            <span>{scheduledRunLabels[outcome.status]}</span>
+            {outcome.summary ? <span className="skill-run-summary">{outcome.summary}</span> : null}
+          </div>
+        ) : null}
+        {resultSpaceId ? (
+          <button type="button" className="skill-result-link"
+            onClick={(event) => { event.stopPropagation(); onOpenResult(resultSpaceId); }}>
+            Open latest result
+          </button>
+        ) : null}
       </div>
       <div className="skill-actions">
         <button
@@ -132,7 +152,7 @@ const SkillRow = React.memo(function SkillRow({
         <button
           type="button"
           className="skill-action"
-          title="Schedule & report"
+          title={skill.schedule ? 'Edit schedule' : 'Create schedule'}
           onClick={(e) => { e.stopPropagation(); onSchedule(skill.id); }}
         >
           ⏰
@@ -199,6 +219,7 @@ export function SkillsList(props: SkillsListProps): React.ReactElement {
           onSkillClick={props.onSkillClick}
           onRunNow={props.onRunNow}
           onSchedule={props.onSchedule}
+          onOpenResult={props.onOpenResult}
           onCreateSpace={props.onCreateSpace}
           onOpenFolder={props.onOpenFolder}
           onDelete={props.onDelete}

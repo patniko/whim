@@ -2,9 +2,9 @@ import { execSync, exec } from 'child_process';
 import { app } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { getSpace, assignSpaceFolder } from './database';
+import { getSpace, assignSpaceFolder } from './storage';
 import { getSessionId, setSessionId as configSetSessionId, getConfigValue } from './config';
-import { setSpaceSessionId } from './database';
+import { setSpaceSessionId } from './storage';
 import { createSpaceFolder } from './workspace';
 import { launchInTerminal as platformLaunchInTerminal } from './platform/terminal';
 import { focusTerminalWindow } from './platform/focus';
@@ -947,7 +947,7 @@ export async function launchSession(spaceId: string, workspaceRoot: string): Pro
   launching.add(spaceId);
 
   try {
-    const space = getSpace(spaceId);
+    const space = (await getSpace(spaceId));
     if (!space) {
       return { success: false, error: 'Space not found' };
     }
@@ -956,7 +956,7 @@ export async function launchSession(spaceId: string, workspaceRoot: string): Pro
     let folder = space.folder;
     if (!folder) {
       folder = createSpaceFolder(workspaceRoot, spaceId, space.description);
-      assignSpaceFolder(spaceId, folder);
+      (await assignSpaceFolder(spaceId, folder));
     }
     const cwd = path.join(workspaceRoot, folder);
 
@@ -971,7 +971,7 @@ export async function launchSession(spaceId: string, workspaceRoot: string): Pro
       const { v4: uuidv4 } = require('uuid');
       sessionId = uuidv4() as string;
       configSetSessionId(spaceId, sessionId);
-      setSpaceSessionId(spaceId, sessionId);
+      (await setSpaceSessionId(spaceId, sessionId));
     }
 
     const result = await platformLaunchInTerminal({

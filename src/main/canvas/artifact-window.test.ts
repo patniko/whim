@@ -44,9 +44,9 @@ vi.mock('electron', () => ({
         loadURL: vi.fn(),
         show: vi.fn(() => { visible = true; }),
         focus: vi.fn(() => { focused = true; }),
-        close: vi.fn(() => {
+        close: vi.fn(async () => {
           destroyed = true;
-          handlers.get('closed')?.();
+          (await handlers.get('closed')?.());
         }),
         setTitle: vi.fn(),
         isVisible: () => visible,
@@ -64,7 +64,7 @@ vi.mock('electron', () => ({
           },
         },
         __options: options,
-        __fire: (event: string, ...args: any[]) => handlers.get(event)?.(...args),
+        __fire: async (event: string, ...args: any[]) => (await handlers.get(event)?.(...args)),
         __fireWc: (event: string, ...args: any[]) => wcHandlers.get(event)?.(...args),
       };
       createdWindows.push(win);

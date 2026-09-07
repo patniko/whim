@@ -175,7 +175,7 @@ describe('event channel classification', () => {
         // listener to whichever channel happened to be declared earliest.
         const preceding = source.slice(0, match.index);
         const declarations = [...preceding.matchAll(/const channel = [`']([^`']*)[`'];/g)];
-        const nearest = declarations.at(-1);
+        const nearest = declarations.slice(-1)[0];
         if (nearest) {
           // A template channel (`chat:event:${id}`) is flattened by the hub to
           // its static prefix, which is what has to be classified.

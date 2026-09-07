@@ -1,4 +1,5 @@
 import type { Skill } from '../../shared/types';
+import { reconcileByKey } from './reconcile';
 
 export interface SkillState {
   skills: Skill[];
@@ -19,6 +20,8 @@ class SkillStore {
   }
 
   setSkills(skills: Skill[]): void {
+    skills = reconcileByKey(this.state.skills, skills, skill => skill.id);
+    if (skills === this.state.skills) return;
     this.state = { ...this.state, skills };
     this.notify();
   }

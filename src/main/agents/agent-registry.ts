@@ -2,6 +2,8 @@ import type { CopilotSession } from '@github/copilot-sdk';
 import type { AgentAnchor } from '../../shared/types';
 import type { ResolvedPathPolicy } from './sandbox-policies';
 import type { SandboxConfigDirs } from '../ai';
+import type { ScheduledInvocation } from '../../shared/skill-schedule';
+import type { ScheduledResultContext } from '../services/scheduled-result';
 
 export type AgentStatus = 'running' | 'waiting-approval' | 'completed' | 'failed';
 
@@ -72,6 +74,8 @@ export interface AgentRecord {
   commentContext?: CommentAgentContext;
   /** Canvas hash snapshot taken before agent starts, for change detection on completion. */
   canvasSnapshot?: { path: string; hashBefore: string };
+  scheduledResult?: ScheduledResultContext;
+  scheduledOccurrence?: { workspaceRoot: string; invocation: ScheduledInvocation };
   /** True when session was recreated after the original SDK session expired. */
   restarted?: boolean;
   /** Sandbox runtime state — present iff the agent was launched as sandboxed. */
@@ -104,6 +108,8 @@ export interface AgentRecord {
   runLocation?: 'local' | 'cloud';
   /** When true, this agent is ephemeral — no DB persistence, in-memory session FS. */
   ephemeral?: boolean;
+  /** This session's older events are served by the bounded runtime projection. */
+  runtimeHistory?: boolean;
   /**
    * When true, this agent is the dedicated supervisor session launched by the
    * app-level remote-control flow (`setAppRemote(true)`).  Used to distinguish

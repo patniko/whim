@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { WorkerTiles } from './WorkerTiles';
-import { ChatView } from '../chat/ChatView';
+import { FeatureBoundary } from '../FeatureBoundary';
+const ChatView = lazy(() => import('../chat/ChatView').then(module => ({ default: module.ChatView })));
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -40,6 +41,7 @@ function renderTiles() {
 function renderChat() {
   if (!chatRoot || !currentOptions || !selectedAgentId) return;
   chatRoot.render(
+    <FeatureBoundary><Suspense fallback={<p role="status">Loading chat...</p>}>
     <ChatView
       agentId={selectedAgentId}
       agentPrompt=""
@@ -48,6 +50,7 @@ function renderChat() {
       onClose={closeChatPane}
       onOpenCli={(id: string) => whimAPI.openAgentCli(id)}
     />
+    </Suspense></FeatureBoundary>
   );
 }
 

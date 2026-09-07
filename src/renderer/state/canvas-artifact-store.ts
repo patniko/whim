@@ -1,4 +1,5 @@
 import type { SpaceCanvasArtifact } from '../../shared/types';
+import { reconcileByKey } from './reconcile';
 
 export interface CanvasArtifactState {
   /** Published artifacts keyed by space id, newest first. */
@@ -30,12 +31,20 @@ class CanvasArtifactStore {
       if (list) list.push(artifact);
       else bySpace.set(artifact.spaceId, [artifact]);
     }
+    for (const [spaceId, incoming] of bySpace) {
+      bySpace.set(spaceId, reconcileByKey(this.state.bySpace.get(spaceId) ?? [], incoming, item => item.artifactId));
+    }
+    if (bySpace.size === this.state.bySpace.size
+      && [...bySpace].every(([id, items]) => this.state.bySpace.get(id) === items)) return;
     this.state = { bySpace };
     this.notify();
   }
 
   /** Replace one space's artifacts, leaving every other space untouched. */
   setSpaceArtifacts(spaceId: string, artifacts: SpaceCanvasArtifact[]): void {
+    const previous = this.state.bySpace.get(spaceId);
+    artifacts = reconcileByKey(previous ?? [], artifacts, item => item.artifactId);
+    if (previous === artifacts || (!previous && artifacts.length === 0)) return;
     const bySpace = new Map(this.state.bySpace);
     if (artifacts.length === 0) bySpace.delete(spaceId);
     else bySpace.set(spaceId, artifacts);

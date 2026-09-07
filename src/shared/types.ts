@@ -1,3 +1,5 @@
+import type { SkillSchedule, ScheduledInvocation, ScheduledRun } from './skill-schedule';
+
 // ── Auto-update ────────────────────────────────────────────────────────────
 export type UpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up-to-date' | 'error' | 'disabled';
 export interface UpdateState {
@@ -303,6 +305,10 @@ export interface Skill {
   next_run_at: string | null;
   /** Last time this skill was auto-triggered in UTC ISO 8601 */
   last_run_at: string | null;
+  /** Durable user schedule, separate from reusable skill instructions. */
+  schedule_details?: SkillSchedule;
+  /** Occurrence history, used to group only spaces actually created by this schedule. */
+  schedule_runs?: ScheduledRun[];
   /**
    * Canvas this skill's runs publish a report to, or null when reports are
    * off. Resolved from the `canvas` field in SKILL.md rather than stored in
@@ -365,6 +371,7 @@ export interface SkillInvocationResult {
 export interface LaunchDocumentAgentOptions {
   personaHandle?: string | null;
   promptOverride?: string;
+  scheduledRun?: ScheduledInvocation;
 }
 
 /** One day in the Activity view's calendar. Zero-activity days are included. */

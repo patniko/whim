@@ -1,24 +1,10 @@
-import type { Space } from '../../shared/types';
+import type { SpaceSummary as Space } from '../../shared/paging';
 import type { SpaceEvent } from '../../shared/ipc-contract';
 
 export type ActivityRowKind = 'space' | 'event';
 
-export interface ActivityRow {
-  key: string;
-  kind: ActivityRowKind;
-  /** Present for rows that can be opened or restored. */
-  spaceId: string | null;
-  at: number;
-  icon: string;
-  variant: 'dismissed' | 'session' | 'recurring' | 'completed';
-  title: string;
-  client: string | null;
-  agentCount: number;
-  hasSession: boolean;
-  /** Wall-clock duration of the space, pre-formatted; empty when unknown. */
-  duration: string;
-  rescheduled: number;
-}
+import type { ActivityRow } from '../../shared/activity-types';
+export type { ActivityRow } from '../../shared/activity-types';
 
 export interface ActivityDayGroup {
   /** Local day key, `YYYY-MM-DD` — stable for React and for sorting. */

@@ -26,27 +26,49 @@ const CACHE = `whim-shell-${self.__WHIM_BUILD__ || 'dev'}`;
  * the shell list, which never mentioned /desktop. A browser could therefore
  * hold a stale renderer indefinitely while the desktop app ran the new code.
  */
-const CACHEABLE = new Set(SHELL);
+const CACHEABLE = new Set([...SHELL, ...(self.__WHIM_LAZY__ || [])]);
+
+async function cacheShell(paths, surface, index) {
+  const html = self.__WHIM_HTML__?.[surface];
+  if (typeof html !== 'string') throw new Error('Missing versioned shell HTML');
+  const cache = await caches.open(CACHE);
+  await cache.addAll(paths.filter(path => path !== index));
+  // Pin HTML to this manifest, even if deployment changes during installation.
+  await cache.put(index, new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } }));
+}
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches
-      .open(CACHE)
-      .then((cache) => cache.addAll(SHELL))
-      // A single missing asset must not wedge the install; the app still works
-      // online, it just won't have a warm shell.
-      .catch(() => undefined)
-      .then(() => self.skipWaiting()),
-  );
+  event.waitUntil((async () => {
+    let desktopUsed = false;
+    for (const key of await caches.keys()) {
+      if (key.startsWith('whim-shell-') && key !== CACHE) {
+        const previous = await caches.open(key);
+        if (await previous.match('/desktop/index.html')) desktopUsed = true;
+      }
+    }
+    await cacheShell(SHELL, 'mobile', '/index.html');
+    if (desktopUsed) await cacheShell(self.__WHIM_DESKTOP_SHELL__ || [], 'desktop', '/desktop/index.html');
+  })());
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))))
+      .then((keys) => Promise.all(keys.filter((key) => key.startsWith('whim-shell-') && key !== CACHE).map((key) => caches.delete(key))))
       .then(() => self.clients.claim()),
   );
+});
+
+// Cache a desktop shell only after that surface is actually used. Its lazy
+// editor/chat modules remain on-demand, just like the mobile Markdown chunk.
+self.addEventListener('message', event => {
+  if (event.data?.type !== 'cache-desktop-shell' || event.data.entry !== self.__WHIM_DESKTOP_ENTRY__) return;
+  if (!event.source?.url) return;
+  const source = new URL(event.source.url);
+  if (source.origin !== self.location.origin || !source.pathname.startsWith('/desktop')) return;
+  event.waitUntil(cacheShell(self.__WHIM_DESKTOP_SHELL__ || [], 'desktop', '/desktop/index.html')
+    .catch(() => { console.warn('[web] Desktop offline shell could not be cached'); }));
 });
 
 self.addEventListener('fetch', (event) => {
@@ -61,7 +83,9 @@ self.addEventListener('fetch', (event) => {
   // reference, and serving a stale one would pin the app to an old build.
   if (request.mode === 'navigate') {
     event.respondWith(
-      fetch(request).catch(() => caches.match('/index.html').then((hit) => hit || Response.error())),
+      fetch(request).catch(() => caches.open(CACHE)
+        .then(cache => cache.match(url.pathname.startsWith('/desktop') ? '/desktop/index.html' : '/index.html'))
+        .then((hit) => hit || Response.error())),
     );
     return;
   }
@@ -74,10 +98,11 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     caches.match(request).then((hit) => {
       if (hit) return hit;
-      return fetch(request).then((response) => {
+      return fetch(request).then(async (response) => {
         if (response.ok && response.type === 'basic') {
           const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put(request, copy));
+          await caches.open(CACHE).then((cache) => cache.put(request, copy))
+            .catch(() => { console.warn('[web] Asset could not be cached'); });
         }
         return response;
       });

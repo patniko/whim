@@ -107,7 +107,8 @@ describe('compactOldSegments', () => {
     expect(fs.existsSync(snapshot)).toBe(true);
 
     // Snapshot payload encodes the row.
-    const snapEvent = JSON.parse(fs.readFileSync(snapshot, 'utf8').trim());
+    const snapEvent = fs.readFileSync(snapshot, 'utf8').trim().split('\n')
+      .map(line => JSON.parse(line)).find(event => event.data.spaces);
     expect(snapEvent.op).toBe('snapshot');
     expect(snapEvent.data.spaces).toHaveLength(1);
     expect(snapEvent.data.spaces[0].id).toBe('cold-1');
@@ -298,7 +299,7 @@ describe('compactOldSegments', () => {
       turns_json: '[]',
       progress_json: '{}',
     });
-    const sideFile = path.join(tmpDir, 'subagent-content', 'sa-gc.streaming.txt');
+    const sideFile = path.join(tmpDir, 'subagent-content', listSubagentRecords('parent-gc')[0].streaming_content_path!);
     expect(fs.existsSync(sideFile)).toBe(true);
     closeDatabase();
 

@@ -1,7 +1,9 @@
 import type { AgentPersona } from '../../shared/ipc-contract';
+import { reconcileByKey } from './reconcile';
 
 export interface PersonaState {
   personas: AgentPersona[];
+  hydrated: boolean;
 }
 
 type Listener = () => void;
@@ -17,6 +19,7 @@ type Listener = () => void;
 class PersonaStore {
   private state: PersonaState = {
     personas: [],
+    hydrated: false,
   };
   private listeners: Set<Listener> = new Set();
 
@@ -25,7 +28,14 @@ class PersonaStore {
   }
 
   setPersonas(personas: AgentPersona[]): void {
-    this.state = { ...this.state, personas };
+    personas = reconcileByKey(this.state.personas, personas, persona => persona.id);
+    if (personas === this.state.personas && this.state.hydrated) return;
+    this.state = { ...this.state, personas, hydrated: true };
+    this.notify();
+  }
+
+  reset(): void {
+    this.state = { personas: [], hydrated: false };
     this.notify();
   }
 

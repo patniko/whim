@@ -22,7 +22,11 @@ canvases and renders them.
 
 ## The shape of a run
 
-There are two ways in. A skill run is the scheduled one:
+New schedules deliver Markdown directly to the main space canvas; see
+[Scheduled Skills](./user-guide.md#scheduled-skills). This page describes optional
+rich reports, including existing schedules that retain the older report flow.
+
+There are two ways into that report flow. A legacy scheduled skill runs as follows:
 
 ```
 skill  →  scheduler  →  space  →  agent run  →  report  →  one click to open it
@@ -44,17 +48,13 @@ what differs is what grants the capability and where the report is linked from.
 
 ## Enabling reports on a skill
 
-Open the skill's schedule picker — the ⏰ button on its card, or **Set Schedule…**
-in the skill editor — and tick **Publish a report**. A skill that ships its own
-template offers a **Layout** choice between it and the built-in report, and
-**Space** decides whether repeat runs refresh one space or each get their own.
-Saving writes the same two frontmatter fields described below, so a skill
-configured by hand and one configured from the picker are the same thing.
+Report settings belong to the skill's frontmatter, not to the schedule picker.
+Configure the fields below for manual report-producing skills or retained legacy
+schedules. New schedules use the main canvas even when a skill contains report
+instructions; those instructions do not force an extra report window.
 
-The picker also has **▶ Run now**, as does each skill card. It saves whatever the
-picker is showing and runs the skill immediately, without moving the next
-scheduled run — checking that a report comes out the way you wanted should not
-cost you tomorrow's run.
+**Run now** uses saved settings without changing the schedule or saving edits
+still in the picker.
 
 Two frontmatter fields in `SKILL.md`:
 

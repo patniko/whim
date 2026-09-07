@@ -8,7 +8,7 @@ interface MockWin {
   id: number;
   loadURL: ReturnType<typeof vi.fn>;
   show: ReturnType<typeof vi.fn>;
-  hide: ReturnType<typeof vi.fn>;
+  hide: ReturnType<typeof vi.fn<() => void>>;
   focus: ReturnType<typeof vi.fn>;
   isVisible: ReturnType<typeof vi.fn>;
   isDestroyed: ReturnType<typeof vi.fn>;
@@ -56,7 +56,10 @@ function makeWindow(): MockWin {
       isLoading: vi.fn(() => false),
     },
     __fire: (event: string, ...args: any[]) => { eventHandlers.get(event)?.(...args); },
-    __fireLoad: () => { wcOnce.get('did-finish-load')?.(); },
+    __fireLoad: () => {
+      wcOnce.get('did-finish-load')?.();
+      ipcOnHandlers.get('window:renderer-ready')?.({ sender: win.webContents });
+    },
   };
   return win;
 }
@@ -89,7 +92,15 @@ vi.mock('electron', () => {
 });
 
 const spaceStore = new Map<string, { description: string }>();
-vi.mock('./database', () => ({
+vi.mock('./storage', async () => ({
+  ...(await import('./workspace')),
+  ...(await import('./services/skill-schedule-store')),
+  ...(await import('./canvas/artifact-store')),
+  documentMatches: (await import('./storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
   getSpace: vi.fn((id: string) => spaceStore.get(id) ?? null),
 }));
 
@@ -130,11 +141,11 @@ describe('window-manager canvas helpers', () => {
     createdWindows.length = 0;
   });
 
-  it('lists only visible canvases with a label from the target title', () => {
+  it('lists only visible canvases with a label from the target title', async () => {
     const a = openCanvas({ kind: 'space', id: 's1', title: 'Title A' });
     const b = openCanvas({ kind: 'space', id: 's2', title: 'Title B' });
 
-    let open = getOpenCanvases();
+    let open = (await getOpenCanvases());
     expect(open).toEqual(
       expect.arrayContaining([
         { winId: a.id, label: 'Title A' },
@@ -144,32 +155,32 @@ describe('window-manager canvas helpers', () => {
 
     // Hiding a window removes it from the list.
     b.hide();
-    open = getOpenCanvases();
+    open = (await getOpenCanvases());
     expect(open.map((c) => c.winId)).toContain(a.id);
     expect(open.map((c) => c.winId)).not.toContain(b.id);
   });
 
-  it('falls back to the space description when the target has no title', () => {
+  it('falls back to the space description when the target has no title', async () => {
     spaceStore.set('s9', { description: 'Quarterly planning' });
     const win = openCanvas({ kind: 'space', id: 's9', title: '' });
 
-    const open = getOpenCanvases();
+    const open = (await getOpenCanvases());
     expect(open).toContainEqual({ winId: win.id, label: 'Quarterly planning' });
   });
 
-  it('labels a page target with the page name', () => {
+  it('labels a page target with the page name', async () => {
     const win = openCanvas({ kind: 'page', spaceId: 's1', page: 'notes', title: 'notes' });
-    const open = getOpenCanvases();
+    const open = (await getOpenCanvases());
     expect(open).toContainEqual({ winId: win.id, label: 'notes' });
   });
 
-  it('updates a page label from a renderer title update', () => {
+  it('updates a page label from a renderer title update', async () => {
     const win = openCanvas({ kind: 'page', spaceId: 's1', page: 'notes', title: 'notes' });
     const handler = ipcOnHandlers.get('canvas-window:update-title')!;
 
     handler({ sender: win.webContents }, 'Derived Notes');
 
-    expect(getOpenCanvases()).toContainEqual({ winId: win.id, label: 'Derived Notes' });
+    expect((await getOpenCanvases())).toContainEqual({ winId: win.id, label: 'Derived Notes' });
   });
 
   it('focusCanvasWindow shows a hidden window and focuses it', () => {
@@ -211,11 +222,11 @@ describe('window-manager canvas helpers', () => {
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it('drops a canvas from the list once closed', () => {
+  it('drops a canvas from the list once closed', async () => {
     const win = openCanvas({ kind: 'space', id: 's1', title: 'A' });
-    expect(getOpenCanvases().map((c) => c.winId)).toContain(win.id);
+    expect((await getOpenCanvases()).map((c) => c.winId)).toContain(win.id);
 
     win.__fire('closed');
-    expect(getOpenCanvases().map((c) => c.winId)).not.toContain(win.id);
+    expect((await getOpenCanvases()).map((c) => c.winId)).not.toContain(win.id);
   });
 });

@@ -3,12 +3,12 @@ import { registerIpcHandler } from './registry';
 export function registerChatHandlers(): void {
   registerIpcHandler('chat:send-message', async (_event, agentId: string, prompt: string, attachments?: Array<{ type: 'file'; path: string }>) => {
     const { sendChatMessage } = await import('../agent-service');
-    return sendChatMessage(agentId, prompt, attachments);
+    return (await sendChatMessage(agentId, prompt, attachments));
   });
 
   registerIpcHandler('chat:set-model', async (_event, agentId: string, model: string) => {
     const { setAgentModel } = await import('../agent-service');
-    return setAgentModel(agentId, model);
+    return (await setAgentModel(agentId, model));
   });
 
   // ── Sub-agent tracking ─────────────────────────────────
@@ -22,7 +22,7 @@ export function registerChatHandlers(): void {
     const live = subagentTracker.getSubagent(parentAgentId, agentId);
     if (live) return live;
     // Fall back to persisted data after parent completion/restart
-    const persisted = subagentTracker.loadPersistedSubagents(parentAgentId);
+    const persisted = (await subagentTracker.loadPersistedSubagents(parentAgentId));
     return persisted.find(a => a.agentId === agentId) ?? null;
   });
 
@@ -41,6 +41,6 @@ export function registerChatHandlers(): void {
     // Try live data first, fall back to persisted
     const live = subagentTracker.listSubagents(parentAgentId);
     if (live.length > 0) return live;
-    return subagentTracker.loadPersistedSubagents(parentAgentId);
+    return (await subagentTracker.loadPersistedSubagents(parentAgentId));
   });
 }

@@ -1,8 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import type { Skill, SkillInvocationResult } from '../../shared/types';
 
 // Mock the database and other native-dependent modules so we can import
 // the scheduler without loading better-sqlite3.
-vi.mock('../database', () => ({
+vi.mock('../storage', async () => ({
+  ...(await import('../workspace')),
+  ...(await import('./skill-schedule-store')),
+  ...(await import('../canvas/artifact-store')),
+  documentMatches: (await import('../storage-documents')).documentMatches,
+  getStorageGeneration: () => 0,
+  withWorkspaceContext: (run: () => unknown) => run(),
+  withStorageGeneration: (_generation: number, run: () => unknown) => run(),
+
+  ...await import('./skill-schedule-store'),
   getDueSkills: vi.fn(() => []),
   getScheduledSkillsNeedingNextRun: vi.fn(() => []),
   claimSkillRun: vi.fn(() => true),
@@ -11,8 +24,13 @@ vi.mock('../database', () => ({
   createSpace: vi.fn(),
   assignSpaceFolder: vi.fn(),
   isInitialized: vi.fn(() => false),
+  listSkills: vi.fn(() => []),
+  markSkillRun: vi.fn(),
+  getAgentSession: vi.fn(() => null),
 }));
 
+vi.mock('../skill-invocation', () => ({ invokeSkill: vi.fn() }));
+vi.mock('../agent-service', () => ({ getAgentSessionId: vi.fn(() => null), abortAgent: vi.fn() }));
 vi.mock('../config', () => ({
   getConfigValue: vi.fn(() => null),
 }));
@@ -30,7 +48,15 @@ vi.mock('../notify', () => ({
   notifyAllWindows: vi.fn(),
 }));
 
-import { computeNextRunAt } from './scheduler';
+import { checkAndRunDueSkills, computeNextRunAt, startScheduler, stopScheduler } from './scheduler';
+import { getAgentSession, getSkill, isInitialized, listSkills, updateSkillSchedule } from '../storage';
+import { getConfigValue } from '../config';
+import { abortAgent, getAgentSessionId } from '../agent-service';
+import { invokeSkill } from '../skill-invocation';
+import {
+  claimScheduledRun, clearSkillSchedule, completeScheduledRun, getSkillSchedule, listScheduledRuns,
+  migrateLegacySkillSchedule, recordScheduledRunLaunch, saveSkillSchedule,
+} from './skill-schedule-store';
 
 /**
  * Tests for the pure schedule-computation function. The async tick loop
@@ -40,6 +66,204 @@ import { computeNextRunAt } from './scheduler';
 describe('computeNextRunAt', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+  });
+
+  describe('durable scheduler loop', () => {
+    let workspace: string;
+    const skill = { id: 'digest', name: 'Digest', schedule: null } as Skill;
+    const options = { timeZone: 'UTC', intent: 'Find relevant changes', readOnlyServers: ['github'] };
+    beforeEach(() => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2024-01-01T08:00:00Z'));
+      workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'whim-scheduler-'));
+      vi.mocked(isInitialized).mockReturnValue(true);
+      vi.mocked(getConfigValue).mockReturnValue(workspace);
+      vi.mocked(listSkills).mockResolvedValue([skill]);
+      vi.mocked(getSkill).mockResolvedValue(skill);
+      vi.mocked(getAgentSession).mockResolvedValue(null);
+      vi.mocked(updateSkillSchedule).mockReset();
+      vi.mocked(getAgentSessionId).mockReturnValue(null);
+      vi.mocked(abortAgent).mockReset().mockResolvedValue(undefined);
+      vi.mocked(invokeSkill).mockReset();
+      vi.mocked(invokeSkill).mockResolvedValue({
+        space: { id: 'result' }, agent: { agentId: 'agent', sessionId: 'session' }, canvasContent: '',
+      } as SkillInvocationResult);
+    });
+    afterEach(() => {
+      stopScheduler();
+      vi.useRealTimers();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    });
+
+    it('runs one overdue startup digest with persisted invocation context', async () => {
+      const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
+      vi.setSystemTime(new Date('2024-01-10T12:00:00Z'));
+      await checkAndRunDueSkills(true);
+      expect(invokeSkill).toHaveBeenCalledExactlyOnceWith({
+        skillId: skill.id, run: true, source: 'schedule', intent: options.intent,
+        scheduledRun: {
+          scheduleId: schedule.id, runId: expect.any(String), scheduledAt: schedule.nextRunAt,
+          output: 'canvas',
+          timeZone: 'UTC', readOnlyServers: ['github'], previousSpaceId: undefined, lastSuccessfulAt: undefined,
+        },
+      });
+      expect(getSkillSchedule(workspace, skill.id)).toMatchObject({
+        nextRunAt: '2024-01-11T09:00:00.000Z',
+        lastRun: { status: 'running', agentId: 'agent', spaceId: 'result' },
+      });
+      await checkAndRunDueSkills();
+      expect(invokeSkill).toHaveBeenCalledTimes(1);
+    });
+
+    it('recovers interrupted read-only claims and retries the same occurrence', async () => {
+      const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
+      vi.setSystemTime(new Date(schedule.nextRunAt!));
+      const first = claimScheduledRun(workspace, schedule.id)!;
+      await checkAndRunDueSkills(true);
+      expect(invokeSkill).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(60_000);
+      await checkAndRunDueSkills();
+      expect(getSkillSchedule(workspace, skill.id)?.lastRun).toMatchObject({
+        scheduledAt: first.scheduledAt, attempt: 2, status: 'running',
+      });
+    });
+
+    it('does not retry interrupted legacy runs with possible external effects', async () => {
+      const legacy = { ...skill, schedule: 'daily' as const, schedule_time: '09:00', schedule_day: null };
+      const schedule = migrateLegacySkillSchedule(workspace, legacy)!;
+      vi.setSystemTime(new Date(schedule.nextRunAt!));
+      claimScheduledRun(workspace, schedule.id);
+      await checkAndRunDueSkills(true);
+      vi.advanceTimersByTime(300_000);
+      await checkAndRunDueSkills();
+      expect(invokeSkill).not.toHaveBeenCalled();
+      expect(getSkillSchedule(workspace, skill.id)?.lastRun).toMatchObject({ status: 'failed', attempt: 1 });
+    });
+
+    it('passes legacy completion context without selecting canvas output', async () => {
+      const schedule = migrateLegacySkillSchedule(workspace, {
+        ...skill, schedule: 'daily', schedule_time: '09:00', schedule_day: null,
+      })!;
+      vi.setSystemTime(new Date(schedule.nextRunAt!));
+      await checkAndRunDueSkills();
+      expect(invokeSkill).toHaveBeenCalledWith({
+        skillId: skill.id, run: true, source: 'schedule',
+        scheduledRun: {
+          scheduleId: schedule.id, runId: expect.any(String), scheduledAt: schedule.nextRunAt,
+          output: 'legacy', timeZone: schedule.timeZone, readOnlyServers: [],
+          previousSpaceId: undefined, lastSuccessfulAt: undefined,
+        },
+      });
+      expect(getSkillSchedule(workspace, skill.id)?.lastRun?.status).toBe('running');
+      vi.mocked(getAgentSession).mockResolvedValue({ status: 'completed', summary: 'Report published' } as NonNullable<Awaited<ReturnType<typeof getAgentSession>>>);
+      await checkAndRunDueSkills();
+      expect(getSkillSchedule(workspace, skill.id)?.lastSuccessfulRun).toMatchObject({ status: 'ready', summary: 'Report published' });
+    });
+
+    it('stops a live timed-out agent before marking its run failed or launching again', async () => {
+      const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
+      vi.setSystemTime(new Date(schedule.nextRunAt!));
+      const run = claimScheduledRun(workspace, schedule.id)!;
+      recordScheduledRunLaunch(workspace, schedule.id, run.id, { spaceId: 's', agentId: 'agent' });
+      vi.mocked(getAgentSession).mockResolvedValue({ status: 'running' } as NonNullable<Awaited<ReturnType<typeof getAgentSession>>>);
+      vi.mocked(getAgentSessionId).mockReturnValue('session');
+      await checkAndRunDueSkills(true);
+      expect(getSkillSchedule(workspace, skill.id)?.lastRun?.status).toBe('running');
+      expect(abortAgent).not.toHaveBeenCalled();
+      let finishAbort!: () => void;
+      vi.mocked(abortAgent).mockImplementationOnce(() => new Promise(resolve => {
+        finishAbort = () => {
+          vi.mocked(getAgentSession).mockResolvedValue({ status: 'failed' } as NonNullable<Awaited<ReturnType<typeof getAgentSession>>>);
+          resolve();
+        };
+      }));
+      vi.advanceTimersByTime(25 * 60 * 60_000);
+      const tick = checkAndRunDueSkills();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(abortAgent).toHaveBeenCalledExactlyOnceWith('agent');
+      expect(getSkillSchedule(workspace, skill.id)?.lastRun?.status).toBe('running');
+      expect(invokeSkill).not.toHaveBeenCalled();
+      finishAbort();
+      await tick;
+      expect(getSkillSchedule(workspace, skill.id)?.lastRun?.status).toBe('failed');
+      expect(invokeSkill).not.toHaveBeenCalled();
+    });
+
+    it('keeps a live run claimed when timeout cancellation fails', async () => {
+      const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
+      vi.setSystemTime(new Date(schedule.nextRunAt!));
+      const run = claimScheduledRun(workspace, schedule.id)!;
+      recordScheduledRunLaunch(workspace, schedule.id, run.id, { spaceId: 's', agentId: 'agent' });
+      vi.mocked(getAgentSession).mockResolvedValue({ status: 'running' } as NonNullable<Awaited<ReturnType<typeof getAgentSession>>>);
+      vi.mocked(getAgentSessionId).mockReturnValue('session');
+      vi.mocked(abortAgent).mockRejectedValue(new Error('Could not stop cloud agent'));
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.advanceTimersByTime(25 * 60 * 60_000);
+      await checkAndRunDueSkills();
+      await checkAndRunDueSkills();
+      expect(getSkillSchedule(workspace, skill.id)?.lastRun).toMatchObject({ status: 'running', attempt: 1 });
+      expect(invokeSkill).not.toHaveBeenCalled();
+      expect(errors).toHaveBeenCalled();
+      errors.mockRestore();
+    });
+
+    it('preserves completion that arrives before launch returns', async () => {
+      const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
+      vi.setSystemTime(new Date(schedule.nextRunAt!));
+      vi.mocked(invokeSkill).mockImplementation(async input => {
+        const run = input.scheduledRun!;
+        completeScheduledRun(workspace, run.scheduleId, run.runId, { status: 'empty', summary: 'All caught up' });
+        return { space: { id: 's' }, agent: { agentId: 'a', sessionId: 'session' }, canvasContent: '' } as SkillInvocationResult;
+      });
+      await checkAndRunDueSkills();
+      expect(getSkillSchedule(workspace, skill.id)?.lastRun).toMatchObject({ status: 'empty', agentId: 'a', spaceId: 's' });
+    });
+
+    it('does not launch a claim cleared while its async projection is being saved', async () => {
+      const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
+      vi.setSystemTime(new Date(schedule.nextRunAt!));
+      vi.mocked(updateSkillSchedule)
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(async () => { clearSkillSchedule(workspace, skill.id); });
+      await checkAndRunDueSkills();
+      expect(invokeSkill).not.toHaveBeenCalled();
+      expect(getSkillSchedule(workspace, skill.id)).toMatchObject({
+        enabled: false, lastRun: { status: 'failed', summary: 'Schedule stopped before the run could launch.' },
+      });
+    });
+
+    it('bounds repeated launch failures and stops the local ticker cleanly', async () => {
+      const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
+      vi.mocked(invokeSkill).mockResolvedValue({ error: 'launch_failed' });
+      vi.setSystemTime(new Date(schedule.nextRunAt!));
+      (await startScheduler());
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      stopScheduler();
+      expect(invokeSkill).toHaveBeenCalledTimes(3);
+      expect(listScheduledRuns(workspace, schedule.id)).toHaveLength(3);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('keeps a timed-out unacknowledged launch claimed until its late agent is stopped', async () => {
+      const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
+      let finish!: (result: SkillInvocationResult) => void;
+      vi.mocked(invokeSkill).mockReturnValue(new Promise(resolve => { finish = resolve; }));
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      vi.setSystemTime(new Date(schedule.nextRunAt!));
+      const firstTick = checkAndRunDueSkills();
+      await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+      await firstTick;
+      expect(getSkillSchedule(workspace, skill.id)?.lastRun?.status).toBe('running');
+      expect(abortAgent).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(24 * 60 * 60_000);
+      await checkAndRunDueSkills();
+      expect(invokeSkill).toHaveBeenCalledTimes(1);
+      finish({ space: { id: 'late-space' }, agent: { agentId: 'late-agent', sessionId: 'session' }, canvasContent: '' } as SkillInvocationResult);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(abortAgent).toHaveBeenCalledExactlyOnceWith('late-agent');
+      expect(getSkillSchedule(workspace, skill.id)?.lastRun).toMatchObject({ status: 'failed', agentId: 'late-agent' });
+      errors.mockRestore();
+    });
   });
 
   afterEach(() => {

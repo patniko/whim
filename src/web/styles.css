@@ -629,3 +629,10 @@ button.icon-btn { padding: 6px 12px; font-size: 1.2rem; line-height: 1; }
   color: #fff; background: var(--ok); font-weight: 600;
 }
 .interaction-form button:disabled { opacity: 0.5; }
+.workspace-changed {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+}

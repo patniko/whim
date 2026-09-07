@@ -7,6 +7,8 @@ import { getConfig } from '../config';
 import { AgentRegistry } from './agent-registry';
 import { AgentNotifier } from './agent-notifier';
 import { AgentPersistence } from './agent-persistence';
+import { observeProducer } from '../producer-tasks';
+import { getStorageGeneration, withStorageGeneration } from '../storage';
 
 /** Shared dependencies injected from agent-service at init time. */
 let registry: AgentRegistry;
@@ -27,6 +29,8 @@ export function initCliRunner(deps: {
 
 const CLI_EXIT_DIR = path.join(app.getPath('userData'), 'cli-exits');
 let cliExitMonitorInterval: ReturnType<typeof setInterval> | null = null;
+let monitorRevision = 0;
+let polling = false;
 
 function ensureCliExitDir(): void {
   if (!fs.existsSync(CLI_EXIT_DIR)) {
@@ -47,7 +51,7 @@ export async function launchCliSession(
   const signalPath = path.join(CLI_EXIT_DIR, agentId);
 
   // Register in DB
-  persistence.createAgentSessionRecord({
+  (await persistence.createAgentSessionRecord({
     id: agentId,
     session_id: sessionId,
     space_id: null,
@@ -61,13 +65,13 @@ export async function launchCliSession(
     run_location: 'local',
     created_at: now,
     updated_at: now,
-  });
+  }));
 
   // Launch CLI in terminal with exit signal
   try {
     await launchSessionInTerminal(sessionId, workspaceRoot, signalPath);
   } catch (err: any) {
-    persistence.updateSessionStatus(agentId, 'failed', err.message || 'Failed to launch CLI');
+    (await persistence.updateSessionStatus(agentId, 'failed', err.message || 'Failed to launch CLI'));
     return { error: err.message || 'Failed to launch CLI' };
   }
 
@@ -84,26 +88,33 @@ export async function launchCliSession(
 export function startCliExitMonitor(): void {
   if (cliExitMonitorInterval) return;
   ensureCliExitDir();
+  const revision = monitorRevision;
+  const generation = getStorageGeneration();
 
-  cliExitMonitorInterval = setInterval(() => {
+  const poll = async () => {
+    if (polling || revision !== monitorRevision) return;
+    polling = true;
     try {
       const files = fs.readdirSync(CLI_EXIT_DIR);
       for (const agentId of files) {
         if (agentId.startsWith('.')) continue;
         const signalPath = path.join(CLI_EXIT_DIR, agentId);
 
-        // Clean up signal file
-        try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
-
         // Update agent status
-        try {
-          const session = persistence.getSession(agentId);
+          const session = (await persistence.getSession(agentId));
+          if (revision !== monitorRevision) return;
+          // A signal from another workspace is not ours to consume.
+          if (!session || session.source !== 'cli') continue;
+          const workspace = getConfig().workspace;
+          if (workspace && session.working_dir && path.resolve(workspace) !== path.resolve(session.working_dir)) continue;
           if (session && session.status !== 'running' && session.status !== 'waiting-approval') {
             console.log(`[agent-service] Ignoring late CLI exit for stopped session: ${agentId}`);
+            fs.unlinkSync(signalPath);
             continue;
           }
-          persistence.updateSessionStatus(agentId, 'completed', 'CLI session ended');
-        } catch { /* DB may not be ready */ }
+          (await persistence.updateSessionStatus(agentId, 'completed', 'CLI session ended'));
+        if (revision !== monitorRevision) return;
+        fs.unlinkSync(signalPath);
 
         notifier.notifyRenderer('agent:status-changed', {
           agentId, status: 'completed', summary: 'CLI session ended',
@@ -114,12 +125,21 @@ export function startCliExitMonitor(): void {
 
         console.log(`[agent-service] CLI session exited: ${agentId}`);
       }
-    } catch { /* directory may not exist yet */ }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.error('[cli-runner] Exit reconciliation failed; signal retained:', error);
+      }
+    } finally { polling = false; }
+  };
+  cliExitMonitorInterval = setInterval(() => {
+    try { void observeProducer(withStorageGeneration(generation, poll)); }
+    catch (error) { console.error('[cli-runner] Stale exit monitor:', error); }
   }, 10_000);
 }
 
 /** Stop the CLI exit monitor. Call on app quit. */
 export function stopCliExitMonitor(): void {
+  monitorRevision++;
   if (cliExitMonitorInterval) {
     clearInterval(cliExitMonitorInterval);
     cliExitMonitorInterval = null;
@@ -142,7 +162,7 @@ export async function openAgentCli(agentId: string): Promise<{ error?: string }>
     cwd = workspaceRoot;
   } else {
     // Historical agent — look up from DB
-    const persisted = persistence.getSession(agentId);
+    const persisted = (await persistence.getSession(agentId));
     if (!persisted) return { error: 'Agent not found' };
     sessionId = persisted.session_id;
     cwd = persisted.working_dir || workspaceRoot;

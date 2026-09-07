@@ -1,5 +1,5 @@
 import { registerIpcHandler } from './registry';
-import { isInitialized, getSpace } from '../database';
+import { isInitialized, getSpace } from '../storage';
 import { getConfigValue } from '../config';
 import * as path from 'path';
 import { resolveCommentLaunchTarget } from '../services/comment-launch-target';
@@ -9,18 +9,18 @@ export function registerAgentHandlers(): void {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
-    const space = getSpace(spaceId);
+    const space = (await getSpace(spaceId));
     if (!space || !space.folder) return { error: 'space_not_found' };
 
     const { launchAgent } = await import('../agent-service');
-    return launchAgent(spaceId, selectedText, anchor, workspace, space.folder, options);
+    return (await launchAgent(spaceId, selectedText, anchor, workspace, space.folder, options));
   });
 
   registerIpcHandler('agent:launch-from-comment', async (_event, spaceId: string, commentBody: string, quotedText: string, anchor: any, personaHandle: string, threadId: string | null) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
-    const target = resolveCommentLaunchTarget(spaceId, workspace);
+    const target = (await resolveCommentLaunchTarget(spaceId, workspace));
     if ('error' in target) return { error: target.error };
 
     const allPersonas = getConfigValue('personas') || [];
@@ -32,7 +32,7 @@ export function registerAgentHandlers(): void {
       const documentPath = target.documentPath ? path.relative(workspace, target.documentPath) : path.join(target.folder, 'canvas.md');
       const prompt = `${persona.instructions}\n\nDocument: ${documentPath}\nComment: "${commentBody}"\nOn text: "${quotedText}"`;
       const { launchTrackedCloudAgent } = await import('../cloud-agent-poller');
-      return launchTrackedCloudAgent({
+      return (await launchTrackedCloudAgent({
         spaceId: target.launchSpaceId,
         prompt,
         displayPrompt: commentBody,
@@ -40,20 +40,20 @@ export function registerAgentHandlers(): void {
         personaHandle: persona.handle,
         quotedText: quotedText || undefined,
         threadId,
-      });
+      }));
     }
 
     const { launchCommentAgent } = await import('../agent-service');
-    return launchCommentAgent(target.launchSpaceId, commentBody, quotedText, anchor, persona, threadId, workspace, target.folder, {
+    return (await launchCommentAgent(target.launchSpaceId, commentBody, quotedText, anchor, persona, threadId, workspace, target.folder, {
       documentPath: target.documentPath,
       documentDisplayName: target.documentDisplayName,
       documentLabel: target.documentLabel,
-    });
+    }));
   });
 
   registerIpcHandler('agent:list', async (_event, spaceId: string) => {
     const { listAgents } = await import('../agent-service');
-    return listAgents(spaceId);
+    return (await listAgents(spaceId));
   });
 
   registerIpcHandler('agent:approve', async (_event, agentId: string, requestId: string, approved: boolean) => {
@@ -97,7 +97,7 @@ export function registerAgentHandlers(): void {
 
   registerIpcHandler('agent:open-cli', async (_event, agentId: string) => {
     const { openAgentCli } = await import('../agent-service');
-    return openAgentCli(agentId);
+    return (await openAgentCli(agentId));
   });
 
   registerIpcHandler('agent:quick-launch', async (_event, prompt: string, personaHandle?: string) => {
@@ -118,33 +118,45 @@ export function registerAgentHandlers(): void {
     if (persona && persona.runLocation === 'cca') {
       const fullPrompt = `${persona.instructions}\n\n${prompt}`;
       const { launchTrackedCloudAgent } = await import('../cloud-agent-poller');
-      return launchTrackedCloudAgent({
+      return (await launchTrackedCloudAgent({
         spaceId: null,
         prompt: fullPrompt,
         displayPrompt: prompt,
         workspace,
         personaHandle: persona.handle,
-      });
+      }));
     }
 
     const { launchQuickAgent } = await import('../agent-service');
-    return launchQuickAgent(prompt, workspace, persona ?? undefined);
+    return (await launchQuickAgent(prompt, workspace, persona ?? undefined));
   });
 
   registerIpcHandler('agent:launch-document', async (_event, spaceId: string, options?: { personaHandle?: string | null; promptOverride?: string }) => {
     const workspace = getConfigValue('workspace');
     if (!workspace || !isInitialized()) return { error: 'no_workspace' };
 
-    const space = getSpace(spaceId);
+    const space = (await getSpace(spaceId));
     if (!space || !space.folder) return { error: 'space_not_found' };
 
     const { launchDocumentAgent } = await import('../agent-service');
-    return launchDocumentAgent(spaceId, workspace, space.folder, options);
+    return (await launchDocumentAgent(spaceId, workspace, space.folder, options));
   });
 
   registerIpcHandler('agent:list-all', async () => {
     const { listAllAgents } = await import('../agent-service');
-    return listAllAgents();
+    return (await listAllAgents());
+  });
+  registerIpcHandler('agent:list-page', async (_event, request) => {
+    const { listAgentsPage } = await import('../agent-service');
+    return listAgentsPage(request);
+  });
+  registerIpcHandler('agent:get', async (_event, agentId) => {
+    const { getAgentDetail } = await import('../agent-service');
+    return getAgentDetail(agentId);
+  });
+  registerIpcHandler('agent:history-page', async (_event, agentId, request) => {
+    const { getAgentHistoryPage } = await import('../agent-service');
+    return getAgentHistoryPage(agentId, request);
   });
 
   registerIpcHandler('agent:delete-session', async (_event, agentId: string) => {
@@ -155,7 +167,7 @@ export function registerAgentHandlers(): void {
 
   registerIpcHandler('agent:set-yolo', async (_event, agentId: string, enabled: boolean) => {
     const { setAgentYolo } = await import('../agent-service');
-    return setAgentYolo(agentId, enabled);
+    return (await setAgentYolo(agentId, enabled));
   });
 
   // ── Remote control ──────────────────────────────────────
@@ -182,7 +194,7 @@ export function registerAgentHandlers(): void {
   // ── App-level remote ──────────────────────────────────────
   registerIpcHandler('app:set-remote', async (_event, enabled: boolean) => {
     const { setAppRemote } = await import('../agent-service');
-    return setAppRemote(enabled);
+    return (await setAppRemote(enabled));
   });
 
   registerIpcHandler('app:get-remote-status', async () => {
@@ -196,11 +208,11 @@ export function registerAgentHandlers(): void {
     if (!workspace) return { error: 'no_workspace' };
 
     const { launchTrackedCloudAgent } = await import('../cloud-agent-poller');
-    return launchTrackedCloudAgent({
+    return (await launchTrackedCloudAgent({
       spaceId: spaceId || null,
       prompt,
       workspace,
-    });
+    }));
   });
 
   registerIpcHandler('agent:cloud-status', async (_event, agentId: string) => {
@@ -214,18 +226,18 @@ export function registerAgentHandlers(): void {
     if (!workspace) return { error: 'no_workspace' };
 
     const { launchCliSession } = await import('../agent-service');
-    return launchCliSession(workspace);
+    return (await launchCliSession(workspace));
   });
 
   // ── Agent history ───────────────────────────────────────
   registerIpcHandler('agent:get-history', async (_event, agentId: string) => {
     const { getAgentHistory } = await import('../agent-service');
-    return getAgentHistory(agentId);
+    return (await getAgentHistory(agentId));
   });
 
   registerIpcHandler('agent:get-working-dir', async (_event, agentId: string) => {
-    const { getAgentSession } = await import('../database');
-    const session = getAgentSession(agentId);
+    const { getAgentSession } = await import('../storage');
+    const session = await getAgentSession(agentId);
     return session?.working_dir ?? null;
   });
 

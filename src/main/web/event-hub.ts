@@ -69,6 +69,7 @@ const ALLOWED_EVENT_CHANNELS = new Set([
   'agent:reply-ready',
   'space:processed',
   'space:title-updated',
+  'space:index-changed',
   'space:recurrence-applied',
   'canvas:content-updated',
   // Says a report exists, and carries only ids and a title. Opening one is
@@ -85,6 +86,8 @@ const ALLOWED_EVENT_CHANNELS = new Set([
  * notification of ours to have been clicked.
  */
 export const DESKTOP_ONLY_EVENT_CHANNELS = new Set([
+  'lifecycle:flush-request',
+  'lifecycle:flush-released',
   'canvas-window:closed',
   'canvas-window:load-target',
   'canvas-window:request-hide',

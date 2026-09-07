@@ -659,6 +659,14 @@ async function stopClient(stopping: CopilotClient): Promise<void> {
 }
 
 export async function shutdownCopilot(): Promise<void> {
+  if (reinitTimer) {
+    clearTimeout(reinitTimer);
+    reinitTimer = null;
+    reinitResolve?.();
+    reinitPending = null;
+    reinitResolve = null;
+    console.info('[copilot-sdk] Cancelled pending reinitialization during shutdown');
+  }
   await initInFlight;
   await ephemeralInFlight;
   activeRuntimeKey = null;
