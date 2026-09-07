@@ -272,6 +272,13 @@ each morning to collect unanswered requests with source links and suggested next
 steps. Each run receives the previous successful result as context so it can
 preserve your follow-up decisions without rewriting yesterday's space.
 
+After a run finishes, use its agent chat to revise that result: for example,
+"remove this item" or "mark this as done." Each follow-up edits the same canvas,
+including after reopening the app, without creating another run, changing the
+schedule, or sending another scheduled-result notification. Edits preserve
+concurrent canvas changes, and any new source access uses normal interactive
+permissions rather than unattended approval.
+
 The schedule shows the latest outcome: **Running**, **Ready**, **Nothing to
 follow up on**, **Partial result**, **Needs connection**, or **Failed**.
 An empty search still leaves a result with source coverage. Notifications open

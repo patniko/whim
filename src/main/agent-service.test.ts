@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('electron', () => ({
   app: { getPath: () => '/mock/space-test' },
   BrowserWindow: { getAllWindows: () => [] },
-  Notification: vi.fn().mockImplementation(() => ({ on: vi.fn(), show: vi.fn() })),
+  Notification: vi.fn().mockImplementation(function () { return { on: vi.fn(), show: vi.fn() }; }),
 }));
 
 const mockSession = {
@@ -72,6 +72,7 @@ vi.mock('./storage', async () => ({
   ...(await import('./services/skill-schedule-store')),
   ...(await import('./canvas/artifact-store')),
   documentMatches: (await import('./storage-documents')).documentMatches,
+  readDocument: vi.fn().mockResolvedValue('canvas content'),
   getStorageGeneration: () => 0,
   withWorkspaceContext: (run: () => unknown) => run(),
   withStorageGeneration: (_generation: number, run: () => unknown) => run(),
@@ -122,6 +123,9 @@ const scheduledMocks = vi.hoisted(() => ({
   blocked: vi.fn(),
   finish: vi.fn(() => ({ status: 'ready', summary: '3 messages need a reply' })),
   complete: vi.fn(),
+  editorBegin: vi.fn(),
+  editorEnd: vi.fn(),
+  editTool: { name: 'edit_scheduled_result', handler: vi.fn() },
 }));
 vi.mock('./services/scheduled-result', () => ({
   createScheduledResultContext: scheduledMocks.createContext,
@@ -132,6 +136,14 @@ vi.mock('./services/scheduled-result', () => ({
 }));
 vi.mock('./services/skill-schedule-store', () => ({
   completeScheduledRun: scheduledMocks.complete,
+}));
+vi.mock('./services/scheduled-result-editor', async importOriginal => ({
+  ...(await importOriginal<typeof import('./services/scheduled-result-editor')>()),
+  ScheduledResultEditor: class {
+    tool = scheduledMocks.editTool;
+    beginTurn = scheduledMocks.editorBegin;
+    endTurn = scheduledMocks.editorEnd;
+  },
 }));
 vi.mock('./config', async () => {
   const { DEFAULT_SANDBOX_POLICY } = await vi.importActual<typeof import('../shared/ipc-contract')>('../shared/ipc-contract');
@@ -770,8 +782,9 @@ describe('launchDocumentAgent', () => {
     await launchDocumentAgent('space-1', '/ws', 'folder', { scheduledRun });
     const config = mockClient.createSession.mock.calls[0][0];
     expect(Object.keys(config.mcpServers)).toEqual(['chat']);
-    expect(config.tools).toEqual([scheduledMocks.publishTool]);
+    expect(config.tools).toEqual([scheduledMocks.publishTool, scheduledMocks.editTool]);
     expect(config.availableTools).toContain('custom:publish_scheduled_result');
+    expect(config.availableTools).toContain('custom:edit_scheduled_result');
     expect(config.availableTools).not.toContain('builtin:*');
     expect(config.availableTools).not.toContain('builtin:bash');
     expect(config.systemMessage.content).toContain('unattended scheduled task');
@@ -820,6 +833,114 @@ describe('launchDocumentAgent', () => {
     const idle = mockSession.on.mock.calls.find(([name]) => name === 'session.idle')![1];
     await idle();
     expect(scheduledMocks.finish).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens fresh follow-up edit turns without completing the occurrence again', async () => {
+    enableMockClient();
+    scheduledMocks.createContext.mockReturnValue(scheduledMocks.context);
+    await launchDocumentAgent('space-1', '/ws', 'folder', {
+      scheduledRun: {
+        scheduleId: 'schedule-1', runId: 'run-1', scheduledAt: '2026-09-07T16:00:00.000Z',
+        timeZone: 'UTC', readOnlyServers: [],
+      },
+    });
+    const idle = mockSession.on.mock.calls.find(([name]) => name === 'session.idle')![1];
+    expect(await sendChatMessage('document-agent-1', 'Remove this item')).toHaveProperty('error');
+    expect(scheduledMocks.editorBegin).not.toHaveBeenCalled();
+    await idle();
+    for (const prompt of ['Remove this item', 'Mark the other item done']) {
+      expect(await sendChatMessage('document-agent-1', prompt)).not.toHaveProperty('error');
+      expect(mockSession.send).toHaveBeenLastCalledWith({ prompt });
+      await idle();
+    }
+    expect(scheduledMocks.editorBegin).toHaveBeenCalledTimes(2);
+    expect(scheduledMocks.editorEnd).toHaveBeenCalledTimes(3);
+    expect(scheduledMocks.finish).toHaveBeenCalledTimes(1);
+    expect(scheduledMocks.complete).not.toHaveBeenCalled();
+  });
+
+  it('waits for durable completion even when duplicate idle events arrive', async () => {
+    enableMockClient();
+    scheduledMocks.createContext.mockReturnValue(scheduledMocks.context);
+    await launchDocumentAgent('space-1', '/ws', 'folder', {
+      scheduledRun: {
+        scheduleId: 'schedule-1', runId: 'run-1', scheduledAt: '2026-09-07T16:00:00.000Z',
+        timeZone: 'UTC', readOnlyServers: [],
+      },
+    });
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    scheduledMocks.finish.mockImplementationOnce(async () => {
+      await held;
+      return { status: 'ready', summary: 'Ready' };
+    });
+    const idle = mockSession.on.mock.calls.find(([name]) => name === 'session.idle')![1];
+    const completion = idle();
+    await vi.waitFor(() => expect(scheduledMocks.finish).toHaveBeenCalled());
+    const duplicate = idle();
+    const followup = sendChatMessage('document-agent-1', 'Remove this item');
+    expect(scheduledMocks.editorBegin).not.toHaveBeenCalled();
+    release();
+    await Promise.all([completion, duplicate]);
+    expect(await followup).not.toHaveProperty('error');
+    expect(scheduledMocks.editorBegin).toHaveBeenCalledTimes(1);
+    await idle();
+    expect(scheduledMocks.finish).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['send failure', 'runtime error', 'stop'] as const)('closes the edit context on %s', async failure => {
+    enableMockClient();
+    scheduledMocks.createContext.mockReturnValue(scheduledMocks.context);
+    await launchDocumentAgent('space-1', '/ws', 'folder', {
+      scheduledRun: {
+        scheduleId: 'schedule-1', runId: 'run-1', scheduledAt: '2026-09-07T16:00:00.000Z',
+        timeZone: 'UTC', readOnlyServers: [],
+      },
+    });
+    const idle = mockSession.on.mock.calls.find(([name]) => name === 'session.idle')![1];
+    await idle();
+    if (failure === 'send failure') mockSession.send.mockRejectedValueOnce(new Error('Send failed'));
+    const result = await sendChatMessage('document-agent-1', 'Revise this');
+    if (failure === 'send failure') {
+      expect(result).toEqual({ error: 'Send failed' });
+      expect(updateAgentSessionStatus).toHaveBeenLastCalledWith('document-agent-1', 'completed', expect.any(String));
+    } else if (failure === 'runtime error') {
+      const error = mockSession.on.mock.calls.find(([name]) => name === 'session.error')![1];
+      await error({ data: { message: 'Disconnected' } });
+    } else {
+      await abortAgent('document-agent-1');
+    }
+    expect(scheduledMocks.editorEnd).toHaveBeenLastCalledWith(true);
+    expect(scheduledMocks.finish).toHaveBeenCalledTimes(1);
+    if (failure !== 'stop') {
+      expect(await sendChatMessage('document-agent-1', 'Retry')).not.toHaveProperty('error');
+      await idle();
+    }
+  });
+
+  it('returns to interactive permissions for selected source access on follow-up', async () => {
+    enableMockClient();
+    scheduledMocks.createContext.mockReturnValue(scheduledMocks.context);
+    await launchDocumentAgent('space-1', '/ws', 'folder', {
+      scheduledRun: {
+        scheduleId: 'schedule-1', runId: 'run-1', scheduledAt: '2026-09-07T16:00:00.000Z',
+        timeZone: 'UTC', readOnlyServers: ['chat'],
+      },
+    });
+    const idle = mockSession.on.mock.calls.find(([name]) => name === 'session.idle')![1];
+    await idle();
+    await sendChatMessage('document-agent-1', 'Check this thread again');
+    const config = mockClient.createSession.mock.calls[0][0];
+    const permission = config.onPermissionRequest({
+      kind: 'mcp', serverName: 'chat', toolName: 'search', readOnly: true, toolCallId: 'follow-up-search',
+    }, { sessionId: 'mock-session-id' });
+    await vi.waitFor(() => expect(updateAgentSessionStatus).toHaveBeenCalledWith(
+      'document-agent-1', 'waiting-approval', expect.any(String),
+    ));
+    expect(scheduledMocks.permission).not.toHaveBeenCalled();
+    approveAgent('document-agent-1', 'follow-up-search', false);
+    expect(await permission).toEqual({ kind: 'reject' });
+    await idle();
   });
 });
 
@@ -1867,6 +1988,39 @@ describe('getAgentHistory', () => {
     // Should NOT use createSession for resume
     expect(mockClient.createSession).not.toHaveBeenCalled();
     expect(result).toEqual({ events: [{ type: 'assistant.message', content: 'hello' }] });
+  });
+
+  it.each([false, true])('restores result editing after app restart (expired=%s), only arming it on send', async expired => {
+    enableMockClient();
+    vi.mocked(getConfig).mockReturnValue({ workspace: '/ws' } as any);
+    const { readDocument } = await import('./storage');
+    const document = '---\ncanvas_artifacts: false\nskill_invocation:\n  instruction_snapshot: skill-instructions.md\n---\n# Result\n';
+    vi.mocked(readDocument).mockResolvedValueOnce(document);
+    if (expired) {
+      vi.mocked(readDocument).mockResolvedValueOnce(document);
+      mockClient.resumeSession.mockRejectedValueOnce(new Error('session expired'));
+    }
+    const agentId = `scheduled-history-${expired}`;
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: agentId, session_id: `old-${agentId}`, space_id: 'space-1',
+      prompt: 'Scheduled skill: Missed messages', status: 'completed', summary: 'Ready',
+      working_dir: '/ws/folder', source: 'sdk', run_location: 'local',
+      persona_handle: null, quoted_text: null, created_at: '', updated_at: '',
+    });
+    expect(await getAgentHistory(agentId)).toHaveProperty('events');
+    const config = expired ? mockClient.createSession.mock.calls[0][0] : mockClient.resumeSession.mock.calls[0][1];
+    expect(config.tools).toEqual([scheduledMocks.editTool]);
+    expect(config.availableTools).toContain('custom:edit_scheduled_result');
+    expect(config.availableTools).not.toContain('custom:publish_scheduled_result');
+    expect(config.systemMessage.content).toContain('not another scheduled run');
+    expect(scheduledMocks.editorBegin).not.toHaveBeenCalled();
+    expect(await sendChatMessage(agentId, 'Remove this item')).not.toHaveProperty('error');
+    expect(scheduledMocks.editorBegin).toHaveBeenCalledTimes(1);
+    const idle = mockSession.on.mock.calls.find(([name]) => name === 'session.idle')![1];
+    await idle();
+    expect(scheduledMocks.editorEnd).toHaveBeenCalledWith(false);
+    expect(scheduledMocks.finish).not.toHaveBeenCalled();
+    expect(scheduledMocks.complete).not.toHaveBeenCalled();
   });
 
   it('restores persisted status on resume (not hardcoded completed)', async () => {

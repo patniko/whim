@@ -57,6 +57,8 @@ import {
   scheduledPermissionDecision,
   type ScheduledResultContext,
 } from './scheduled-result';
+import { isScheduledResultDocument, ScheduledResultEditor } from './scheduled-result-editor';
+import * as storage from '../storage';
 
 const initial = '---\nskills: [follow-ups]\nskill_invocation:\n  run_id: run-1\ninstructions: Read the skill snapshot\n---\n'
   + '# Follow-ups - Sep 6, 2026\n\nPreparing your result.\n';
@@ -129,6 +131,123 @@ describe('scheduled result publication', () => {
     expect(notifyAllWindows).toHaveBeenCalledWith('canvas:content-updated', { spaceId: 'space-1', content });
     expect(scheduleAutoCommit).toHaveBeenCalledWith(workspaceRoot);
     expect(completeScheduledRun).not.toHaveBeenCalled();
+  });
+
+  describe('scheduled result follow-up edits', () => {
+    let editor: ScheduledResultEditor;
+    const edit = (body: string) => editor.tool.handler!(
+      { body }, { sessionId: 'session', toolCallId: 'edit-1', toolName: editor.tool.name, arguments: { body } },
+    );
+
+    beforeEach(async () => {
+      await publish();
+      await finishScheduledResult(context);
+      editor = new ScheduledResultEditor({ workspaceRoot, workingDir, spaceId: 'space-1' });
+    });
+
+    it('recognizes result-first spaces without treating legacy reports as editable results', () => {
+      const metadata = 'skill_invocation:\n  instruction_snapshot: skill-instructions.md\n';
+      expect(isScheduledResultDocument(`---\ncanvas_artifacts: false\n${metadata}---\n# Result`)).toBe(true);
+      expect(isScheduledResultDocument(`---\ncanvas_artifacts: true\n${metadata}---\n# Report`)).toBe(false);
+      expect(isScheduledResultDocument('# Ordinary canvas')).toBe(false);
+    });
+
+    it('requires a user turn, preserves metadata and coverage, and never changes the scheduled outcome', async () => {
+      await expect(edit('Unexpected write')).rejects.toThrow(/active user follow-up/);
+      const originalOutcome = { ...context.finished };
+      await editor.beginTurn();
+      const before = fs.readFileSync(canvas, 'utf-8');
+      await edit(before.slice(before.indexOf('# Follow-ups')).replace('- [ ] Reply', '- [x] Reply'));
+      await editor.endTurn();
+      const content = fs.readFileSync(canvas, 'utf-8');
+      expect(content).toContain('- [x] Reply');
+      expect(content).toContain(initial.split('# Follow-ups')[0]);
+      expect(content).toContain('## Source coverage');
+      expect(content).toContain('**slack**: searched');
+      expect(context.finished).toEqual(originalOutcome);
+      expect(completeScheduledRun).toHaveBeenCalledTimes(1);
+      expect(native.show).toHaveBeenCalledTimes(1);
+      await expect(edit('Late edit')).rejects.toThrow(/active user follow-up/);
+      await expect(publish()).rejects.toThrow(/already finished/);
+    });
+
+    it('captures a fresh baseline for each follow-up and merges edits made during the turn', async () => {
+      for (const name of ['Alex', 'Sam']) {
+        await editor.beginTurn();
+        const before = fs.readFileSync(canvas, 'utf-8');
+        fs.appendFileSync(canvas, `\nMy note for ${name}.\n`);
+        await edit(before.slice(before.indexOf('# Follow-ups')).replace(`Reply to ${name}`, `Reply to ${name === 'Alex' ? 'Sam' : 'Jo'}`));
+        await editor.endTurn();
+      }
+      const content = fs.readFileSync(canvas, 'utf-8');
+      expect(content).toContain('Reply to Jo');
+      expect(content).toContain('My note for Alex.');
+      expect(content).toContain('My note for Sam.');
+      expect(content).not.toContain('<<<<<<<');
+    });
+
+    it('rejects overlapping turns, drains accepted writes, and blocks late tools during completion', async () => {
+      await editor.beginTurn();
+      await expect(editor.beginTurn()).rejects.toThrow(/still finishing/);
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const realWrite = storage.writeDocument;
+      const write = vi.spyOn(storage, 'writeDocument').mockImplementationOnce(async params => {
+        await held;
+        return realWrite(params);
+      });
+      const update = edit('One saved follow-up.');
+      await vi.waitFor(() => expect(write).toHaveBeenCalled());
+      const closing = editor.endTurn();
+      await expect(edit('Late write')).rejects.toThrow(/active user follow-up/);
+      await expect(editor.beginTurn()).rejects.toThrow(/still finishing/);
+      release();
+      await update;
+      await closing;
+      await editor.beginTurn();
+      await edit('Second follow-up.');
+      await editor.endTurn();
+      expect(fs.readFileSync(canvas, 'utf-8')).toContain('Second follow-up.');
+      expect(completeScheduledRun).toHaveBeenCalledTimes(1);
+    });
+
+    it('cancels queued edits before another follow-up can start', async () => {
+      const before = fs.readFileSync(canvas, 'utf-8');
+      await editor.beginTurn();
+      const pending = edit('Should not be saved');
+      const closing = editor.endTurn(true);
+      await expect(pending).rejects.toThrow(/cancelled/);
+      await closing;
+      expect(fs.readFileSync(canvas, 'utf-8')).toBe(before);
+      await editor.beginTurn();
+      await edit('A deliberate retry');
+      await editor.endTurn();
+      expect(fs.readFileSync(canvas, 'utf-8')).toContain('A deliberate retry');
+    });
+
+    it('surfaces write failures without poisoning later edits or the original ledger', async () => {
+      await editor.beginTurn();
+      vi.spyOn(storage, 'writeDocument').mockRejectedValueOnce(new Error('Canvas changed during save'));
+      await expect(edit('Rejected change')).rejects.toThrow('Canvas changed during save');
+      await edit('Retry saved');
+      await editor.endTurn();
+      expect(fs.readFileSync(canvas, 'utf-8')).toContain('Retry saved');
+      expect(completeScheduledRun).toHaveBeenCalledTimes(1);
+      expect(native.show).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects metadata, empty bodies and symlink replacements', async () => {
+      await editor.beginTurn();
+      await expect(edit('---\nskills: []\n---\nReplacement')).rejects.toThrow(/without frontmatter/);
+      await expect(edit(' ')).rejects.toThrow(/nonblank/);
+      const outside = path.join(root, 'private.md');
+      fs.writeFileSync(outside, 'Unrelated file');
+      fs.unlinkSync(canvas);
+      fs.symlinkSync(outside, canvas);
+      await expect(edit('Overwrite')).rejects.toThrow(/Symbolic-link/);
+      await editor.endTurn(true);
+      expect(fs.readFileSync(outside, 'utf-8')).toBe('Unrelated file');
+    });
   });
 
   it('removes the model title and coverage section, without duplicating host headings', async () => {
@@ -312,6 +431,21 @@ describe('unattended permissions', () => {
 });
 
 describe('scheduled completion', () => {
+  it('seals the publisher while draining accepted writes before completing the ledger', async () => {
+    const publication = publish();
+    const completion = finishScheduledResult(context);
+    const repeated = finishScheduledResult(context);
+    expect(completeScheduledRun).not.toHaveBeenCalled();
+    expect(scheduledPermissionDecision(context, mcp())).toEqual({ kind: 'reject' });
+    await expect(publish()).rejects.toThrow(/already finished/);
+    await publication;
+    expect(await completion).toEqual({ status: 'ready', summary: useful.summary });
+    expect(await repeated).toBe(context.finished);
+    expect(fs.readFileSync(canvas, 'utf-8')).toContain(useful.body);
+    expect(completeScheduledRun).toHaveBeenCalledTimes(1);
+    expect(native.show).toHaveBeenCalledTimes(1);
+  });
+
   it('completes once and notification clicks open the ordinary space, never an artifact', async () => {
     await publish();
     const result = (await finishScheduledResult(context));

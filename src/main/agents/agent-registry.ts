@@ -4,6 +4,7 @@ import type { ResolvedPathPolicy } from './sandbox-policies';
 import type { SandboxConfigDirs } from '../ai';
 import type { ScheduledInvocation } from '../../shared/skill-schedule';
 import type { ScheduledResultContext } from '../services/scheduled-result';
+import type { ScheduledResultEditor } from '../services/scheduled-result-editor';
 
 export type AgentStatus = 'running' | 'waiting-approval' | 'completed' | 'failed';
 
@@ -75,6 +76,9 @@ export interface AgentRecord {
   /** Canvas hash snapshot taken before agent starts, for change detection on completion. */
   canvasSnapshot?: { path: string; hashBefore: string };
   scheduledResult?: ScheduledResultContext;
+  scheduledResultEditor?: ScheduledResultEditor;
+  /** Follow-up messages wait for the preceding turn's asynchronous cleanup. */
+  turnCompletion?: Promise<void>;
   scheduledOccurrence?: { workspaceRoot: string; invocation: ScheduledInvocation };
   /** True when session was recreated after the original SDK session expired. */
   restarted?: boolean;

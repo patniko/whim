@@ -38,11 +38,31 @@ import {
   finishScheduledResult,
   markScheduledInteractionBlocked,
 } from '../services/scheduled-result';
-import { completeScheduledRun } from '../storage';
+import { completeScheduledRun, readDocument } from '../storage';
 import { deriveMarkdownTitle } from '../../shared/markdown-title';
+import { isScheduledResultDocument, ScheduledResultEditor, SCHEDULED_EDIT_PROMPT } from '../services/scheduled-result-editor';
+
+const RESULT_TOOLS = [
+  'builtin:view', 'builtin:glob', 'builtin:grep', 'builtin:rg',
+  'builtin:skill', 'builtin:tool_search_tool', 'mcp:*', 'custom:edit_scheduled_result',
+];
+
+async function restoreScheduledResultEditor(
+  workspaceRoot: string, workingDir: string, spaceId: string | null, originalPrompt: string,
+): Promise<ScheduledResultEditor | undefined> {
+  if (!originalPrompt.startsWith('Scheduled skill:') || !spaceId
+    || spaceId === '__workspace__' || workingDir === workspaceRoot) return undefined;
+  const canvasPath = path.join(workingDir, 'canvas.md');
+  if (!fs.existsSync(canvasPath)) return undefined;
+  const content = await readDocument(canvasPath, workspaceRoot, true);
+  return isScheduledResultDocument(content)
+    ? new ScheduledResultEditor({ workspaceRoot, workingDir, spaceId })
+    : undefined;
+}
 
 /** Persist the outcome before clearing the occurrence's unattended privileges. */
 export async function finishScheduledAgent(record: AgentRecord, error?: string, legacyPublished?: boolean): Promise<AgentRecord['status']> {
+  await record.scheduledResultEditor?.endTurn(error !== undefined);
   try {
     if (record.scheduledResult) {
       const result = (await finishScheduledResult(record.scheduledResult, error));
@@ -825,12 +845,15 @@ export async function launchDocumentAgent(
     const scheduledContext = isScheduledResult && options.scheduledRun
       ? await createScheduledResultContext({ workspaceRoot, workingDir, spaceId, invocation: options.scheduledRun })
       : undefined;
+    const scheduledResultEditor = scheduledContext
+      ? new ScheduledResultEditor({ workspaceRoot, workingDir, spaceId })
+      : undefined;
     const mcpServers = scheduledContext
       ? Object.fromEntries(Object.entries(availableMcpServers)
         .filter(([name]) => options.scheduledRun!.readOnlyServers.includes(name)))
       : availableMcpServers;
     const customTools = scheduledContext
-      ? [createPublishScheduledResultTool(scheduledContext)]
+      ? [createPublishScheduledResultTool(scheduledContext), scheduledResultEditor!.tool]
       : sandboxSetup ? sandboxSetup.customTools : getCustomTools(customToolsContext);
     const sandboxState = sandboxSetup?.sandboxState;
     if (scheduledContext && sandboxState
@@ -850,7 +873,7 @@ export async function launchDocumentAgent(
       agentId,
     });
     const baseSystemPrompt = `${personaPreamble}${scheduledContext
-      ? 'This is an unattended scheduled task. Produce the result directly on the space canvas using publish_scheduled_result. Do not ask questions or wait for approvals.'
+      ? `This initial turn is an unattended scheduled task. Produce the result directly on the space canvas using publish_scheduled_result. Do not ask questions or wait for approvals during that run. Follow-up behavior (only after the scheduled run finishes): ${SCHEDULED_EDIT_PROMPT}`
       : 'The user has pressed "Run" on their space document. Execute all instructions in the document below.'} The full document is also available as canvas.md in your working directory.
 
 Invocation instructions:
@@ -883,11 +906,7 @@ ${scheduledContext ? '' : cliToolsPrompt}`;
       mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
       tools: customTools,
       ...(scheduledContext ? {
-        availableTools: [
-          'builtin:view', 'builtin:glob', 'builtin:grep', 'builtin:rg',
-          'builtin:skill', 'builtin:tool_search_tool',
-          'mcp:*', 'custom:publish_scheduled_result',
-        ],
+        availableTools: [...RESULT_TOOLS, 'custom:publish_scheduled_result'],
       } : {}),
       ...(persona?.model ? { model: persona.model } : {}),
       ...(hooks ? { hooks } : {}),
@@ -968,7 +987,7 @@ ${scheduledContext ? '' : cliToolsPrompt}`;
       ...(persona?.handle ? { personaHandle: persona.handle } : {}),
       ...(canvasConfig?.run.scheduled ? { autoApproveCanvasTools: true } : {}),
       canvasSnapshot: { path: canvasPath, hashBefore: canvasHashBefore },
-      ...(scheduledContext ? { scheduledResult: scheduledContext } : {}),
+      ...(scheduledContext ? { scheduledResult: scheduledContext, scheduledResultEditor } : {}),
       ...(options.scheduledRun ? { scheduledOccurrence: { workspaceRoot, invocation: options.scheduledRun } } : {}),
     };
     registry.set(agentId, record);
@@ -1056,6 +1075,8 @@ export async function sendChatMessage(
   const stoppedByUser = record?.aborted === true;
   const stoppedRecord = record;
   if (stoppedByUser) {
+    await record?.turnCompletion;
+    await record?.scheduledResultEditor?.endTurn(true);
     registry.delete(agentId);
     record = undefined;
   }
@@ -1077,29 +1098,41 @@ export async function sendChatMessage(
     record.status = 'running';
     record.aborted = false;
   }
-  if (record.status !== 'completed' && record.status !== 'running') {
+  await record.turnCompletion;
+  if (record.scheduledResult || record.scheduledOccurrence) {
+    return { error: 'The scheduled run is still running. Wait for it to finish before editing the result.' };
+  }
+  if (record.status !== 'completed' && record.status !== 'running'
+    && !(record.status === 'failed' && record.scheduledResultEditor)) {
     return { error: `Agent is ${record.status}, cannot send message` };
   }
 
-  // Reactivate completed agents for multi-turn
-  record.status = 'running';
-  (await persistence.updateStatus(record));
-  notifier.notifyRenderer('agent:status-changed', {
-    agentId, status: 'running', summary: record.summary,
-  });
-
-  // Notify renderer if session was restarted
-  if (restarted) {
-    notifier.notifyRenderer(`chat:event:${agentId}`, {
-      type: 'session.restarted',
-      message: 'Previous session expired — started a fresh session with context from the original conversation.',
-    });
-  }
-
+  const previousStatus = record.status;
+  let editStarted = false;
   try {
     if (!record.session) {
       return { error: 'Agent is still starting; try again when it is active' };
     }
+    if (record.scheduledResultEditor) {
+      await record.scheduledResultEditor.beginTurn();
+      editStarted = true;
+      if (record.aborted) throw new Error('The result edit was stopped before the message was sent.');
+    }
+    // Reactivate completed agents for multi-turn
+    record.status = 'running';
+    (await persistence.updateStatus(record));
+    notifier.notifyRenderer('agent:status-changed', {
+      agentId, status: 'running', summary: record.summary,
+    });
+
+    // Notify renderer if session was restarted
+    if (restarted) {
+      notifier.notifyRenderer(`chat:event:${agentId}`, {
+        type: 'session.restarted',
+        message: 'Previous session expired — started a fresh session with context from the original conversation.',
+      });
+    }
+
     const normalizedAttachments = attachments?.map(a => ({
       ...a,
       displayName: a.displayName ?? path.basename(a.path),
@@ -1110,6 +1143,14 @@ export async function sendChatMessage(
     });
     return { messageId, ...(restarted ? { restarted: true } : {}) };
   } catch (err: any) {
+    if (editStarted) {
+      await record.scheduledResultEditor?.endTurn(true);
+      if (!record.aborted) {
+        record.status = previousStatus;
+        await persistence.updateStatus(record);
+        notifier.notifyRenderer('agent:status-changed', { agentId, status: record.status, summary: record.summary });
+      }
+    }
     return { error: err.message || 'Failed to send message' };
   }
 }
@@ -1235,6 +1276,7 @@ export async function resumeAgentSession(
     const mcpServers = getAllMcpServers();
     const findRecord = (sid: string) => registry.findBySessionId(sid);
     const customToolsContext = createCustomToolsContext(agentId, shouldEnableWhimTools(persisted.space_id));
+    const scheduledResultEditor = await restoreScheduledResultEditor(workspaceRoot, workingDir, persisted.space_id, persisted.prompt);
 
     // Cloud sessions: the local SDK runtime has no record of the session
     // after an app restart (the runtime process is fresh; only the cloud
@@ -1279,7 +1321,9 @@ export async function resumeAgentSession(
     const session = await client.resumeSession(persisted.session_id, {
       workingDirectory: workingDir,
       mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-      tools: getCustomTools(customToolsContext),
+      tools: scheduledResultEditor ? [scheduledResultEditor.tool] : getCustomTools(customToolsContext),
+      ...(scheduledResultEditor ? { availableTools: RESULT_TOOLS } : {}),
+      ...(scheduledResultEditor ? { systemMessage: { mode: 'append' as const, content: SCHEDULED_EDIT_PROMPT } } : {}),
       onPermissionRequest: broker.createPermissionHandler(findRecord),
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
@@ -1303,6 +1347,7 @@ export async function resumeAgentSession(
       pendingPermissionKind: null,
       pendingApprovals: new Map(),
       summary: persisted.summary || 'Resumed',
+      ...(scheduledResultEditor ? { scheduledResultEditor } : {}),
       runLocation: isCloud ? 'cloud' : 'local',
       // Only a run that is still unattended keeps the carve-out. Resuming a
       // finished scheduled session means a person is driving it now, and they
@@ -1534,6 +1579,9 @@ async function restartExpiredSession(
     // must re-register canvases or the run would come back unable to refresh
     // the artifact it was created to maintain.
     const restartWorkspaceRoot = getConfig().workspace;
+    const scheduledResultEditor = restartWorkspaceRoot
+      ? await restoreScheduledResultEditor(restartWorkspaceRoot, workingDir, persisted.space_id, persisted.prompt)
+      : undefined;
     const canvasConfig = restartWorkspaceRoot
       ? resolveRunCanvasConfig({
         workspaceRoot: restartWorkspaceRoot,
@@ -1577,13 +1625,14 @@ async function restartExpiredSession(
       workingDirectory: workingDir,
       streaming: true,
       mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-      tools: getCustomTools(customToolsContext),
+      tools: scheduledResultEditor ? [scheduledResultEditor.tool] : getCustomTools(customToolsContext),
+      ...(scheduledResultEditor ? { availableTools: RESULT_TOOLS } : {}),
       onPermissionRequest: broker.createPermissionHandler(findRecord),
       onUserInputRequest: broker.createUserInputHandler(findRecord),
       onElicitationRequest: broker.createElicitationHandler(findRecord),
       ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
       ...(canvasConfig?.session ?? {}),
-      systemMessage: { mode: 'append', content: systemContent },
+      systemMessage: { mode: 'append', content: scheduledResultEditor ? `${systemContent}\n\n${SCHEDULED_EDIT_PROMPT}` : systemContent },
     });
 
     const newSessionId = (session as any).sessionId || agentId;
@@ -1600,6 +1649,7 @@ async function restartExpiredSession(
       pendingPermissionKind: null,
       pendingApprovals: new Map(),
       summary: persisted.summary || 'Session restarted',
+      ...(scheduledResultEditor ? { scheduledResultEditor } : {}),
       restarted: true,
       ...(canvasConfig?.run.scheduled ? { autoApproveCanvasTools: true } : {}),
       // The replacement session is always local — even when the original
@@ -1904,7 +1954,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     }));
   });
 
-  observeSession(session, 'session.idle', async () => {
+  const onIdle = async () => {
     if (record.aborted) return;
     // A newly-created session can emit an idle event before its initial prompt
     // has been submitted. Comment launches keep phase='starting' until send()
@@ -1978,9 +2028,13 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
         setTimeout(() => { releaseCanvasInstances(agentId); endCanvasRun(agentId); registry.delete(agentId); }, 30_000);
       }
     }
+  };
+  observeSession(session, 'session.idle', () => {
+    if (record.aborted || record.phase === 'starting' || record.status !== 'running') return record.turnCompletion;
+    return record.turnCompletion = onIdle();
   });
 
-  observeSession(session, 'session.error', async (event: any) => {
+  const onError = async (event: any) => {
     if (record.aborted) return;
     const d = event.data ?? event;
     record.status = 'failed';
@@ -2014,6 +2068,13 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     if (record.ephemeral) {
       setTimeout(() => { releaseCanvasInstances(agentId); endCanvasRun(agentId); registry.delete(agentId); }, 30_000);
     }
+  };
+  observeSession(session, 'session.error', (event: any) => {
+    const preceding = record.turnCompletion;
+    const completion = onError(event);
+    return record.turnCompletion = preceding
+      ? Promise.all([preceding, completion]).then(() => undefined)
+      : completion;
   });
 
   // Sub-agent tracking via catch-all listener

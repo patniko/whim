@@ -24,10 +24,12 @@ interface Publication {
   outcome: PublicationOutcome;
   coverage: SourceCoverage[];
 }
-interface ContextParams {
+export interface ScheduledCanvasTarget {
   workspaceRoot: string;
   workingDir: string;
   spaceId: string;
+}
+interface ContextParams extends ScheduledCanvasTarget {
   invocation: ScheduledInvocation;
 }
 export interface ScheduledResultContext extends ContextParams {
@@ -38,6 +40,8 @@ export interface ScheduledResultContext extends ContextParams {
   /** Agent-authored revision, deliberately excluding concurrent user edits. */
   generatedBaseline: string;
   finished?: FinishedResult;
+  pendingPublications?: Promise<void>;
+  finishing?: Promise<FinishedResult>;
 }
 
 const MAX_CANVAS_BYTES = 8 * 1024 * 1024;
@@ -71,17 +75,17 @@ function checkedPath(root: string, target: string): string {
   return canonical;
 }
 
-function canvasPath(context: ScheduledResultContext): string {
+function canvasPath(context: ScheduledCanvasTarget): string {
   checkedPath(context.workspaceRoot, context.workingDir);
   return checkedPath(context.workspaceRoot, path.join(context.workingDir, 'canvas.md'));
 }
 
-async function readCanvas(context: ScheduledResultContext): Promise<string> {
+export async function readScheduledCanvas(context: ScheduledCanvasTarget): Promise<string> {
   const target = canvasPath(context);
   return readDocument(target, context.workspaceRoot, true);
 }
 
-export async function createScheduledResultContext(params: ContextParams): Promise<ScheduledResultContext> {
+export function resolveScheduledCanvasTarget(params: ScheduledCanvasTarget): ScheduledCanvasTarget {
   const workspaceRoot = fs.realpathSync(params.workspaceRoot);
   const relative = path.relative(path.resolve(params.workspaceRoot), path.resolve(params.workingDir));
   const workingDir = checkedPath(workspaceRoot, path.resolve(workspaceRoot, relative));
@@ -89,9 +93,14 @@ export async function createScheduledResultContext(params: ContextParams): Promi
     throw new Error('Scheduled results require an owned space directory.');
   }
   if (!params.spaceId.trim()) throw new Error('A scheduled result requires a space ID.');
+  return { workspaceRoot, workingDir, spaceId: params.spaceId };
+}
+
+export async function createScheduledResultContext(params: ContextParams): Promise<ScheduledResultContext> {
+  const target = resolveScheduledCanvasTarget(params);
   // Snapshot authorization so a later configuration edit cannot widen this run.
   const invocation = { ...params.invocation, readOnlyServers: [...params.invocation.readOnlyServers] };
-  const normalized = { ...params, workspaceRoot, workingDir, invocation };
+  const normalized = { ...target, invocation };
   const context: ScheduledResultContext = {
     ...normalized,
     params: normalized,
@@ -99,12 +108,12 @@ export async function createScheduledResultContext(params: ContextParams): Promi
     initialBaseline: '',
     generatedBaseline: '',
   };
-  const initialBaseline = await readCanvas(context);
+  const initialBaseline = await readScheduledCanvas(context);
   return { ...context, initialBaseline, generatedBaseline: initialBaseline };
 }
 
 export function markScheduledInteractionBlocked(context: ScheduledResultContext, reason: string): void {
-  if (!context.finished) context.blockedReasons.add(reason.trim() || 'An unattended interaction was blocked.');
+  if (!context.finished && !context.finishing) context.blockedReasons.add(reason.trim() || 'An unattended interaction was blocked.');
 }
 
 export function scheduledPermissionDecision(
@@ -112,7 +121,7 @@ export function scheduledPermissionDecision(
   request: PermissionRequest,
 ): PermissionRequestResult {
   let reason: string;
-  if (context.finished) return { kind: 'reject' };
+  if (context.finished || context.finishing) return { kind: 'reject' };
   if (request.managedApprovalRequired) {
     reason = 'Managed policy requires a human decision; unattended approval is not allowed.';
   } else if ('requestSandboxBypass' in request && request.requestSandboxBypass) {
@@ -258,9 +267,9 @@ function renderPublication(
     + `Outcome: ${scheduledRunLabels[status]}\n\n${coverage}\n`;
 }
 
-async function persistCanvas(context: ScheduledResultContext, transform: (current: string) => Promise<string>): Promise<void> {
+export async function persistScheduledCanvas(context: ScheduledCanvasTarget, transform: (current: string) => Promise<string>): Promise<void> {
   const target = canvasPath(context);
-  const current = await readCanvas(context);
+  const current = await readScheduledCanvas(context);
   const content = await transform(current);
   if (Buffer.byteLength(content, 'utf-8') > MAX_CANVAS_BYTES) throw new Error('Result exceeds the safe canvas size.');
   markSelfWrite(context.spaceId, content);
@@ -305,17 +314,23 @@ export function createPublishScheduledResultTool(context: ScheduledResultContext
       },
     },
     handler: async (args: unknown) => {
-      if (context.finished) throw new Error('This scheduled run has already finished.');
+      if (context.finished || context.finishing) {
+        throw new Error('This scheduled run has already finished. Use edit_scheduled_result for a user follow-up.');
+      }
       const publication = validatePublication(context, args);
-      const generated = renderPublication(context, publication);
-      await persistCanvas(context, async current => (await merge3Async(context.generatedBaseline, current, generated)).merged);
-      context.generatedBaseline = generated;
-      context.publication = publication;
-      return {
-        status: publicationStatus(context, publication),
-        summary: publicationSummary(context, publication),
-        spaceId: context.spaceId,
-      };
+      const operation = (context.pendingPublications ?? Promise.resolve()).then(async () => {
+        const generated = renderPublication(context, publication);
+        await persistScheduledCanvas(context, async current => (await merge3Async(context.generatedBaseline, current, generated)).merged);
+        context.generatedBaseline = generated;
+        context.publication = publication;
+        return {
+          status: publicationStatus(context, publication),
+          summary: publicationSummary(context, publication),
+          spaceId: context.spaceId,
+        };
+      });
+      context.pendingPublications = operation.then(() => undefined, () => undefined);
+      return operation;
     },
   };
 }
@@ -327,7 +342,7 @@ async function appendNotice(context: ScheduledResultContext, result: FinishedRes
     + (context.blockedReasons.size
       ? `\n${[...context.blockedReasons].map(reason => `- ${inline(reason)}`).join('\n')}\n`
       : '');
-  await persistCanvas(context, async current => (await merge3Async(context.generatedBaseline, current, generated)).merged);
+  await persistScheduledCanvas(context, async current => (await merge3Async(context.generatedBaseline, current, generated)).merged);
   context.generatedBaseline = generated;
 }
 
@@ -350,7 +365,16 @@ function notifyFinished(context: ScheduledResultContext, result: FinishedResult)
 }
 
 export async function finishScheduledResult(context: ScheduledResultContext, error?: string): Promise<FinishedResult> {
+  if (context.finishing) return context.finishing;
   if (context.finished) return context.finished;
+  context.finishing = finalizeScheduledResult(context, error);
+  return context.finishing;
+}
+
+async function finalizeScheduledResult(context: ScheduledResultContext, error?: string): Promise<FinishedResult> {
+  // Seal the publisher immediately, then drain accepted writes before handing
+  // the canvas to a user's next turn.
+  await context.pendingPublications;
   const publication = context.publication;
   const status = error !== undefined ? 'failed'
     : publication ? publicationStatus(context, publication)
