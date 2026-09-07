@@ -31,53 +31,115 @@ interface DiffOp {
   bStart: number;
 }
 
-/**
- * Compute the longest common subsequence table between two line arrays.
- * Returns a 2D table where lcs[i][j] = length of LCS of a[0..i-1], b[0..j-1].
- */
-function lcsTable(a: string[], b: string[]): number[][] {
-  const m = a.length;
-  const n = b.length;
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+export class MergeLimitError extends Error {
+  constructor() {
+    super('merge_resource_limit: Both versions are unchanged. Save a separate copy before resolving this merge.');
+    this.name = 'MergeLimitError';
+  }
+}
 
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      if (a[i - 1] === b[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-      }
+// Bound input, traceback storage and total work independently. There is no
+// lossy fallback: callers must retain both inputs when a budget is exceeded.
+const MAX_CHARACTERS = 8 * 1024 * 1024;
+const MAX_LINES = 200_000;
+const MAX_CELLS = 32 * 1024 * 1024;
+
+export function needsMergeWorker(base: string, ours: string, theirs: string): boolean {
+  if (base === theirs || base === ours || ours === theirs) return false;
+  if (base.length + ours.length + theirs.length > 32_768) return true;
+  let lines = 0;
+  for (const text of [base, ours, theirs]) {
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10 && ++lines > 256) return true;
     }
   }
-  return dp;
+  return false;
 }
 
 /**
- * Produce a sequence of diff operations between arrays `a` and `b` by
- * backtracking through the LCS table.
+ * Adaptive edit-distance band with packed traceback. Typical small edits use
+ * O(lines * edits) work/storage, capped at 8 MiB of traceback per pass.
+ * Exported for canonical-alignment regression tests.
  */
-function diffLines(a: string[], b: string[]): DiffOp[] {
-  const dp = lcsTable(a, b);
+export function diffLines(a: string[], b: string[]): DiffOp[] {
+  // Suffix trimming follows the original bottom-right traceback exactly.
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > 0 && endB > 0 && a[endA - 1] === b[endB - 1]) {
+    endA--;
+    endB--;
+  }
+  let start = 0;
+  while (start < endA && start < endB && a[start] === b[start]) start++;
+  // Repeated lines can make blindly trimming a prefix change conflict
+  // boundaries. Only trim when no prefix line occurs in either remainder.
+  const remainder = new Set([...a.slice(start, endA), ...b.slice(start, endB)]);
+  if (a.slice(0, start).some(line => remainder.has(line))) start = 0;
+  const m = endA - start;
+  const n = endB - start;
+  let band = Math.max(4, Math.abs(m - n));
+  let budget = MAX_CELLS;
+  let trace: Uint8Array;
+  let width: number;
+  for (;;) {
+    band = Math.min(band, Math.max(m, n));
+    width = 2 * band + 1;
+    const cells = (m + 1) * width;
+    if (cells > budget) throw new MergeLimitError();
+    budget -= cells;
+    trace = new Uint8Array(Math.ceil(cells / 4));
+    let previous = new Int32Array(width).fill(MAX_LINES * 3);
+    let current = new Int32Array(width);
+    for (let i = 0; i <= m; i++) {
+      current.fill(MAX_LINES * 3);
+      for (let j = Math.max(0, i - band); j <= Math.min(n, i + band); j++) {
+        const k = j - i + band;
+        let direction = 0;
+        if (i === 0 && j === 0) {
+          current[k] = 0;
+        } else if (i > 0 && j > 0 && a[start + i - 1] === b[start + j - 1]) {
+          current[k] = previous[k];
+        } else {
+          const insert = j > 0 && k > 0 ? current[k - 1] + 1 : MAX_LINES * 3;
+          const remove = i > 0 && k + 1 < width ? previous[k + 1] + 1 : MAX_LINES * 3;
+          // LCS backtracking prefers insertion on ties; keep that canonical
+          // alignment, including repeated blank lines and identical headings.
+          direction = insert <= remove ? 1 : 2;
+          current[k] = Math.min(insert, remove);
+        }
+        const cell = i * width + k;
+        trace[cell >>> 2] |= direction << ((cell & 3) * 2);
+      }
+      [previous, current] = [current, previous];
+    }
+    // Every optimal path with edit distance <= band fits inside this band.
+    // Thus the narrow traceback has exactly the full LCS's tie semantics.
+    if (previous[n - m + band] <= band || band === Math.max(m, n)) break;
+    band *= 2;
+  }
   const ops: DiffOp[] = [];
-  let i = a.length;
-  let j = b.length;
+  let i = m;
+  let j = n;
 
   // Backtrack from bottom-right to collect equal / delete / insert
   const raw: Array<{ kind: 'equal' | 'insert' | 'delete'; aIdx: number; bIdx: number; line: string }> = [];
   while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
-      raw.push({ kind: 'equal', aIdx: i - 1, bIdx: j - 1, line: a[i - 1] });
+    const cell = i * width + j - i + band;
+    const direction = (trace[cell >>> 2] >>> ((cell & 3) * 2)) & 3;
+    if (direction === 0 && i > 0 && j > 0) {
+      raw.push({ kind: 'equal', aIdx: start + i - 1, bIdx: start + j - 1, line: a[start + i - 1] });
       i--;
       j--;
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      raw.push({ kind: 'insert', aIdx: i, bIdx: j - 1, line: b[j - 1] });
+    } else if (direction === 1) {
+      raw.push({ kind: 'insert', aIdx: start + i, bIdx: start + j - 1, line: b[start + j - 1] });
       j--;
     } else {
-      raw.push({ kind: 'delete', aIdx: i - 1, bIdx: j, line: a[i - 1] });
+      raw.push({ kind: 'delete', aIdx: start + i - 1, bIdx: start + j, line: a[start + i - 1] });
       i--;
     }
   }
   raw.reverse();
+  if (start > 0) ops.push({ kind: 'equal', lines: a.slice(0, start), aStart: 0, bStart: 0 });
 
   // Group consecutive operations of the same kind
   for (const r of raw) {
@@ -87,6 +149,9 @@ function diffLines(a: string[], b: string[]): DiffOp[] {
     } else {
       ops.push({ kind: r.kind, lines: [r.line], aStart: r.aIdx, bStart: r.bIdx });
     }
+  }
+  if (endA < a.length) {
+    ops.push({ kind: 'equal', lines: a.slice(endA), aStart: endA, bStart: endB });
   }
 
   return ops;
@@ -131,12 +196,12 @@ function extractHunks(diff: DiffOp[]): Hunk[] {
       baseIdx += op.lines.length;
     } else if (op.kind === 'delete') {
       if (deleteStart < 0) deleteStart = baseIdx;
-      pendingDelete.push(...op.lines);
+      for (const line of op.lines) pendingDelete.push(line);
       baseIdx += op.lines.length;
     } else {
       // insert
       if (deleteStart < 0) deleteStart = baseIdx;
-      pendingInsert.push(...op.lines);
+      for (const line of op.lines) pendingInsert.push(line);
     }
   }
   flushPending();
@@ -180,15 +245,16 @@ function containsBlock(outer: string[], inner: string[]): boolean {
   if (needle.length === 0) return true;
   if (needle.length > hay.length) return false;
 
-  for (let i = 0; i + needle.length <= hay.length; i++) {
-    let match = true;
-    for (let j = 0; j < needle.length; j++) {
-      if (hay[i + j] !== needle[j]) {
-        match = false;
-        break;
-      }
-    }
-    if (match) return true;
+  const prefix = new Int32Array(needle.length);
+  for (let i = 1, j = 0; i < needle.length; i++) {
+    while (j > 0 && needle[i] !== needle[j]) j = prefix[j - 1];
+    if (needle[i] === needle[j]) j++;
+    prefix[i] = j;
+  }
+  for (let i = 0, j = 0; i < hay.length; i++) {
+    while (j > 0 && hay[i] !== needle[j]) j = prefix[j - 1];
+    if (hay[i] === needle[j]) j++;
+    if (j === needle.length) return true;
   }
   return false;
 }
@@ -213,6 +279,13 @@ export function merge3(base: string, ours: string, theirs: string): MergeResult 
     return { merged: ours, hasConflicts: false, noRemoteChanges: false };
   }
 
+  if (base.length + ours.length + theirs.length > MAX_CHARACTERS) throw new MergeLimitError();
+  let lineCount = 3;
+  for (const text of [base, ours, theirs]) {
+    for (let i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10 && ++lineCount > MAX_LINES) throw new MergeLimitError();
+    }
+  }
   const baseLines = base.split('\n');
   const ourLines = ours.split('\n');
   const theirLines = theirs.split('\n');
@@ -230,8 +303,22 @@ export function merge3(base: string, ours: string, theirs: string): MergeResult 
   // suppressed rather than appended, so shared content isn't duplicated.
   const duplicateTheirHunks = new Set<number>();
 
+  const conflictsByOurs = new Map<Hunk, number[]>();
+  let firstOurs = 0;
   for (let ti = 0; ti < theirHunks.length; ti++) {
-    const overlapping = ourHunks.filter(oh => hunksOverlap(oh, theirHunks[ti]));
+    const theirs = theirHunks[ti];
+    while (firstOurs < ourHunks.length &&
+      ourHunks[firstOurs].baseStart + ourHunks[firstOurs].baseCount < theirs.baseStart) firstOurs++;
+    const overlapping: Hunk[] = [];
+    for (let oi = firstOurs; oi < ourHunks.length &&
+      ourHunks[oi].baseStart <= theirs.baseStart + theirs.baseCount; oi++) {
+      const ours = ourHunks[oi];
+      if (!hunksOverlap(ours, theirs)) continue;
+      overlapping.push(ours);
+      const indices = conflictsByOurs.get(ours) ?? [];
+      indices.push(ti);
+      conflictsByOurs.set(ours, indices);
+    }
     if (overlapping.length === 0) continue;
     conflictingTheirHunks.add(ti);
     if (overlapping.some(oh => containsBlock(oh.lines, theirHunks[ti].lines))) {
@@ -252,9 +339,9 @@ export function merge3(base: string, ours: string, theirs: string): MergeResult 
   let baseIdx = 0;
 
   // Merge all hunks into a single ordered stream with source annotations
-  type TaggedHunk = Hunk & { source: 'ours' | 'theirs'; conflictIdx?: number };
+  type TaggedHunk = Hunk & { source: 'ours' | 'theirs'; conflictIdx?: number; original?: Hunk };
   const allHunks: TaggedHunk[] = [
-    ...ourHunks.map(h => ({ ...h, source: 'ours' as const })),
+    ...ourHunks.map(h => ({ ...h, source: 'ours' as const, original: h })),
     ...theirHunks.map((h, i) => ({ ...h, source: 'theirs' as const, conflictIdx: i })),
   ];
   allHunks.sort((a, b) => a.baseStart - b.baseStart || (a.source === 'ours' ? -1 : 1));
@@ -274,19 +361,19 @@ export function merge3(base: string, ours: string, theirs: string): MergeResult 
       }
 
       // Emit our replacement
-      result.push(...hunk.lines);
+      for (const line of hunk.lines) result.push(line);
       baseIdx = Math.max(baseIdx, hunk.baseStart + hunk.baseCount);
       appliedOurs.add(hunk);
 
       // For conflicting "their" hunks overlapping this one, append their version
-      for (let ti = 0; ti < theirHunks.length; ti++) {
+      for (const ti of conflictsByOurs.get(hunk.original!) ?? []) {
         if (appliedTheirs.has(ti)) continue;
         if (!conflictingTheirHunks.has(ti)) continue;
         if (!hunksOverlap(hunk, theirHunks[ti])) continue;
 
         if (!duplicateTheirHunks.has(ti)) {
           result.push('');
-          result.push(...theirHunks[ti].lines);
+          for (const line of theirHunks[ti].lines) result.push(line);
         }
         appliedTheirs.add(ti);
         baseIdx = Math.max(baseIdx, theirHunks[ti].baseStart + theirHunks[ti].baseCount);
@@ -304,7 +391,7 @@ export function merge3(base: string, ours: string, theirs: string): MergeResult 
       }
 
       // Emit their replacement
-      result.push(...hunk.lines);
+      for (const line of hunk.lines) result.push(line);
       baseIdx = Math.max(baseIdx, hunk.baseStart + hunk.baseCount);
       appliedTheirs.add(ti);
     }

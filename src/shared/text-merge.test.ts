@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { merge3 } from './text-merge';
+import { merge3, diffLines, needsMergeWorker, MergeLimitError } from './text-merge';
 
 describe('merge3', () => {
   // ── Fast paths ──────────────────────────────────────────
@@ -12,6 +12,72 @@ describe('merge3', () => {
     expect(r.merged).toBe(ours);
     expect(r.hasConflicts).toBe(false);
     expect(r.noRemoteChanges).toBe(true);
+  });
+
+  describe('bounded canonical diff', () => {
+    function reference(a: string[], b: string[]) {
+      const table = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+      for (let i = 1; i <= a.length; i++) {
+        for (let j = 1; j <= b.length; j++) {
+          table[i][j] = a[i - 1] === b[j - 1] ? table[i - 1][j - 1] + 1 : Math.max(table[i - 1][j], table[i][j - 1]);
+        }
+      }
+      const ops: Array<{ kind: string; line: string }> = [];
+      let i = a.length;
+      let j = b.length;
+      while (i || j) {
+        if (i && j && a[i - 1] === b[j - 1]) {
+          ops.push({ kind: 'equal', line: a[--i] });
+          j--;
+        } else if (j && (!i || table[i][j - 1] >= table[i - 1][j])) {
+          ops.push({ kind: 'insert', line: b[--j] });
+        } else {
+          ops.push({ kind: 'delete', line: a[--i] });
+        }
+      }
+      return ops.reverse();
+    }
+
+    it('preserves full-LCS tie alignment on repeated lines, blanks and insertions', () => {
+      let seed = 9741;
+      const random = (n: number) => {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        return (seed >>> 12) % n;
+      };
+      for (let trial = 0; trial < 2000; trial++) {
+        const a = Array.from({ length: random(35) }, () => ['A', 'B', '', 'C'][random(4)]);
+        const b = Array.from({ length: random(35) }, () => ['A', 'B', '', 'C'][random(4)]);
+        expect(diffLines(a, b).flatMap(op => op.lines.map(line => ({ kind: op.kind, line }))))
+          .toEqual(reference(a, b));
+      }
+    });
+
+    it('merges separated edits in a 4000-line document without changing output shape', () => {
+      const lines = Array.from({ length: 4000 }, (_, i) => `line ${i}`);
+      const ours = [...lines];
+      const theirs = [...lines];
+      ours[10] = 'local';
+      ours[3900] = 'local tail';
+      theirs[2000] = 'remote';
+      const expected = [...ours];
+      expected[2000] = 'remote';
+      expect(merge3(lines.join('\n'), ours.join('\n'), theirs.join('\n')))
+        .toEqual({ merged: expected.join('\n'), hasConflicts: false, noRemoteChanges: false });
+      expect(needsMergeWorker(lines.join('\n'), ours.join('\n'), theirs.join('\n'))).toBe(true);
+    });
+
+    it('rejects excessive input and edit-distance work rather than producing a lossy merge', () => {
+      expect(() => merge3('base', 'x'.repeat(8 * 1024 * 1024), 'remote')).toThrow(MergeLimitError);
+      expect(() => merge3('a\n'.repeat(70_000), 'b\n'.repeat(70_000), 'c\n'.repeat(70_000))).toThrow(MergeLimitError);
+      const unrelated = (prefix: string) => Array.from({ length: 6000 }, (_, i) => `${prefix}${i}`).join('\n');
+      expect(() => merge3(unrelated('a'), unrelated('b'), unrelated('c'))).toThrow(MergeLimitError);
+    });
+
+    it('does not require workers for identical-version fast paths', () => {
+      const huge = 'x'.repeat(9 * 1024 * 1024);
+      expect(needsMergeWorker('base', huge, 'base')).toBe(false);
+      expect(merge3('base', huge, 'base').merged).toBe(huge);
+    });
   });
 
   it('returns theirs when ours === base (no local changes)', () => {
