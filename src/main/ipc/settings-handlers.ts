@@ -49,7 +49,7 @@ export function registerSettingsHandlers(): void {
       void scheduleCopilotReinit();
       return resolved;
     } else if (key === 'cli_source') {
-      const allowed: CliSource[] = ['bundled', 'auto', 'path', 'server'];
+      const allowed: CliSource[] = ['bundled', 'inprocess', 'auto', 'path', 'server'];
       const next = (allowed as string[]).includes(value) ? (value as CliSource) : 'bundled';
       setConfigValue('cliSource', next);
       invalidateCliPath();

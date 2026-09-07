@@ -127,6 +127,18 @@ describe('config', () => {
       expect(config.cliServerUrl).toBe('localhost:9001');
     });
 
+    it('persists the experimental in-process choice without changing custom connection settings', () => {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify({
+        cliSource: 'path', cliPath: '/custom/copilot', cliServerUrl: 'localhost:9001',
+      }));
+      loadConfig();
+      setConfigValue('cliSource', 'inprocess');
+      const config = loadConfig();
+      expect(config.cliSource).toBe('inprocess');
+      expect(config.cliPath).toBe('/custom/copilot');
+      expect(config.cliServerUrl).toBe('localhost:9001');
+    });
+
     it('handles malformed JSON gracefully', () => {
       fs.writeFileSync(CONFIG_PATH, 'not json');
       const config = loadConfig();

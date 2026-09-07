@@ -41,7 +41,7 @@ whim is an Electron app with a clear separation between the main process (Node.j
 
 ### Settings storage — `config.json`
 
-All app settings (theme, model, Copilot runtime source (bundled/auto/path/server) + optional CLI path and remote server URL/token, workspace **profiles**, MCP servers, CLI tools, sandbox policy, web-remote, hotkeys, and **agent personas** including the per-persona `yolo` flag) are persisted as a single JSON file at `app.getPath('userData')/config.json` via `config.ts` (`loadConfig` / `saveConfig`). Because `userData` is pinned (see above), this resolves to `<appData>/whim/config.json` on every build.
+All app settings (theme, model, Copilot runtime source (bundled/inprocess/auto/path/server) + optional CLI path and remote server URL/token, workspace **profiles**, MCP servers, CLI tools, sandbox policy, web-remote, hotkeys, and **agent personas** including the per-persona `yolo` flag) are persisted as a single JSON file at `app.getPath('userData')/config.json` via `config.ts` (`loadConfig` / `saveConfig`). Because `userData` is pinned (see above), this resolves to `<appData>/whim/config.json` on every build.
 
 ### database.ts — Storage
 
@@ -59,12 +59,15 @@ Uses `better-sqlite3` for synchronous SQLite. Key tables:
 Three specialized sessions: **Parse** (extract title/client/dates), **Recurrence** (evaluate repeat tasks), **Recall** (find similar past intents). All share the user's selected model.
 
 **Runtime resolution.** `resolveRuntimeConnection()` chooses how the SDK connects, based on `config.cliSource`:
-- `bundled` *(default)* → spawn the CLI shipped with the app via `resolveBundledCliPath()` (`@github/copilot`, pinned in `package.json` and `asarUnpack`-ed so its native `prebuilds/` run from `app.asar.unpacked`). Spawned through Electron-as-Node (`ELECTRON_RUN_AS_NODE=1`).
+- `bundled` *(default)* → spawn `copilot-runtime` (`copilot-runtime.exe` on Windows) from the SDK 1.0.13 platform package over stdio. `getBundledSdkRuntimePaths()` selects physical files under `app.asar.unpacked` in packaged builds. No CLI shim or Electron-as-Node flag is needed.
+- `inprocess` *(experimental, explicit opt-in)* → `RuntimeConnection.forInProcess()`, loading the same bundled `runtime.node` through Koffi. SDK 1.0.13 only accepts an explicit FFI library location through the host's `COPILOT_CLI_PATH`: `startRuntimeClient()` serializes FFI startups, temporarily pins that variable to the unpacked native entrypoint, and restores it after startup, including on failure. It never changes `ELECTRON_RUN_AS_NODE` globally.
 - `auto` → newest local CLI from `session.ts` detection (prefers the self-updated bundle under `~/.copilot/pkg/<platform>-<arch>/` or the OS cache dirs).
 - `path` → an explicit user-configured CLI path/command.
 - `server` → `RuntimeConnection.forUri(url, { connectionToken })` to an already-running runtime.
 
-Any source that can't be satisfied falls back to the bundled CLI. `getRuntimeStatus()` reports the effective source/version/compatibility; `testRuntimeConnection()` spins up a throwaway client and runs a real handshake (bounded by a timeout) for the Settings "Test connection" button.
+Unavailable custom sources fall back to bundled stdio; missing bundled native files surface an installation error, never a silent switch to another library. Custom CLI children retain the Electron shim and child-only `ELECTRON_RUN_AS_NODE=1`; server and in-process clients receive no subprocess environment options. `getRuntimeStatus()` reads native versions from the live SDK `getStatus()` handshake because the native wrapper has no `--version` command. `testRuntimeConnection()` reuses the active client where possible.
+
+The full `@github/copilot` package is retained for terminal sessions and CLI discovery, independent of the SDK runtime selection. Native SDK platform packages, Koffi, and its platform addon are unpacked for native loading. In-process libraries remain loaded for the lifetime of the app, so changing library builds requires restarting Whim. Primary and lazy ephemeral clients remain separate; ephemeral sessions supply `createSessionFsProvider`. Shutdown delegates cancellation and session cleanup to `client.stop()` before releasing either host.
 
 **session.ts — CLI discovery.** `findLatestSelfUpdatedCli()` scans every self-update cache cross-platform and picks the newest fully-extracted bundle (built on `findSelfUpdatedClis()`, which returns them all, newest first); `autoDetectCopilotCli()` adds well-known install paths (`~/.local/bin`, Homebrew, npm-global), PATH augmentation for GUI launches, a login-shell fallback for version-manager installs, and newest-by-probed-version selection. `discoverCopilotClis()` enumerates *every* install found across all of those sources with its probed version, origin label and compatibility — it backs the CLI pickers in onboarding and Settings so the user can override a bad auto-pick. `MIN_CLI_VERSION` gates compatibility.
 

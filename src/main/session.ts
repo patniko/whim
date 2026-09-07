@@ -722,8 +722,8 @@ let bundledCliResolved = false;
 /**
  * Resolve the path to the Copilot CLI bundled with the app
  * (the JavaScript entrypoint in the pinned platform package). This runs a
- * known-compatible CLI version with no external install required — the
- * default runtime source.
+ * CLI version for terminal sessions with no external install required.
+ * SDK sessions use their separate native runtime bundle.
  *
  * In a packaged build the package is unpacked from the asar archive (see
  * `build.asarUnpack` in package.json). We prefer the `app.asar.unpacked`

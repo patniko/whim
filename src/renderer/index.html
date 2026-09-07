@@ -448,7 +448,8 @@
               <div class="settings-group-title">Copilot Runtime</div>
               <div class="settings-row">
                 <select id="cli-source-select" class="cli-source-select">
-                  <option value="bundled">Bundled (recommended)</option>
+                  <option value="bundled">Bundled native stdio (recommended)</option>
+                  <option value="inprocess">Bundled in-process (experimental)</option>
                   <option value="auto">Auto-detect local CLI</option>
                   <option value="path">Custom CLI path</option>
                   <option value="server">Remote CLI server</option>
@@ -481,7 +482,8 @@
                 Active: <span id="cli-path-detected" class="cli-path-detected">—</span>
               </div>
               <div class="settings-hint" id="cli-mxc-status">MXC sandbox: <span id="cli-mxc-indicator">checking…</span></div>
-              <div class="settings-hint">The bundled CLI works out of the box. Pick a local CLI for terminal-resumable sessions, or a remote server to connect to a running runtime.</div>
+              <div class="settings-hint" id="cli-inprocess-warning" hidden>Experimental: the native runtime shares Whim's main process. Runtime crashes can close the app. Switch back to bundled native stdio if sessions hang; restart Whim after changing native runtime builds.</div>
+              <div class="settings-hint">Bundled native stdio runs the SDK runtime in a separate process. Custom CLI paths and remote servers remain available. Terminal sessions use the full CLI, not the SDK runtime.</div>
             </div>
 
             <div class="settings-group">

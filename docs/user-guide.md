@@ -297,14 +297,17 @@ Keep separate repos — for example **work** and **personal** — and switch bet
 The active profile's name appears next to the whim logo at the bottom of the panel.
 
 ### Copilot Runtime
-whim ships with a **bundled** Copilot CLI and uses it by default — nothing to install. In Settings → **Copilot Runtime** you can choose where the runtime comes from:
+whim ships with the Copilot SDK's **native runtime** and uses it over stdio by default — nothing to install. In Settings → **Copilot Runtime** you can choose where the runtime comes from:
 
-- **Bundled** *(default)* — the CLI shipped with the app. Always works, no install or PATH setup required.
+- **Bundled native stdio** *(default, recommended)* — the SDK's native runtime in a separate process, without starting the full CLI.
+- **Bundled in-process** *(experimental, opt-in)* — the same native runtime loaded into Whim's main process. Avoids the runtime subprocess but shares its crash and resource-lifecycle risks with the app. If sessions hang, switch back to bundled native stdio; restart Whim if needed. Changing native runtime builds requires an app restart.
 - **Auto-detect local CLI** — find and use a locally-installed CLI, preferring the newest self-updated version (under `~/.copilot/pkg/…`). Use this for terminal-resumable sessions that share state with your own `copilot` install.
 - **Custom CLI path** — point at a specific `copilot` binary or entry point.
 - **Remote CLI server** — connect to an already-running runtime by URL (`host:port` or `http://host:port`) with an optional connection token.
 
 Use **Test connection** to verify the selected runtime actually connects (it performs a real handshake), and the **Active** line shows the resolved source, version, and whether it meets the minimum supported version.
+
+The native runtime's version appears after it connects; it is not probed by launching a CLI. The full bundled CLI remains available for terminal sessions. Choosing a bundled SDK transport does not erase saved custom CLI paths or server settings. Persistent and ephemeral agents still use separate, reused clients; the ephemeral client starts only when needed.
 
 ### MCP Servers
 Model Context Protocol servers extend what agents can do. whim auto-discovers servers from `~/.copilot/mcp-config.json` and installed plugins. You can also add custom servers:

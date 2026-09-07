@@ -64,3 +64,20 @@ export function getBundledCopilotCandidates(
     pathApi.join(appPath, legacyRelativePath),
   ];
 }
+
+export function getBundledSdkRuntimePaths(
+  appPath: string,
+  platform = process.platform,
+  arch = process.arch,
+  linuxMusl = isLinuxMuslRuntime(),
+): { executable: string; library: string } {
+  const pathApi = platform === 'win32' ? path.win32 : path.posix;
+  const variant = platform === 'linux' && linuxMusl ? 'linuxmusl' : platform;
+  const target = `${variant}-${arch}`;
+  const root = appPath.endsWith('.asar') ? `${appPath}.unpacked` : appPath;
+  const directory = pathApi.join(root, 'node_modules', '@github', `copilot-sdk-${target}`, 'prebuilds', target);
+  return {
+    executable: pathApi.join(directory, platform === 'win32' ? 'copilot-runtime.exe' : 'copilot-runtime'),
+    library: pathApi.join(directory, 'runtime.node'),
+  };
+}

@@ -4920,7 +4920,8 @@ async function runCliPathChecks(): Promise<void> {
 
 function cliSourceLabel(source: string): string {
   switch (source) {
-    case 'bundled': return 'Bundled';
+    case 'bundled': return 'Bundled native stdio';
+    case 'inprocess': return 'Bundled in-process (experimental)';
     case 'auto': return 'Auto-detected';
     case 'path': return 'Custom path';
     case 'server': return 'Remote server';
@@ -4985,6 +4986,7 @@ const cliPathField = document.getElementById('cli-path-field') as HTMLElement | 
 const cliPathCustomRow = document.getElementById('cli-path-custom-row') as HTMLElement | null;
 const cliDiscoveredSelect = document.getElementById('cli-discovered-select') as HTMLSelectElement | null;
 const cliServerFields = document.getElementById('cli-server-fields') as HTMLElement | null;
+const cliInProcessWarning = document.getElementById('cli-inprocess-warning') as HTMLElement | null;
 const cliServerUrlInput = document.getElementById('cli-server-url-input') as HTMLInputElement | null;
 const cliServerTokenInput = document.getElementById('cli-server-token-input') as HTMLInputElement | null;
 const cliTestBtn = document.getElementById('cli-test-btn') as HTMLButtonElement | null;
@@ -5050,6 +5052,7 @@ function applyCliSourceVisibility(source: string): void {
     cliPathCustomRow.hidden = source !== 'path' || cliDiscoveredSelect?.value !== CLI_CUSTOM_OPTION;
   }
   if (cliServerFields) cliServerFields.hidden = source !== 'server';
+  if (cliInProcessWarning) cliInProcessWarning.hidden = source !== 'inprocess';
 }
 
 async function loadRuntimeSourceSettings(): Promise<void> {
@@ -5138,6 +5141,14 @@ const cliMxcIndicator = document.getElementById('cli-mxc-indicator') as HTMLSpan
 async function updateCliMxcIndicator(): Promise<void> {
   if (!cliMxcIndicator) return;
   try {
+    const runtime = await whimAPI.getCliRuntimeStatus();
+    if (runtime.source === 'bundled' || runtime.source === 'inprocess' || runtime.source === 'server') {
+      cliMxcIndicator.textContent = runtime.source === 'server'
+        ? 'managed by the remote runtime'
+        : 'native SDK sandbox; CLI MXC probe does not apply';
+      cliMxcIndicator.className = 'cli-mxc-indicator';
+      return;
+    }
     const r = await whimAPI.checkCliMxcCapable();
     if (r.mxcCapable) {
       cliMxcIndicator.textContent = '✓ runtime sandbox supported';
@@ -9334,7 +9345,7 @@ async function checkWelcomeCli(): Promise<boolean> {
     return false;
   }
   const short = info.target.length > 40 ? '…' + info.target.slice(-38) : info.target;
-  welcomeCliStatus.textContent = `Using: ${short} (v${info.version})`;
+  welcomeCliStatus.textContent = `Using: ${short}${info.version ? ` (v${info.version})` : ''}`;
   welcomeCliStatus.title = info.target;
   welcomeCliCheck.classList.remove('hidden');
   welcomeStepCli.classList.add('done');

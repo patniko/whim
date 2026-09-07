@@ -44,6 +44,7 @@ const mockClient = {
 
 vi.mock('./ai', () => ({
   getCopilotClient: vi.fn(),
+  ensureEphemeralCopilotClient: vi.fn(),
   // Stub so buildSandboxLaunchSetup (Windows-only path) doesn't reach into
   // electron's app.getPath() during sandbox tests.
   buildSandboxConfigs: (agentId: string) => ({
@@ -162,7 +163,8 @@ import {
   getCanvasAgentState,
   __resetAppRemoteForTests,
 } from './agent-service';
-import { getCopilotClient } from './ai';
+import { getCopilotClient, ensureEphemeralCopilotClient } from './ai';
+import { InMemoryFsProvider } from './agents/in-memory-fs-provider';
 import { createCanvasAgent, createAgentSession, updateAgentSessionStatus, updateAgentSessionId, getAgentSession, listAgentSessions, listAgentChatEvents } from './database';
 import { getConfig } from './config';
 import { launchSessionInTerminal } from './session';
@@ -439,6 +441,21 @@ describe('launchQuickAgent', () => {
         run_location: 'local',
       }),
     );
+  });
+
+  it('supplies the SDK session filesystem provider for ephemeral agents', async () => {
+    enableMockClient();
+    vi.mocked(ensureEphemeralCopilotClient).mockResolvedValue(getCopilotClient());
+    const result = await launchQuickAgent('keep this private', '/ws', {
+      id: 'ephemeral', handle: 'private', instructions: '', model: '',
+      runLocation: 'local', ephemeral: true,
+    });
+    expect(result).toEqual({ agentId: 'quick-agent-1', sessionId: 'mock-session-id' });
+    expect(ensureEphemeralCopilotClient).toHaveBeenCalledOnce();
+    const options = mockClient.createSession.mock.calls[0][0];
+    expect(options.createSessionFsProvider()).toBeInstanceOf(InMemoryFsProvider);
+    expect(options.createSessionFsHandler).toBeUndefined();
+    expect(createAgentSession).not.toHaveBeenCalled();
   });
 
   it('persists run_location=cloud for cloud personas', async () => {

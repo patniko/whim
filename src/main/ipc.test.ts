@@ -370,6 +370,12 @@ describe('IPC handlers', () => {
   });
 
   describe('settings:set', () => {
+    it.each(['bundled', 'inprocess', 'auto', 'path', 'server'])('preserves the selected runtime source: %s', async source => {
+      vi.mocked(setConfigValue).mockClear();
+      expect(await invoke('settings:set', 'cli_source', source)).toBe(source);
+      expect(setConfigValue).toHaveBeenCalledExactlyOnceWith('cliSource', source);
+    });
+
     it('font: saves a supported choice', async () => {
       const listener = vi.fn();
       const unsubscribe = subscribeWebRemoteEvents(listener);

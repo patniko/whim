@@ -60,12 +60,13 @@ export interface AgentPersona {
 
 /**
  * Which Copilot runtime the SDK connects to:
- * - 'bundled': the CLI shipped with the app (`@github/copilot`); the default.
+ * - 'bundled': the SDK's native runtime over stdio; the default.
+ * - 'inprocess': the bundled SDK runtime hosted in-process (experimental).
  * - 'auto':    auto-detect a local install, preferring the self-updated CLI.
  * - 'path':    an explicit local CLI path/command (`cliPath`).
  * - 'server':  an already-running runtime at `cliServerUrl` (remote).
  */
-export type CliSource = 'bundled' | 'auto' | 'path' | 'server';
+export type CliSource = 'bundled' | 'inprocess' | 'auto' | 'path' | 'server';
 
 export interface CliRuntime {
   id: string;
@@ -460,7 +461,7 @@ export function loadConfig(): AppConfig {
       }
       // Runtime source: pre-source configs map an explicit cliPath to the
       // 'path' source; everything else (including auto-detect users) defaults
-      // to the bundled CLI, which always works without a local install.
+      // to the bundled SDK runtime, which needs no local CLI install.
       if (parsed.cliSource === undefined) {
         config.cliSource = parsed.cliPath ? 'path' : 'bundled';
       }
