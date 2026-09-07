@@ -78,6 +78,20 @@ describe('example skills', () => {
   });
 });
 
+describe('missed-messages', () => {
+  it('keeps scheduling and report configuration out of the reusable skill', () => {
+    const { frontmatter, body } = readSkill('missed-messages');
+    expect(frontmatter.schedule).toBeUndefined();
+    expect(frontmatter.canvas).toBeUndefined();
+    expect(frontmatter.space_mode).toBeUndefined();
+    expect(body).toContain("space's main canvas");
+    expect(body).toContain('every authorized connected chat source');
+    expect(body).toContain('Do not send replies');
+    expect(body).toContain('stable source/thread references');
+    expect(body).toContain('If all searches succeed');
+  });
+});
+
 describe('look-for-open-questions', () => {
   it('opts into its own canvas template, since that is the point of the example', () => {
     const { frontmatter } = readSkill('look-for-open-questions');
