@@ -342,6 +342,21 @@ export async function invokeWebRemoteCommand(channel: string, args: unknown[]): 
   // entry here as a decision to maintain two implementations.
   const gatewayHandler = HANDLERS[channel as IpcCommandChannel];
   const result = gatewayHandler ? await gatewayHandler(args) : await callRegisteredHandler(channel, args);
+  if (
+    channel === 'canvas:write' &&
+    typeof result === 'object' &&
+    result !== null &&
+    'success' in result &&
+    result.success === true
+  ) {
+    const content = 'content' in result && typeof result.content === 'string'
+      ? result.content
+      : expectStringAllowEmpty(args, 1, 'content');
+    notifyAllWindows('canvas:content-updated', {
+      spaceId: expectString(args, 0, 'spaceId'),
+      content,
+    });
+  }
   // Redact after serialization, so a redactor always sees the plain object the
   // browser would have received and cannot be defeated by a getter or a class
   // instance that survives the handler but not the round trip.

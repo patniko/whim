@@ -52,6 +52,7 @@ vi.mock('../notify', () => ({
 import { GatewayError, invokeWebRemoteCommand, isAllowedWebRemoteCommand, WEB_REMOTE_IMPLEMENTED_CHANNELS } from './gateway';
 import { webAccessFor } from '../../shared/web-access';
 import { registerIpcHandler } from '../ipc/registry';
+import { notifyAllWindows } from '../notify';
 
 describe('web remote gateway', () => {
   it('allows only reviewed channels', () => {
@@ -114,6 +115,31 @@ describe('web remote gateway', () => {
     expect(closed).toEqual({ success: true });
 
     expect(seen).toEqual([`read:${pageId}`, `write:${pageId}`, `close:${pageId}`]);
+  });
+
+  it('notifies open editors after a successful web canvas save', async () => {
+    registerIpcHandler('canvas:write', () => ({ success: true }));
+
+    await invokeWebRemoteCommand('canvas:write', ['space-1', '# Updated on web']);
+
+    expect(notifyAllWindows).toHaveBeenCalledWith('canvas:content-updated', {
+      spaceId: 'space-1',
+      content: '# Updated on web',
+    });
+  });
+
+  it('notifies open editors with merged canvas content', async () => {
+    registerIpcHandler('canvas:write', () => ({
+      success: true,
+      content: '# Merged content',
+    }));
+
+    await invokeWebRemoteCommand('canvas:write', ['space-1', '# Updated on web']);
+
+    expect(notifyAllWindows).toHaveBeenCalledWith('canvas:content-updated', {
+      spaceId: 'space-1',
+      content: '# Merged content',
+    });
   });
 
   it('rejects denied channels before dispatch', async () => {
