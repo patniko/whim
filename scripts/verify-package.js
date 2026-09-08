@@ -74,6 +74,18 @@ if (runtimeCheck.status !== 0) {
 }
 
 const appArchive = path.join(platform === 'mac' ? macResources : winResources, 'app.asar');
+const storageCheck = spawnSync(appExecutable, [
+  path.join(__dirname, 'smoke-storage-worker.js'), appArchive,
+], {
+  encoding: 'utf8',
+  env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+  timeout: 30_000,
+});
+if (storageCheck.status !== 0) {
+  throw new Error(`Packaged storage worker failed to start:\n${storageCheck.stderr || storageCheck.error}\n${storageCheck.stdout}`);
+}
+console.log(storageCheck.stdout.trim());
+
 const rendererCheck = spawnSync(appExecutable, [
   path.join(__dirname, 'verify-renderer-assets.js'), path.join(appArchive, 'dist'),
 ], {

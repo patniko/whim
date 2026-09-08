@@ -28,8 +28,10 @@ import {
   createAgentSession, updateCanvasAgentStatus, updateAgentSessionStatus, getAgentSession,
   createSkillDocument, deleteSkillDirectory, getSkillCanvasSettings, readDocument,
   openRuntimeHistory, appendRuntimeHistory, queryRuntimeHistory, listAgentChatEvents,
+  saveSkillSchedule,
 } from './storage';
 import { appendEvent } from './eventlog';
+import { notifyAllWindows } from './notify';
 
 let bundle: string;
 let workspace: string;
@@ -39,6 +41,16 @@ beforeAll(async () => {
   await build({
     entryPoints: [path.resolve('src/main/storage-worker.ts')],
     outfile: fixture.worker, bundle: true, packages: 'external', platform: 'node', format: 'cjs',
+    plugins: [{
+      name: 'forbid-worker-electron',
+      setup(builder) {
+        builder.onResolve({ filter: /^electron$/ }, () => ({ path: 'electron', namespace: 'worker-forbidden' }));
+        builder.onLoad({ filter: /.*/, namespace: 'worker-forbidden' }, () => ({
+          contents: 'throw new Error("Electron must not load in the storage worker"); module.exports = {};',
+          loader: 'js',
+        }));
+      },
+    }],
   });
   // Packages stay external so the test uses the installed native binding.
   fs.symlinkSync(path.resolve('node_modules'), path.join(bundle, 'node_modules'), 'dir');
@@ -55,6 +67,15 @@ afterEach(async () => {
 });
 
 describe('sole persistence worker', () => {
+  it('starts without Electron and forwards schedule notifications to the main process', async () => {
+    vi.mocked(notifyAllWindows).mockClear();
+    const schedule = await saveSkillSchedule(workspace, 'fixture-skill', 'daily', '09:00', null, {
+      timeZone: 'UTC', intent: '', readOnlyServers: [],
+    });
+    expect(schedule.skillId).toBe('fixture-skill');
+    expect(notifyAllWindows).toHaveBeenCalledExactlyOnceWith('skills:changed');
+  });
+
   it('normalizes runtime history off-main without writing ephemeral transcripts to the durable mirror', async () => {
     expect(await openRuntimeHistory('ephemeral', 'session', true)).toBeUndefined();
     await appendRuntimeHistory('ephemeral', 'session', [{

@@ -1,9 +1,8 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { execFile } from 'child_process';
-import { BrowserWindow } from 'electron';
 import type { GitSyncStatus } from '../shared/ipc-contract';
-import { mirrorRendererEvent } from './web/event-hub';
+import { notifyAllWindows } from './notify';
 import { getLogRoot as getLogRootForWhim, migrateLegacyEventLog } from './log-store';
 import { ensureMarkdownH1Title } from '../shared/markdown-title';
 import { GitQueue } from './git-queue';
@@ -444,10 +443,7 @@ async function doCommit(workspaceRoot: string): Promise<void> {
       console.log(`[workspace] Auto-committed at ${timestamp}`);
 
       // Notify renderer so history panel can refresh
-      for (const win of BrowserWindow.getAllWindows()) {
-        win.webContents.send('workspace:committed');
-      }
-      mirrorRendererEvent('workspace:committed');
+      notifyAllWindows('workspace:committed');
     } catch (err: any) {
       // Silently skip if not a git repo or git not available
       if (err?.message?.includes('not a git repository') || err?.code === 'ENOENT') {
@@ -583,10 +579,7 @@ export async function gitPull(workspaceRoot: string): Promise<{ ok: true } | { e
       });
 
       // Notify renderer so history/canvas can refresh
-      for (const win of BrowserWindow.getAllWindows()) {
-        win.webContents.send('workspace:committed');
-      }
-      mirrorRendererEvent('workspace:committed');
+      notifyAllWindows('workspace:committed');
       return { ok: true as const };
     } catch (err: any) {
       const msg = err?.message || 'Pull failed';

@@ -1,4 +1,3 @@
-import { BrowserWindow } from 'electron';
 import { mirrorRendererEvent } from './web/event-hub';
 import { isMainThread, parentPort } from 'worker_threads';
 import type { StorageNotification } from './storage-contract';
@@ -10,6 +9,8 @@ export function notifyAllWindows(channel: string, ...args: any[]): void {
     return;
   }
   assertWorkspaceContext();
+  // Electron APIs exist in the main process, not Node storage workers.
+  const { BrowserWindow }: typeof import('electron') = require('electron');
   mirrorRendererEvent(channel, ...args);
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(channel, ...args);
