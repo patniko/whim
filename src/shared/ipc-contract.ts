@@ -731,6 +731,7 @@ export interface IpcEvents {
   'canvas:content-updated': { spaceId: string; content: string };
   'space:processed': { spaceId: string };
   'space:title-updated': { spaceId: string; title: string };
+  'space:deleted': { spaceId: string };
   'space:index-changed': { error?: string };
   'space:recurrence': { spaceId: string; result: RecurrenceResult };
   'space:recurrence-applied': { spaceId: string };

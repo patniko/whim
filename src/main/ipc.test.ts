@@ -275,6 +275,7 @@ import { parseFrontmatter, serializeFrontmatter } from './frontmatter';
 import { listDiscoveredMcpServers } from './mcp';
 import { validateMcpServers, validateCliTools } from './validators';
 import { launchSession, resolveCommandOnPath, resolveCmdToJs, invalidateCliPath } from './session';
+import { notifyAllWindows } from './notify';
 import * as fs from 'fs';
 
 const fakeEvent = { sender: { id: 1 } } as any;
@@ -375,6 +376,11 @@ describe('IPC handlers', () => {
       expect(result).toBe(true);
       expect(deleteSpaceFolder).toHaveBeenCalledWith('/mock/workspace', 'test-folder');
       expect(scheduleAutoCommit).toHaveBeenCalled();
+    });
+
+    it('broadcasts space:deleted so an open canvas can discard its draft', async () => {
+      await invoke('space:delete', 'space-1');
+      expect(notifyAllWindows).toHaveBeenCalledWith('space:deleted', { spaceId: 'space-1' });
     });
   });
 

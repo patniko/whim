@@ -69,6 +69,7 @@ const ALLOWED_EVENT_CHANNELS = new Set([
   'agent:reply-ready',
   'space:processed',
   'space:title-updated',
+  'space:deleted',
   'space:index-changed',
   'space:recurrence-applied',
   'canvas:content-updated',

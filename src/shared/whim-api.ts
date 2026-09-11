@@ -292,6 +292,7 @@ export interface WhimAPI {
   onWorkspaceCommitted(callback: () => void): void;
   onWorkspaceChanged(callback: (path: string | null) => void): void;
   onSpaceTitleUpdated(callback: (data: IpcEventPayload<'space:title-updated'>) => void): void;
+  onSpaceDeleted(callback: (data: IpcEventPayload<'space:deleted'>) => void): void;
   onSpaceIndexChanged(callback: (data: IpcEventPayload<'space:index-changed'>) => void): void;
 
   // ── Agent events ─────────────────────────────────────────
@@ -696,6 +697,9 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     },
     onSpaceTitleUpdated: (callback) => {
       ipcRenderer.on('space:title-updated', (_event: unknown, data: IpcEventPayload<'space:title-updated'>) => callback(data));
+    },
+    onSpaceDeleted: (callback) => {
+      ipcRenderer.on('space:deleted', (_event: unknown, data: IpcEventPayload<'space:deleted'>) => callback(data));
     },
     onSpaceIndexChanged: (callback) => {
       ipcRenderer.on('space:index-changed', (_event: unknown, data: IpcEventPayload<'space:index-changed'>) => callback(data));

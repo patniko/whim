@@ -14,6 +14,7 @@ import { archiveSpaceFolder, unarchiveSpaceFolder, deleteSpaceFolder } from '../
 import { handleRecurrence, cancelPendingRecurrence } from './recurrence';
 import { processSpaceInBackground } from './space-processing';
 import { observeProducer } from '../producer-tasks';
+import { notifyAllWindows } from '../notify';
 
 export type SpaceUpdates = Partial<
   Pick<Space, 'description' | 'body' | 'client' | 'due_at' | 'due_at_utc' | 'status' | 'attachments'>
@@ -75,6 +76,12 @@ export async function deleteSpaceFull(id: string): Promise<boolean> {
       (await deleteSpaceFolder(workspace, current.folder));
     }
     scheduleAutoCommit(workspace);
+  }
+  if (result) {
+    // Tell every window (e.g. a canvas popout editing this space) so they
+    // discard in-memory content instead of later failing to save it back to
+    // a folder that no longer exists.
+    notifyAllWindows('space:deleted', { spaceId: id });
   }
   return result;
 }

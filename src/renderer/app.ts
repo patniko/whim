@@ -335,6 +335,7 @@ interface WhimAPI {
   onWorkspaceCommitted(callback: () => void): void;
   onSpaceProcessed(callback: (id: string) => void): void;
   onSpaceTitleUpdated(callback: (data: { spaceId: string; title: string }) => void): void;
+  onSpaceDeleted(callback: (data: { spaceId: string }) => void): void;
   onRecurrenceResult(callback: (spaceId: string, result: RecurrenceResult) => void): void;
   onRecurrenceApplied(callback: (spaceId: string) => void): void;
   onRecallHint(callback: (spaceId: string, match: RecallMatch) => void): void;
@@ -4557,6 +4558,49 @@ async function saveCanvas(): Promise<void> {
   await saveCanvasEditor();
 }
 
+/** Tear down the mounted canvas and clear the open-document state. Shared by
+ * the normal save-then-close path and by the discard-on-deletion path, which
+ * must skip saving entirely since there is nowhere left to save to. */
+async function resetOpenCanvasState(): Promise<void> {
+  canvasClosing = true;
+  if (previewActive) {
+    previewActive = false;
+    previewSha = null;
+    previewSavedContent = null;
+    canvasPreviewBanner.classList.add('hidden');
+  }
+  closeHistoryPanel();
+  unmountCanvasWorkerPanel();
+  clearAgentDecorations();
+  canvasChatPaneOpen = false;
+  await unmountCanvas(false);
+  canvasSpaceId = null;
+  canvasSkillId = null;
+  canvasPageSpaceId = null;
+  canvasPageName = null;
+  canvasFilePath = null;
+  canvasIsNewIntent = false;
+  canvasLinkedSkillIds = [];
+  canvasSkillChips.classList.add('hidden');
+  canvasSkillPicker.classList.add('hidden');
+}
+
+/** Close the popout window (desktop) or reveal the spaces list again (inline). */
+async function finalizeCanvasClose(): Promise<void> {
+  // Canvas always runs in the popout window now — close it.
+  // Keep canvasClosing=true so beforeunload doesn't double-save.
+  if (shouldCloseWindowOnCanvasClose({ isWebRemote: isWebRemote() })) {
+    window.close();
+    return;
+  }
+
+  // In a browser the canvas is drawn over the spaces list, and the tab is not
+  // ours to close — reveal the list again instead.
+  hideInlineCanvas();
+  canvasClosing = false;
+  await loadSpaces();
+}
+
 async function closeCanvas(): Promise<void> {
   canvasRoot.inert = true;
   try {
@@ -4596,27 +4640,7 @@ async function closeCanvas(): Promise<void> {
     return;
   }
 
-  canvasClosing = true;
-  if (previewActive) {
-    previewActive = false;
-    previewSha = null;
-    previewSavedContent = null;
-    canvasPreviewBanner.classList.add('hidden');
-  }
-  closeHistoryPanel();
-  unmountCanvasWorkerPanel();
-  clearAgentDecorations();
-  canvasChatPaneOpen = false;
-  await unmountCanvas(false);
-  canvasSpaceId = null;
-  canvasSkillId = null;
-  canvasPageSpaceId = null;
-  canvasPageName = null;
-  canvasFilePath = null;
-  canvasIsNewIntent = false;
-  canvasLinkedSkillIds = [];
-  canvasSkillChips.classList.add('hidden');
-  canvasSkillPicker.classList.add('hidden');
+  await resetOpenCanvasState();
 
   if (spaceId) {
     // If this was a new space created from Enter on empty input,
@@ -4632,21 +4656,26 @@ async function closeCanvas(): Promise<void> {
   }
 
   canvasDirty = false;
-
-  // Canvas always runs in the popout window now — close it.
-  // Keep canvasClosing=true so beforeunload doesn't double-save.
-  if (shouldCloseWindowOnCanvasClose({ isWebRemote: isWebRemote() })) {
-    window.close();
-    return;
-  }
-
-  // In a browser the canvas is drawn over the spaces list, and the tab is not
-  // ours to close — reveal the list again instead.
-  hideInlineCanvas();
-  canvasClosing = false;
-  await loadSpaces();
+  await finalizeCanvasClose();
   } finally { canvasRoot.inert = false; }
 }
+
+// If the space backing the open canvas is deleted from another window, the
+// folder it would save to is gone. Discard the in-memory draft instead of
+// leaving a stale canvas that fails every subsequent autosave (and would
+// otherwise surface a raw "not_found" error when quitting).
+whimAPI.onSpaceDeleted(({ spaceId }) => {
+  if (canvasSpaceId !== spaceId && canvasPageSpaceId !== spaceId) return;
+  canvasRoot.inert = true;
+  void (async () => {
+    try {
+      await resetOpenCanvasState();
+      canvasDirty = false;
+      canvasSaveStatus.textContent = 'This note was deleted in another window; unsaved edits were discarded.';
+      await finalizeCanvasClose();
+    } finally { canvasRoot.inert = false; }
+  })();
+});
 
 // Guard against double-save in beforeunload
 let canvasClosing = false;
@@ -5769,6 +5798,26 @@ loadPinState();
 loadRemoteState();
 
 // Flush canvas saves when the window is about to close (app quit, reload)
+
+/** The renderer/main IPC layer reports save failures as short machine codes
+ * (`not_found`, `no_workspace`, ...). Map the ones a user can actually hit to
+ * plain text before they reach a dialog — a raw code like "not_found" in a
+ * quit-time error box tells the user nothing actionable. */
+function describeCanvasSaveError(code: string): string {
+  switch (code) {
+    case 'not_found':
+      return 'This note no longer exists (it may have been deleted elsewhere); local edits could not be saved.';
+    case 'no_workspace':
+      return 'No workspace is open; local edits could not be saved.';
+    case 'not_in_workspace':
+      return 'This file moved outside the workspace; local edits could not be saved.';
+    case 'save_failed':
+      return 'Saving failed; local edits retained.';
+    default:
+      return code;
+  }
+}
+
 async function flushLocalDrafts(): Promise<void> {
   if (isRecording || voiceInputState === 'transcribing') throw new Error('Finish voice capture before closing.');
   if (captureFlight) await captureFlight;
@@ -5788,7 +5837,7 @@ async function flushLocalDrafts(): Promise<void> {
   await settingWrites.flush();
   settingsDrafts.assertClean();
   const result = await saveCanvasEditor();
-  if (!result.success) throw new Error(result.error || 'Editor could not save; local text retained.');
+  if (!result.success) throw new Error(result.error ? describeCanvasSaveError(result.error) : 'Editor could not save; local text retained.');
 }
 
 installSaveLifecycle(bridgeApi, flushLocalDrafts, error => {
