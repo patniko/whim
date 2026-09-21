@@ -265,11 +265,13 @@ export async function materializeSpaceCanvas(workspaceRoot: string, folder: stri
  * may have changed after AI refinement).
  */
 export function ensureSpaceCanvas(workspaceRoot: string, folder: string, body: string | null): void {
-  const folderPath = path.join(workspaceRoot, folder);
+  // Completed spaces live under .whim/archive. Recreating the live folder here
+  // would shadow the archived canvas on the subsequent read with a blank copy.
+  const folderPath = resolveSpaceFolder(workspaceRoot, folder);
   if (!fs.existsSync(folderPath)) {
     fs.mkdirSync(folderPath, { recursive: true });
   }
-  const canvasPath = getCanvasPath(workspaceRoot, folder);
+  const canvasPath = path.join(folderPath, CANVAS_FILE);
   if (!fs.existsSync(canvasPath)) {
     const content = body && body.trim() ? body.trim() + '\n' : '';
     fs.writeFileSync(canvasPath, content, 'utf-8');

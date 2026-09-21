@@ -19,6 +19,7 @@ import {
   writeCanvas,
   getCanvasPath,
   initSpaceCanvas,
+  ensureSpaceCanvas,
   saveAttachment,
   resolveAttachmentPath,
   getMimeType,
@@ -316,6 +317,17 @@ describe('readCanvas / writeCanvas', () => {
     const deepFolder = 'deep/nested/folder';
     writeCanvas(tmpDir, deepFolder, 'content');
     expect(fs.existsSync(path.join(tmpDir, deepFolder, 'canvas.md'))).toBe(true);
+  });
+
+  it('does not shadow an archived canvas when ensuring it before a read', () => {
+    const archivedFolder = path.join(tmpDir, '.whim', 'archive', folder);
+    fs.mkdirSync(archivedFolder, { recursive: true });
+    fs.writeFileSync(path.join(archivedFolder, 'canvas.md'), '# Archived notes');
+
+    ensureSpaceCanvas(tmpDir, folder, 'stale database body');
+
+    expect(fs.existsSync(path.join(tmpDir, folder))).toBe(false);
+    expect(readCanvas(tmpDir, folder)).toBe('# Archived notes');
   });
 });
 
