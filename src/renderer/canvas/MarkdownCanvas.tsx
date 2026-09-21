@@ -251,6 +251,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     const rawContentRef = useRef(rawContent);
     const containerRef = useRef<HTMLDivElement>(null);
     const editorRef = useRef<MilkdownEditorHandle>(null);
+    const editorContentPendingRef = useRef(false);
     const rawTextareaRef = useRef<HTMLTextAreaElement>(null);
     const onTitleChangeRef = useRef(onTitleChange);
     const titleFallbackRef = useRef(titleFallback);
@@ -346,11 +347,18 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       emitTitleChange(contentRef.current);
     }, [emitTitleChange]);
 
-    /** Build the full document string for saving. */
+    const getBody = useCallback(() => {
+      if (editorModeRef.current === 'rendered' && editorContentPendingRef.current && editorRef.current?.isReady()) {
+        return editorRef.current.getMarkdown();
+      }
+      return contentRef.current;
+    }, []);
+
+    /** Include real editor revisions that have not reached the debounced listener. */
     const getFullContent = useCallback(() => {
       if (editorModeRef.current === 'raw') return rawContentRef.current;
-      return buildFull(contentRef.current, threadsRef.current);
-    }, [buildFull]);
+      return buildFull(getBody(), threadsRef.current);
+    }, [buildFull, getBody]);
 
     // Merge persona users (for mention roster) with active agent users (for presence display)
     const users: CanvasUser[] = useMemo(
@@ -447,6 +455,14 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       }, AUTOSAVE_DELAY_MS);
     }, [doSave]);
 
+    const onEditorDocumentChanged = useCallback(() => {
+      editorContentPendingRef.current = true;
+      mergeRevisionRef.current++;
+      onDirtyChange(true);
+      onSaveStatus('Saving…');
+      scheduleSave();
+    }, [onDirtyChange, onSaveStatus, scheduleSave]);
+
     const saveNow = useCallback(async () => {
       if (pendingSaveRef.current) {
         clearTimeout(pendingSaveRef.current);
@@ -475,7 +491,11 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
 
     // Content change ORIGINATING in the editor (user typing).
     const onEditorContentChanged = useCallback((newBody: string) => {
-      if (newBody === contentRef.current) return;
+      editorContentPendingRef.current = false;
+      if (newBody === contentRef.current) {
+        markDirtyAndSave();
+        return;
+      }
       setContent(newBody);
       contentRef.current = newBody;
       emitTitleChange(newBody);
@@ -484,15 +504,16 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
 
     // Content change ORIGINATING in the host (voice, drop, links, replies).
     const applyProgrammaticContent = useCallback((newBody: string) => {
-      if (newBody === contentRef.current) return;
+      if (newBody === getBody()) return;
       setContent(newBody);
       contentRef.current = newBody;
       emitTitleChange(newBody);
       if (editorModeRef.current === 'rendered') {
         editorRef.current?.replaceAll(newBody, { animate: true });
       }
+      editorContentPendingRef.current = false;
       markDirtyAndSave();
-    }, [emitTitleChange, markDirtyAndSave]);
+    }, [emitTitleChange, markDirtyAndSave, getBody]);
 
     /** Update threads, re-highlight, and persist (body is unchanged). */
     const updateThreads = useCallback((next: CommentThread[]) => {
@@ -523,7 +544,8 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     const handleToggleMode = useCallback((): { mode: EditorMode; error?: string } => {
       mergeRevisionRef.current++;
       if (editorModeRef.current === 'rendered') {
-        const full = buildFull(contentRef.current, threadsRef.current);
+        const full = getFullContent();
+        editorContentPendingRef.current = false;
         setRawContent(full);
         rawContentRef.current = full;
         setParseError(null);
@@ -554,7 +576,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
         editorModeRef.current = 'rendered';
         return { mode: 'rendered' };
       }
-    }, [emitTitleChange, hasFrontmatter, buildFull]);
+    }, [emitTitleChange, hasFrontmatter, getFullContent]);
 
     const handleRawContentChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const newRaw = e.target.value;
@@ -615,6 +637,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
           } else {
             editorRef.current?.replaceAll(merged.body, { animate: true });
           }
+          editorContentPendingRef.current = false;
           mergeRevisionRef.current++;
           lastDiskContentRef.current = merged.synchronizedDisk;
           unresolvedMergeRef.current = null;
@@ -665,12 +688,12 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
       },
       appendLink: (label: string, url: string) => {
         const link = `[${label}](${url})`;
-        const current = contentRef.current;
+        const current = getBody();
         const separator = current.endsWith('\n') || current === '' ? '' : '\n';
         applyProgrammaticContent(current + separator + link);
       },
       replaceText: (search: string, replacement: string) => {
-        const current = contentRef.current;
+        const current = getBody();
         const idx = current.indexOf(search);
         if (idx === -1) return;
         const updated = current.slice(0, idx) + replacement + current.slice(idx + search.length);
@@ -688,7 +711,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
         if (editorModeRef.current === 'raw') rawTextareaRef.current?.focus();
         else editorRef.current?.focus();
       },
-    }), [saveNow, applyProgrammaticContent, updateThreads, getFullContent, handleToggleMode, handleFrontmatterChange, reconcileExternal]);
+    }), [saveNow, applyProgrammaticContent, updateThreads, getFullContent, getBody, handleToggleMode, handleFrontmatterChange, reconcileExternal]);
 
     // Cmd+S handler
     useEffect(() => {
@@ -719,10 +742,10 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     const handleLinkPickerSelect = useCallback((space: SpaceResult) => {
       setShowLinkPicker(false);
       const link = `[${space.description || 'Untitled'}](whim://space/${space.id})`;
-      const current = contentRef.current;
+      const current = getBody();
       const separator = current.endsWith('\n') || current === '' ? '' : '\n';
       applyProgrammaticContent(current + separator + link);
-    }, [applyProgrammaticContent]);
+    }, [applyProgrammaticContent, getBody]);
 
     // Resolve workspace-relative image srcs into object URLs for display.
     const resolveImageSrc = useCallback(async (src: string): Promise<string | null> => {
@@ -978,13 +1001,13 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
     }, [spaceId, onSaveStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
     function insertAttachment(markdownRef: string) {
-      const current = contentRef.current;
+      const current = getBody();
       const separator = current.endsWith('\n') ? '' : '\n';
       applyProgrammaticContent(current + separator + markdownRef);
     }
 
     const handleRecordingStart = useCallback(() => {
-      const current = contentRef.current;
+      const current = getBody();
       const separator = current.endsWith('\n') ? '\n' : '\n\n';
       applyProgrammaticContent(current + separator + VOICE_PLACEHOLDER + '\n');
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1014,7 +1037,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
           transcription = '_Transcription failed_';
         }
         const block = transcription ? `${audioRef}\n\n${transcription}` : audioRef;
-        const current = contentRef.current;
+        const current = getBody();
         const bareIdx = current.indexOf(VOICE_PLACEHOLDER);
         if (bareIdx >= 0) {
           let lineStart = current.lastIndexOf('\n', bareIdx - 1);
@@ -1035,7 +1058,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
         setTimeout(() => onSaveStatus(''), 2000);
       } catch (err: any) {
         console.error('[canvas-voice] Error:', err);
-        const current = contentRef.current;
+        const current = getBody();
         const bareIdx = current.indexOf(VOICE_PLACEHOLDER);
         if (bareIdx >= 0) {
           let lineStart = current.lastIndexOf('\n', bareIdx - 1);
@@ -1103,6 +1126,7 @@ export const MarkdownCanvas = forwardRef<MarkdownCanvasHandle, MarkdownCanvasPro
             )}
             <div className="markdown-editor-wrap">
               <MilkdownEditor
+                onDocumentChanged={onEditorDocumentChanged}
                 ref={editorRef}
                 initialContent={content}
                 theme={theme}

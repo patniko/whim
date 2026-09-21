@@ -66,6 +66,11 @@ rebuild instead. Before reopening an append segment, recovery durably quarantine
 an incomplete tail in a sibling `.torn-*` file. Complete JSON lacking its final
 newline is retained; incomplete JSON is removed only after its original bytes
 are durable in quarantine. An oversized tail fails closed.
+Replay accepts the timestamped, missing-space no-op updates emitted by older
+clients, while still rejecting invalid durable records. Rebuilds caused by
+compaction or Git reconciliation restore surviving local session mappings,
+canvas-derived titles/search and skills before publishing the replacement
+cache; a failed reconstruction retains the last usable cache for retry.
 
 Git staging and local merge/application hold a storage barrier, excluding
 snapshot publication and source deletion. Bounded deferred requests resume after
@@ -74,6 +79,9 @@ not hold it. Skill documents, scheduled results and report linkbacks use the sam
 worker-owned revision comparison, file fsync, atomic rename and directory sync
 as ordinary canvas saves. Report publication awaits linkback completion instead
 of acknowledging a failed final write.
+Artifact manifests retain a publication-delivery identifier until host-side
+linkback and delivery succeed. Publishing identical bytes retries pending
+delivery, including from another session, without duplicating document links.
 
 ### Startup, lazy features, and save lifecycle
 
@@ -129,11 +137,18 @@ writes and document saves, then acknowledge only successful durable results.
 Failed or missing acknowledgements cancel the operation; release messages
 restore interaction on cancellation and after workspace transitions. Settings
 forms with unapplied edits require explicit Save or Cancel rather than silently
-changing permissions during quit. Native secondary-canvas and settings closes
+changing permissions during quit. Cancelling a failed form save discards that
+form's staged edits and failed operation, without clearing other failed writes.
+Native secondary-canvas and settings closes
 also wait for the handshake. Explicit document Save drains newer revisions
 behind an in-flight write. Navigation retains the current editor if save fails
 or the document changes during close. Browser unload cannot await IPC; it uses
 a leave-page warning for unsaved text, not a claimed durable unload save.
+Editor document revisions are observed synchronously, before debounced Markdown
+callbacks. Merge replies, saves and mode switches read the actual current editor
+document when needed; Markdown serialization is cached by document identity and
+does not run on caret movement. Formatting availability checks do not construct
+editing transactions.
 The mobile editor also serializes revision-aware saves. A rejected timer save
 keeps the draft dirty and shows a retry error; delayed acknowledgements rebase
 newer typing with the browser merge worker instead of overwriting it. Failed
@@ -145,10 +160,13 @@ closing storage. Profile configuration changes only after old-editor flushing
 and new-workspace initialization; initialization failure restores the previous
 destination. Maintenance timers and notification callbacks are generation-scoped.
 Updater installation is excluded from the producer set it must itself drain.
-Recoverable shutdown failures restore workspace services, command admission and
+Recoverable shutdown and workspace-switch failures restore workspace services, command admission and
 document watchers, reconciling changes observed while watches were suspended.
 If storage or restoration fails, commands remain blocked with an explicit
 copy-drafts-and-restart error rather than resuming a partially closed workspace.
+Rollback also stops any services already started for the rejected destination;
+command admission resumes only after the original database, configuration and
+document watches have all been restored.
 
 Web pairing and health responses carry an opaque workspace epoch. Both browser
 transports pin subsequent API requests to it; the epoch includes a process
@@ -160,6 +178,10 @@ the new destination. Older cached browser clients must reload to obtain this
 contract. Offline connection failure is distinct from expired authentication:
 the cached shell offers reconnect/retry without removing device pairing.
 Reconnect health checks never replace the epoch of an already-loaded page.
+The mobile shell retries initial offline authentication on connectivity changes,
+but an authenticated page reconnects its transport in place without unmounting
+capture drafts, canvas editors or chat. Failed document saves remain dirty and
+retryable after reconnect.
 Workspace-change events retain browser editors and stop applying events from
 the replacement workspace. The desktop-web first-handshake resync is ignored
 independently of renderer-load timing, avoiding an initial reload loop.
@@ -192,12 +214,28 @@ requested; tool/request completions update earlier rows across page boundaries.
 Normal-session projections use SQLite-owned temporary databases with bounded
 page caches, removed on close. Ephemeral projections remain exclusively in
 memory, so their retained data still grows with the conversation by design.
+Before attaching retained history whose mirror completeness is unknown, a durable
+`whim.runtime_history_required` source marker is acknowledged in the chat log.
+Later mirrored events cannot hide its older runtime history after a restart
+or projection eviction. The marker is not displayed or replayed as conversation.
+Markerless SDK/CLI mirrors from older versions are also treated as incomplete
+until their retained runtime history is read. If that runtime is unavailable,
+the saved messages remain readable with a visible recovery notice and separate
+saved-history cursors; reopening retries recovery without creating a replacement
+session. History absent from both the saved transcript and the retained runtime
+cannot be reconstructed.
 There are at most eight cached runtime projections. RPC failures preserve the
 last acknowledged cursor for retry; incompatible older runtimes produce an
 explicit upgrade error, not an unbounded fallback. Runtime projection ordinals
 never suppress live events in the unrelated durable-mirror sequence domain.
 Opening unavailable history never creates a replacement session. Initial
-runtime-history loading still scans the retained log in chronological batches
+history reads also reattach preserved active cloud SDK workers, independently
+of whether a mirrored snapshot exists. Known in-memory mirrored sessions do not
+need another attachment, while persisted legacy mirrors receive the conservative
+recovery check above.
+Permission completions correlate by SDK request ID, while actionable history
+and live tiles share the broker's tool-call ID. Initial runtime-history loading
+still scans the retained log in chronological batches
 before returning its newest page; bounded batches do not provide history-size-
 independent first-page latency. Tail-first normalization with cross-page
 completion reconciliation remains necessary for that stronger guarantee.
@@ -226,6 +264,11 @@ The full `@github/copilot` package is retained for terminal sessions and CLI dis
 - `sendChatMessage()` for multi-turn agent chat
 - `listAllAgents()` merges in-memory live state with DB-persisted sessions
 - Sub-agent tracking via `SubagentTracker`
+
+Sends and asynchronous turn cleanup share a per-agent queue. Failed cleanup
+is surfaced and retried from the failed step before a later send is allowed;
+a rejected persistence acknowledgement cannot permanently poison the session
+or let a new turn overtake unfinished cleanup.
 
 ### cloud-agent.ts — Cloud Agent API
 

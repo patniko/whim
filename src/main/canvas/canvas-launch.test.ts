@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import type { Canvas, CanvasAction } from '@github/copilot-sdk';
 vi.mock('../storage', async () => await import('./artifact-store'));
 
 vi.mock('electron', () => ({
@@ -251,6 +252,31 @@ describe('resolveRunCanvasConfig', () => {
     await publish({ instanceId: 'i1', actionName: 'publish', input: { path: 'out.html', title: 'Findings' } });
 
     expect(windowCalls.some(c => c.kind === 'open')).toBe(false);
+  });
+
+  it('waits for linkback delivery before opening a report and retries it on identical publication', async () => {
+    const workingDir = makeSpace('space-delivery', 'canvas_artifacts: true');
+    const onArtifactPublished = vi.fn()
+      .mockRejectedValueOnce(new Error('merge_busy'))
+      .mockResolvedValue(undefined);
+    const config = resolveRunCanvasConfig({
+      workspaceRoot, workingDir, spaceId: 'space-delivery', hooks: { onArtifactPublished },
+    })!;
+    const canvas = config.session.canvases[0] as Canvas & { actionHandlers: Map<string, CanvasAction['handler']> };
+    const handler = canvas.actionHandlers.get('publish')!;
+    const publish = () => handler({
+      sessionId: 's', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID,
+      instanceId: 'i', actionName: 'publish', input: { path: 'out.html', title: 'Findings' },
+    });
+    fs.writeFileSync(path.join(workingDir, 'out.html'), '<p>same</p>');
+
+    expect(await publish()).toEqual({ ok: false, error: 'merge_busy' });
+    expect(windowCalls.some(c => c.kind === 'open')).toBe(false);
+    expect(await publish()).toMatchObject({ ok: true, changed: false });
+    expect(windowCalls.filter(c => c.kind === 'open')).toHaveLength(1);
+    expect(await publish()).toMatchObject({ ok: true, changed: false });
+    expect(windowCalls.filter(c => c.kind === 'open')).toHaveLength(1);
+    expect(onArtifactPublished).toHaveBeenCalledTimes(2);
   });
   it('lets a caller-supplied policy stand in for frontmatter, for comment runs', () => {
     const workingDir = makeSpace('space-p1', 'title: Notes');

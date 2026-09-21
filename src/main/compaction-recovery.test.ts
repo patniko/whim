@@ -224,6 +224,18 @@ describe('durable compaction recovery', () => {
     expect(fs.existsSync(segment)).toBe(true);
   });
 
+  it('compacts baseline-generated missing-row space updates without resurrecting their targets', () => {
+    const history = fs.readFileSync(path.resolve('src/main/fixtures/legacy-space-noop.jsonl'), 'utf8')
+      .trim().split('\n').map(line => JSON.parse(line) as LogEvent);
+    const segment = seed('2026-08', history);
+    expect(compact().ran).toBe(true);
+    expect(fs.existsSync(segment)).toBe(false);
+    expect(replayLog(logRoot, db)).toEqual({ complete: true });
+    expect(db.prepare('SELECT id, description FROM spaces').all()).toEqual([
+      { id: 'legacy-retained', description: 'Retained space' },
+    ]);
+  });
+
   it('replays session-id changes and durable transcript clears in order', () => {
     seed('2024-01', [
       event('agent_session.created', { id: 'parent', session_id: 'old', prompt: 'Synthetic', status: 'completed', created_at: old, updated_at: old }),

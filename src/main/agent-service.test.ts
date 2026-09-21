@@ -90,7 +90,7 @@ vi.mock('./storage', async () => ({
   appendAgentChatEvent: vi.fn().mockReturnValue(1),
   listAgentChatEvents: vi.fn().mockReturnValue([]),
   clearAgentChatEvents: vi.fn(),
-  listAgentHistoryPage: vi.fn(),
+  listAgentHistoryPage: vi.fn().mockResolvedValue({ items: [], total: 0, nextCursor: null, watermark: 1 }),
   openRuntimeHistory: vi.fn(),
   appendRuntimeHistory: vi.fn(),
   queryRuntimeHistory: vi.fn(),
@@ -223,6 +223,12 @@ import { launchSessionInTerminal } from './session';
 import { v4 as uuid } from 'uuid';
 import * as fs from 'fs';
 import { AgentNotifier } from './agents/agent-notifier';
+import Database from 'better-sqlite3';
+import { createPersistenceSchema } from './persistence-schema';
+import { createQueryIndexes } from './query-index';
+import { queryChatHistoryPage } from './chat-history-page';
+import { RuntimeHistory } from './runtime-history';
+import { appendAgentChatEvent, appendRuntimeHistory } from './storage';
 
 describe('buildCliToolsPrompt', () => {
   beforeEach(() => {
@@ -1859,6 +1865,14 @@ describe('getAgentHistoryPage routing', () => {
     vi.mocked(queryRuntimeHistory).mockResolvedValue(emptyPage);
     vi.mocked(listAgentHistoryPage).mockResolvedValue(emptyPage);
     vi.mocked(getAgentSession).mockResolvedValue(null);
+    vi.mocked(appendAgentChatEvent).mockReset().mockResolvedValue(1);
+    vi.mocked(appendRuntimeHistory).mockReset().mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.mocked(listAgentHistoryPage).mockResolvedValue({ ...emptyPage, watermark: 1 });
+    vi.mocked(appendAgentChatEvent).mockReset().mockResolvedValue(1);
+    vi.mocked(appendRuntimeHistory).mockReset().mockResolvedValue(undefined);
   });
 
   it('uses the durable page without fetching a full SDK history', async () => {
@@ -1887,7 +1901,7 @@ describe('getAgentHistoryPage routing', () => {
     // Once imported, new mirrored events must not hide the older runtime history.
     vi.mocked(listAgentHistoryPage).mockResolvedValue({ ...emptyPage, watermark: 1 });
     await getAgentHistoryPage('unmirrored', { limit: 5 });
-    expect(listAgentHistoryPage).toHaveBeenCalledTimes(1);
+    expect(listAgentHistoryPage).toHaveBeenCalledTimes(3);
     expect(queryRuntimeHistory).toHaveBeenCalledTimes(2);
   });
 
@@ -1917,6 +1931,24 @@ describe('getAgentHistoryPage routing', () => {
     expect(mockSession.getEvents).not.toHaveBeenCalled();
   });
 
+  it('does not attach an unmirrored session until its history source is durably acknowledged', async () => {
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'history-source', session_id: mockSession.sessionId, space_id: '__workspace__',
+      prompt: '', status: 'completed', summary: '', working_dir: '/ws',
+      source: 'sdk', persona_handle: null, quoted_text: null, run_location: 'local',
+      created_at: '', updated_at: '',
+    });
+    vi.mocked(appendAgentChatEvent).mockRejectedValueOnce(new Error('source marker unavailable'));
+    await expect(getAgentHistoryPage('history-source')).rejects.toThrow('source marker unavailable');
+    expect(mockClient.resumeSession).not.toHaveBeenCalled();
+    expect(mockClient.createSession).not.toHaveBeenCalled();
+    expect(mockSession.on).not.toHaveBeenCalled();
+    await getAgentHistoryPage('history-source');
+    expect(mockClient.resumeSession).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(appendAgentChatEvent).mock.invocationCallOrder[1])
+      .toBeLessThan(mockClient.resumeSession.mock.invocationCallOrder[0]);
+  });
+
   it('does not create or persist a replacement session merely to read unavailable history', async () => {
     vi.mocked(getAgentSession).mockResolvedValue({
       id: 'expired-history', session_id: 'retained-session', space_id: 'space-1',
@@ -1929,6 +1961,302 @@ describe('getAgentHistoryPage routing', () => {
     expect(mockClient.createSession).not.toHaveBeenCalled();
     expect(updateAgentSessionId).not.toHaveBeenCalled();
     expect(queryRuntimeHistory).not.toHaveBeenCalled();
+  });
+
+  it('reattaches a preserved running cloud worker even when its history is mirrored', async () => {
+    const mirrored = { ...emptyPage, watermark: 12 };
+    const recovered = { ...mirrored, watermark: 0 };
+    vi.mocked(listAgentHistoryPage).mockResolvedValue(mirrored);
+    vi.mocked(queryRuntimeHistory).mockResolvedValue(recovered);
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'preserved-cloud', session_id: mockSession.sessionId, space_id: '__workspace__',
+      prompt: 'Continue remotely', status: 'running', summary: '', working_dir: '/ws',
+      source: 'sdk', persona_handle: null, quoted_text: null, run_location: 'cloud',
+      created_at: '2025-01-01', updated_at: '2025-01-01',
+    });
+    const notify = vi.spyOn(AgentNotifier.prototype, 'notifyRenderer').mockImplementation(() => {});
+    const { registry } = __resetAppRemoteForTests();
+    try {
+      const pages = await Promise.all([
+        getAgentHistoryPage('preserved-cloud'), getAgentHistoryPage('preserved-cloud'),
+      ]);
+      expect(pages).toEqual([recovered, recovered]);
+      expect(mockClient.rpc.sessions.connect).toHaveBeenCalledExactlyOnceWith({ sessionId: mockSession.sessionId });
+      expect(mockClient.resumeSession).toHaveBeenCalledTimes(1);
+      expect(mockClient.rpc.sessions.connect.mock.invocationCallOrder[0])
+        .toBeLessThan(mockClient.resumeSession.mock.invocationCallOrder[0]);
+      expect(mockClient.createSession).not.toHaveBeenCalled();
+      expect(registry.get('preserved-cloud')?.session).toBe(mockSession);
+
+      const delta = mockSession.on.mock.calls.find(([type]) => type === 'assistant.message_delta')![1];
+      delta({ id: 'live-output', data: { messageId: 'next', deltaContent: 'Still working' } });
+      expect(notify).toHaveBeenCalledWith('chat:event:preserved-cloud', expect.objectContaining({
+        type: 'assistant.message_delta', delta: 'Still working',
+      }));
+      const permission = mockClient.resumeSession.mock.calls[0][1].onPermissionRequest({
+        kind: 'write', toolCallId: 'live-permission', intention: 'Update file',
+        fileName: '/ws/file', diff: '', canOfferSessionApproval: false,
+      }, { sessionId: mockSession.sessionId });
+      await vi.waitFor(() => expect(notify).toHaveBeenCalledWith(
+        'chat:event:preserved-cloud', expect.objectContaining({ type: 'approval.needed', requestId: 'live-permission' }),
+      ));
+      approveAgent('preserved-cloud', 'live-permission', true);
+      expect(await permission).toEqual({ kind: 'approve-once' });
+      await mockSession.on.mock.calls.find(([type]) => type === 'session.idle')![1]();
+      expect(notify).toHaveBeenCalledWith('agent:completed', expect.objectContaining({ agentId: 'preserved-cloud' }));
+    } finally {
+      notify.mockRestore();
+    }
+  });
+
+  it.each([
+    ['sdk', 'completed'], ['sdk', 'failed'], ['cli', 'running'],
+  ] as const)('does not attach replaced %s/%s history to the wrong cloud runtime', async (source, status) => {
+    const mirrored = { ...emptyPage, watermark: 12, runtimeSessionId: 'previous-runtime' };
+    vi.mocked(listAgentHistoryPage).mockResolvedValue(mirrored);
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'snapshot', session_id: mockSession.sessionId, space_id: '__workspace__',
+      prompt: '', status, summary: '', working_dir: '/ws',
+      source, persona_handle: null, quoted_text: null, run_location: 'cloud',
+      created_at: '', updated_at: '',
+    });
+    expect(await getAgentHistoryPage('snapshot')).toMatchObject({
+      watermark: 12, items: [{ type: 'session_event', message: expect.stringContaining('may be incomplete') }],
+    });
+    expect(mockClient.rpc.sessions.connect).not.toHaveBeenCalled();
+    expect(mockClient.resumeSession).not.toHaveBeenCalled();
+  });
+
+  it('migrates markerless completed cloud history without sending or enabling remote control', async () => {
+    vi.mocked(listAgentHistoryPage).mockResolvedValue({ ...emptyPage, watermark: 12 });
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'completed-cloud', session_id: mockSession.sessionId, space_id: '__workspace__',
+      prompt: '', status: 'completed', summary: '', working_dir: '/ws',
+      source: 'sdk', persona_handle: null, quoted_text: null, run_location: 'cloud',
+      created_at: '', updated_at: '',
+    });
+    expect(await getAgentHistoryPage('completed-cloud')).toEqual(emptyPage);
+    expect(mockClient.rpc.sessions.connect).toHaveBeenCalledExactlyOnceWith({ sessionId: mockSession.sessionId });
+    expect(mockClient.resumeSession).toHaveBeenCalledTimes(1);
+    expect(mockSession.send).not.toHaveBeenCalled();
+    expect(mockSession.rpc.remote.enable).not.toHaveBeenCalled();
+    expect(mockClient.createSession).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a failed live cloud attachment without replacing the session', async () => {
+    vi.mocked(listAgentHistoryPage).mockResolvedValue({ ...emptyPage, watermark: 12 });
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'offline-cloud', session_id: mockSession.sessionId, space_id: '__workspace__',
+      prompt: '', status: 'running', summary: '', working_dir: '/ws',
+      source: 'sdk', persona_handle: null, quoted_text: null, run_location: 'cloud',
+      created_at: '', updated_at: '',
+    });
+    mockClient.rpc.sessions.connect.mockRejectedValueOnce(new Error('Cloud worker unavailable'));
+    await expect(getAgentHistoryPage('offline-cloud')).rejects.toThrow('Cloud worker unavailable');
+    expect(mockClient.resumeSession).not.toHaveBeenCalled();
+    expect(mockClient.createSession).not.toHaveBeenCalled();
+    expect(updateAgentSessionId).not.toHaveBeenCalled();
+  });
+
+  it.each(['sdk', 'cli'] as const)('retains original %s history after a new mirror suffix and projection/registry recreation', async source => {
+    const db = new Database(':memory:');
+    const runtime = new RuntimeHistory();
+    createPersistenceSchema(db);
+    createQueryIndexes(db);
+    let seq = 0;
+    vi.mocked(listAgentHistoryPage).mockImplementation(async (agentId, request) => queryChatHistoryPage(db, agentId, request));
+    vi.mocked(appendAgentChatEvent).mockImplementation(async (agentId, event) => {
+      db.prepare('INSERT INTO agent_chat_events(agent_id,seq,event_id,type,timestamp,payload) VALUES (?,?,?,?,?,?)')
+        .run(agentId, ++seq, event.event_id, event.type, event.timestamp, event.payload);
+      return seq;
+    });
+    vi.mocked(openRuntimeHistory).mockImplementation(async (...args) => runtime.open(...args));
+    vi.mocked(appendRuntimeHistory).mockImplementation(async (...args) => runtime.append(...args));
+    vi.mocked(queryRuntimeHistory).mockImplementation(async (...args) => runtime.page(...args));
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'partial', session_id: mockSession.sessionId, space_id: '__workspace__',
+      prompt: 'Original prompt', status: 'completed', summary: '', working_dir: '/ws',
+      source, persona_handle: null, quoted_text: null, run_location: 'local',
+      created_at: '', updated_at: '',
+    });
+    const events = [
+      { id: 'old-user', type: 'user.message', timestamp: '2026-09-10', data: { messageId: 'old-user', content: 'Original prompt' } },
+      { id: 'old-answer', type: 'assistant.message', timestamp: '2026-09-10', data: { messageId: 'old-answer', content: 'Original answer' } },
+    ];
+    mockSession.rpc.eventLog.read.mockImplementation(async ({ cursor, max }) => {
+      const start = cursor ? Number(cursor) : 0;
+      const batch = events.slice(start, start + max);
+      return { events: batch, cursor: String(start + batch.length), hasMore: start + batch.length < events.length };
+    });
+    try {
+      expect((await getAgentHistoryPage('partial')).items.map(message => message.id))
+        .toEqual(['user:old-user', 'assistant:old-answer']);
+      const next = { id: 'new-answer', type: 'assistant.message', timestamp: '2026-09-11', data: { messageId: 'new-answer', content: 'New answer' } };
+      events.push(next);
+      const catchAll = mockSession.on.mock.calls.filter(([listener]) => typeof listener === 'function');
+      await Promise.all(catchAll.map(([listener]) => listener(next)));
+      const partial = queryChatHistoryPage(db, 'partial');
+      expect(partial).toMatchObject({ total: 1, watermark: 2, runtimeSessionId: mockSession.sessionId });
+
+      runtime.close();
+      __resetAppRemoteForTests();
+      mockSession.on.mockClear();
+      mockSession.rpc.eventLog.read.mockClear();
+      const latest = await getAgentHistoryPage('partial', { limit: 1 });
+      expect(latest).toMatchObject({ total: 3, watermark: 0 });
+      expect(latest.items.map(message => message.id)).toEqual(['assistant:new-answer']);
+      expect(latest.items[0].sequence).toBe(3);
+      const older = await getAgentHistoryPage('partial', { cursor: latest.nextCursor!, limit: 1 });
+      const oldest = await getAgentHistoryPage('partial', { cursor: older.nextCursor!, limit: 1 });
+      expect(older.items.map(message => message.id)).toEqual(['assistant:old-answer']);
+      expect(oldest.items.map(message => message.id)).toEqual(['user:old-user']);
+      expect(oldest.nextCursor).toBeNull();
+      expect(mockSession.rpc.eventLog.read).toHaveBeenNthCalledWith(1, {
+        cursor: undefined, max: 32, includeEphemeral: false, waitMs: 0,
+      });
+      expect(mockSession.getEvents).not.toHaveBeenCalled();
+      expect(mockClient.createSession).not.toHaveBeenCalled();
+
+      // A later explicit send may replace an expired runtime. Its source
+      // marker must not hide the still-available mirror of the old session.
+      __resetAppRemoteForTests();
+      vi.mocked(getAgentSession).mockResolvedValue({
+        id: 'partial', session_id: 'explicit-replacement', space_id: '__workspace__',
+        prompt: '', status: 'completed', summary: '', working_dir: '/ws',
+        source: 'sdk', persona_handle: null, quoted_text: null, run_location: 'local',
+        created_at: '', updated_at: '',
+      });
+      mockClient.resumeSession.mockClear();
+      const replaced = await getAgentHistoryPage('partial');
+      expect(replaced.items.filter(message => message.type === 'assistant').map(message => message.id)).toEqual(['assistant:new-answer']);
+      expect(replaced.items).toContainEqual(expect.objectContaining({
+        type: 'session_event', message: expect.stringContaining('may be incomplete'),
+      }));
+      expect(replaced.watermark).toBe(2);
+      expect(replaced.legacySession).toBeUndefined();
+      expect(mockClient.resumeSession).not.toHaveBeenCalled();
+    } finally {
+      runtime.close();
+      db.close();
+    }
+  });
+
+  it('preserves an almost-full saved page when its recovery notice needs a separate page', async () => {
+    const saved: import('../shared/paging').ChatHistoryPage = {
+      items: [{ id: 'assistant:large', type: 'assistant', content: '', isStreaming: false, timestamp: 't', sequence: 1 }],
+      total: 1, watermark: 1, nextCursor: null,
+    };
+    const item = saved.items[0];
+    if (item.type !== 'assistant') throw new Error('Invalid fixture');
+    item.content = 'x'.repeat(4 * 1024 * 1024 - Buffer.byteLength(JSON.stringify(saved)));
+    vi.mocked(listAgentHistoryPage).mockResolvedValue(saved);
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'large', session_id: mockSession.sessionId, space_id: '__workspace__',
+      prompt: '', status: 'completed', summary: '', working_dir: '/ws',
+      source: 'sdk', persona_handle: null, quoted_text: null, run_location: 'local',
+      created_at: '', updated_at: '',
+    });
+    mockClient.resumeSession.mockRejectedValueOnce(new Error('Runtime offline'));
+    const notice = await getAgentHistoryPage('large');
+    expect(notice.items).toMatchObject([{ type: 'session_event', message: expect.stringContaining('may be incomplete') }]);
+    expect(Buffer.byteLength(JSON.stringify(notice))).toBeLessThanOrEqual(4 * 1024 * 1024);
+    const older = await getAgentHistoryPage('large', { cursor: notice.nextCursor! });
+    expect(older.items).toEqual(saved.items);
+    expect(older.total).toBe(2);
+    expect(older.nextCursor).toBeNull();
+    expect(mockClient.resumeSession).toHaveBeenCalledTimes(1);
+    expect(Buffer.byteLength(JSON.stringify(older))).toBeLessThanOrEqual(4 * 1024 * 1024);
+  });
+
+  it.each([
+    ['sdk', 'available'], ['cli', 'available'],
+    ['sdk', 'attachment-failure'], ['cli', 'attachment-failure'],
+    ['sdk', 'read-failure'], ['cli', 'read-failure'],
+  ] as const)('recovers markerless legacy %s partial mirrors with %s without losing saved pages', async (source, availability) => {
+    const db = new Database(':memory:');
+    const runtime = new RuntimeHistory();
+    createPersistenceSchema(db);
+    createQueryIndexes(db);
+    const events = [
+      { id: 'original-user', type: 'user.message', timestamp: '2026-09-09', data: { messageId: 'original-user', content: 'Original prompt' } },
+      { id: 'original-answer', type: 'assistant.message', timestamp: '2026-09-09', data: { messageId: 'original-answer', content: 'Original answer' } },
+      { id: 'new-user', type: 'user.message', timestamp: '2026-09-10', data: { messageId: 'new-user', content: 'Follow-up prompt' } },
+      { id: 'new-answer', type: 'assistant.message', timestamp: '2026-09-10', data: { messageId: 'new-answer', content: 'Follow-up answer' } },
+    ];
+    // Reproduce the old version: originals existed only in the disposable
+    // projection, while later SDK events populated a nonzero markerless mirror.
+    runtime.open('legacy-partial', mockSession.sessionId, false);
+    runtime.append('legacy-partial', mockSession.sessionId, events.slice(0, 2).map(event => ({
+      id: event.id, type: event.type, timestamp: event.timestamp, payload: JSON.stringify(event.data),
+    })), '2');
+    let seq = 0;
+    const insert = db.prepare('INSERT INTO agent_chat_events(agent_id,seq,event_id,type,timestamp,payload) VALUES (?,?,?,?,?,?)');
+    for (const event of events.slice(2))
+      insert.run('legacy-partial', ++seq, event.id, event.type, event.timestamp, JSON.stringify(event.data));
+    runtime.close();
+    __resetAppRemoteForTests();
+    expect(queryChatHistoryPage(db, 'legacy-partial')).toMatchObject({ total: 2, watermark: 2 });
+    expect(queryChatHistoryPage(db, 'legacy-partial').runtimeSessionId).toBeUndefined();
+    vi.mocked(listAgentHistoryPage).mockImplementation(async (agentId, request) => queryChatHistoryPage(db, agentId, request));
+    vi.mocked(appendAgentChatEvent).mockImplementation(async (agentId, event) => {
+      insert.run(agentId, ++seq, event.event_id, event.type, event.timestamp, event.payload);
+      return seq;
+    });
+    vi.mocked(openRuntimeHistory).mockImplementation(async (...args) => runtime.open(...args));
+    vi.mocked(appendRuntimeHistory).mockImplementation(async (...args) => runtime.append(...args));
+    vi.mocked(queryRuntimeHistory).mockImplementation(async (...args) => runtime.page(...args));
+    vi.mocked(getAgentSession).mockResolvedValue({
+      id: 'legacy-partial', session_id: mockSession.sessionId, space_id: '__workspace__',
+      prompt: 'Original prompt', status: 'completed', summary: 'Follow-up answer', working_dir: '/ws',
+      source, persona_handle: null, quoted_text: null, run_location: 'local',
+      created_at: '2026-09-09', updated_at: '2026-09-10',
+    });
+    mockSession.rpc.eventLog.read.mockImplementation(async ({ cursor, max }) => {
+      const start = cursor ? Number(cursor) : 0;
+      const batch = events.slice(start, start + Math.min(max, 2));
+      return { events: batch, cursor: String(start + batch.length), hasMore: start + batch.length < events.length };
+    });
+    if (availability === 'attachment-failure') mockClient.resumeSession.mockRejectedValueOnce(new Error('Retained runtime offline'));
+    if (availability === 'read-failure') mockSession.rpc.eventLog.read.mockRejectedValueOnce(new Error('Retained event log offline'));
+    try {
+      let page = await getAgentHistoryPage('legacy-partial', { limit: 1 });
+      if (availability !== 'available') {
+        expect(page).toMatchObject({ total: 3, watermark: 2 });
+        expect(page.items).toMatchObject([
+          { id: 'assistant:new-answer', sequence: 2 },
+          { id: 'history-recovery:legacy-partial', type: 'session_event', message: expect.stringContaining('may be incomplete') },
+        ]);
+        expect(page.items[1]).toMatchObject({ message: expect.stringContaining('Reopen this conversation') });
+        const resumeCount = mockClient.resumeSession.mock.calls.length;
+        const savedOlder = await getAgentHistoryPage('legacy-partial', { cursor: page.nextCursor!, limit: 1 });
+        expect(savedOlder.items[0]).toMatchObject({ id: 'user:new-user', sequence: 1 });
+        expect(savedOlder.total).toBe(3);
+        expect(savedOlder.nextCursor).toBeNull();
+        expect(mockClient.resumeSession).toHaveBeenCalledTimes(resumeCount);
+        expect(queryChatHistoryPage(db, 'legacy-partial').runtimeSessionId).toBe(mockSession.sessionId);
+        runtime.close();
+        __resetAppRemoteForTests();
+        mockSession.on.mockClear();
+        page = await getAgentHistoryPage('legacy-partial', { limit: 1 });
+      }
+      expect(page).toMatchObject({ total: 4, watermark: 0 });
+      const recovered = [...page.items];
+      while (page.nextCursor) {
+        page = await getAgentHistoryPage('legacy-partial', { cursor: page.nextCursor, limit: 1 });
+        expect(page.watermark).toBe(0);
+        recovered.unshift(...page.items);
+      }
+      expect(recovered.map(message => message.id))
+        .toEqual(['user:original-user', 'assistant:original-answer', 'user:new-user', 'assistant:new-answer']);
+      expect(recovered.map(message => message.sequence)).toEqual([1, 2, 3, 4]);
+      expect(mockSession.rpc.eventLog.read.mock.calls.every(([request]) => request.max === 32 && request.waitMs === 0)).toBe(true);
+      expect(mockSession.getEvents).not.toHaveBeenCalled();
+      expect(mockClient.createSession).not.toHaveBeenCalled();
+      expect(updateAgentSessionId).not.toHaveBeenCalled();
+    } finally {
+      runtime.close();
+      db.close();
+    }
   });
 });
 

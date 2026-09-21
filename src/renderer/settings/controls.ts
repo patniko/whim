@@ -23,6 +23,45 @@ import { SETTINGS_HTML } from "./template";
 
 export function mountSettings(host: SettingsHost) {
   host.settingsOverlay.innerHTML = SETTINGS_HTML;
+
+  function formWrites(form: HTMLElement, errorEl: HTMLElement, method: string) {
+    const operations = new Set<Promise<unknown>>();
+    let saving = false;
+    return {
+      async save<T extends object>(write: () => Promise<T>): Promise<T | null> {
+        if (saving) return null;
+        saving = true;
+        const buttons = form.querySelectorAll<HTMLButtonElement>(".persona-form-actions button");
+        buttons.forEach(button => { button.disabled = true; });
+        try {
+          const current = write();
+          operations.add(current);
+          const result = await current;
+          if ("error" in result) {
+            errorEl.textContent = typeof result.error === "string" && result.error
+              ? result.error : "Settings save failed";
+            errorEl.classList.remove("hidden");
+            return null;
+          }
+          return result;
+        } catch (error) {
+          errorEl.textContent = error instanceof Error ? error.message : "Settings save failed";
+          errorEl.classList.remove("hidden");
+          return null;
+        } finally {
+          saving = false;
+          buttons.forEach(button => { button.disabled = false; });
+        }
+      },
+      cancel() {
+        if (saving) return;
+        for (const operation of operations) host.settingWrites.discardFailure(method, operation);
+        host.settingsDrafts.saved(form, host.settingsDrafts.revision(form));
+        form.remove();
+      },
+    };
+  }
+
   const modelSelect = document.getElementById("model-select") as HTMLSelectElement;
   document.getElementById("settings-close")!.addEventListener("click", host.closeSettings);
   host.settingsOverlay
@@ -900,6 +939,8 @@ export function mountSettings(host: SettingsHost) {
 
     const errorEl = document.createElement("div");
     errorEl.className = "persona-form-error hidden";
+    const writes = formWrites(form, errorEl, "saveRuntimes");
+    const id = existing?.id ?? crypto.randomUUID();
 
     const btnRow = document.createElement("div");
     btnRow.className = "persona-form-actions";
@@ -922,24 +963,14 @@ export function mountSettings(host: SettingsHost) {
         return;
       }
 
-      if (existing) {
-        cliRuntimes = cliRuntimes.map((r) =>
-          r.id === existing.id ? { ...r, label, path: rPath } : r,
-        );
-      } else {
-        cliRuntimes.push({ id: crypto.randomUUID(), label, path: rPath });
-      }
-
-      const result = await host.whimAPI.saveRuntimes(cliRuntimes);
-      if (result && "error" in result) {
-        errorEl.textContent = result.error || "Settings save failed";
-        errorEl.classList.remove("hidden");
-        return;
-      }
+      const entry = { id, label, path: rPath };
+      const next = cliRuntimes.some(r => r.id === id)
+        ? cliRuntimes.map(r => r.id === id ? entry : r)
+        : [...cliRuntimes, entry];
+      const result = await writes.save(() => host.whimAPI.saveRuntimes(next));
+      if (!result) return;
       // Update local state with resolved paths from the backend
-      if (result && result.runtimes) {
-        cliRuntimes = result.runtimes;
-      }
+      cliRuntimes = result.runtimes ?? next;
       if (!host.settingsDrafts.saved(form, formRevision)) return;
       form.remove();
       renderRuntimes();
@@ -948,7 +979,7 @@ export function mountSettings(host: SettingsHost) {
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "persona-form-cancel";
     cancelBtn.textContent = "Cancel";
-    cancelBtn.addEventListener("click", () => form.remove());
+    cancelBtn.addEventListener("click", writes.cancel);
 
     btnRow.appendChild(saveBtn);
     btnRow.appendChild(cancelBtn);
@@ -1087,6 +1118,8 @@ export function mountSettings(host: SettingsHost) {
 
     const errorEl = document.createElement("div");
     errorEl.className = "persona-form-error hidden";
+    const writes = formWrites(form, errorEl, "saveExportDestinations");
+    const id = existing?.id ?? crypto.randomUUID();
 
     const btnRow = document.createElement("div");
     btnRow.className = "persona-form-actions";
@@ -1110,21 +1143,13 @@ export function mountSettings(host: SettingsHost) {
         return;
       }
 
-      if (existing) {
-        exportDestinations = exportDestinations.map((d) =>
-          d.id === existing.id ? { ...d, label, path: destPath, defaultFormat } : d,
-        );
-      } else {
-        exportDestinations.push({ id: crypto.randomUUID(), label, path: destPath, defaultFormat });
-      }
-
-      const result = await host.whimAPI.saveExportDestinations(exportDestinations);
-      if ("error" in result) {
-        errorEl.textContent = result.error || "Settings save failed";
-        errorEl.classList.remove("hidden");
-        return;
-      }
-      if ("destinations" in result) exportDestinations = result.destinations;
+      const entry = { id, label, path: destPath, defaultFormat };
+      const next = exportDestinations.some(d => d.id === id)
+        ? exportDestinations.map(d => d.id === id ? entry : d)
+        : [...exportDestinations, entry];
+      const result = await writes.save(() => host.whimAPI.saveExportDestinations(next));
+      if (!result) return;
+      exportDestinations = "destinations" in result ? result.destinations : next;
       if (!host.settingsDrafts.saved(form, formRevision)) return;
       form.remove();
       renderExportDestinations();
@@ -1133,7 +1158,7 @@ export function mountSettings(host: SettingsHost) {
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "persona-form-cancel";
     cancelBtn.textContent = "Cancel";
-    cancelBtn.addEventListener("click", () => form.remove());
+    cancelBtn.addEventListener("click", writes.cancel);
 
     btnRow.appendChild(saveBtn);
     btnRow.appendChild(cancelBtn);
@@ -1298,6 +1323,8 @@ export function mountSettings(host: SettingsHost) {
     // Error
     const errorEl = document.createElement("div");
     errorEl.className = "persona-form-error hidden";
+    const writes = formWrites(form, errorEl, "saveCustomMcp");
+    let savedName: string | undefined;
 
     // Buttons
     const btnRow = document.createElement("div");
@@ -1317,7 +1344,7 @@ export function mountSettings(host: SettingsHost) {
         errorEl.classList.remove("hidden");
         return;
       }
-      if (customMcpServers.some((s) => s.name === name)) {
+      if (customMcpServers.some((s) => s.name === name && s.name !== savedName)) {
         errorEl.textContent = "A server with this name already exists.";
         errorEl.classList.remove("hidden");
         return;
@@ -1340,14 +1367,12 @@ export function mountSettings(host: SettingsHost) {
         ...(type === "stdio" ? { command, args: [] } : { url }),
       };
 
-      customMcpServers.push(entry);
-      const result = await host.whimAPI.saveCustomMcp(customMcpServers);
-      if (result && "error" in result) {
-        customMcpServers = customMcpServers.filter((s) => s !== entry);
-        errorEl.textContent = result.error || "Unable to save CLI tools.";
-        errorEl.classList.remove("hidden");
-        return;
-      }
+      const next = savedName
+        ? customMcpServers.map(s => s.name === savedName ? entry : s)
+        : [...customMcpServers, entry];
+      const result = await writes.save(() => host.whimAPI.saveCustomMcp(next));
+      if (!result) return;
+      savedName = name;
       // Adopt the persisted list — main-side validation may normalize or drop
       // entries, and keeping the optimistic copy would show rows that aren't
       // actually saved.
@@ -1359,7 +1384,7 @@ export function mountSettings(host: SettingsHost) {
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "persona-form-cancel";
     cancelBtn.textContent = "Cancel";
-    cancelBtn.addEventListener("click", () => form.remove());
+    cancelBtn.addEventListener("click", writes.cancel);
 
     btnRow.appendChild(saveBtn);
     btnRow.appendChild(cancelBtn);
@@ -1472,6 +1497,8 @@ export function mountSettings(host: SettingsHost) {
 
     const errorEl = document.createElement("div");
     errorEl.className = "persona-form-error hidden";
+    const writes = formWrites(form, errorEl, "saveCliTools");
+    let savedName = existing?.name;
 
     const btnRow = document.createElement("div");
     btnRow.className = "persona-form-actions";
@@ -1493,25 +1520,19 @@ export function mountSettings(host: SettingsHost) {
         errorEl.classList.remove("hidden");
         return;
       }
-      const duplicate = cliTools.find((t) => t.name === name && t.name !== (existing?.name || ""));
+      const duplicate = cliTools.find((t) => t.name === name && t.name !== savedName);
       if (duplicate) {
         errorEl.textContent = `Tool "${name}" already exists.`;
         errorEl.classList.remove("hidden");
         return;
       }
 
-      if (existing) {
-        cliTools = cliTools.map((t) => (t.name === existing.name ? { name, description } : t));
-      } else {
-        cliTools = [...cliTools, { name, description }];
-      }
-
-      const result = await host.whimAPI.saveCliTools(cliTools);
-      if (result && "error" in result) {
-        errorEl.textContent = result.error || "Unable to save MCP settings.";
-        errorEl.classList.remove("hidden");
-        return;
-      }
+      const next = savedName
+        ? cliTools.map(t => t.name === savedName ? { name, description } : t)
+        : [...cliTools, { name, description }];
+      const result = await writes.save(() => host.whimAPI.saveCliTools(next));
+      if (!result) return;
+      savedName = name;
       cliTools = (await host.whimAPI.listCliTools()) || [];
       if (!host.settingsDrafts.saved(form, formRevision)) return;
       renderCliTools();
@@ -1520,7 +1541,7 @@ export function mountSettings(host: SettingsHost) {
     const cancelBtn = document.createElement("button");
     cancelBtn.className = "persona-form-cancel";
     cancelBtn.textContent = "Cancel";
-    cancelBtn.addEventListener("click", () => form.remove());
+    cancelBtn.addEventListener("click", writes.cancel);
 
     btnRow.appendChild(saveBtn);
     btnRow.appendChild(cancelBtn);

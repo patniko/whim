@@ -41,6 +41,7 @@ import {
 import { completeScheduledRun, readDocument } from '../storage';
 import { deriveMarkdownTitle } from '../../shared/markdown-title';
 import { isScheduledResultDocument, ScheduledResultEditor, SCHEDULED_EDIT_PROMPT } from '../services/scheduled-result-editor';
+import { RUNTIME_HISTORY_REQUIRED_EVENT } from '../../shared/chat-history';
 
 const RESULT_TOOLS = [
   'builtin:view', 'builtin:glob', 'builtin:grep', 'builtin:rg',
@@ -178,6 +179,61 @@ let registry: AgentRegistry;
 let notifier: AgentNotifier;
 let persistence: AgentPersistence;
 let broker: InteractionBroker;
+
+interface TurnQueue {
+  tail: Promise<void>;
+  retry?: () => Promise<void>;
+}
+const turnQueues = new WeakMap<AgentRecord, TurnQueue>();
+
+function queueAgentTurn<T>(record: AgentRecord, operation: () => Promise<T>): Promise<T> {
+  let queue = turnQueues.get(record);
+  if (!queue) {
+    queue = { tail: Promise.resolve() };
+    turnQueues.set(record, queue);
+  }
+  const current = queue;
+  const result = current.tail.then(async () => {
+    if (current.retry) {
+      await current.retry();
+      current.retry = undefined;
+    }
+    return operation();
+  });
+  // The caller observes the failure. The queue remains usable, but a failed
+  // cleanup must be retried before any later send may cross the turn boundary.
+  current.tail = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function queueTurnCleanup(record: AgentRecord, steps: Array<() => Promise<void>>): Promise<void> {
+  let next = 0;
+  const finish = async () => {
+    try {
+      while (next < steps.length) {
+        await steps[next]();
+        next++;
+      }
+    } catch (error) {
+      const message = `Could not finish the previous turn: ${error instanceof Error ? error.message : String(error)}. Retry to save it before sending another message.`;
+      console.error(`[agent-service] ${record.agentId}: ${message}`);
+      notifier.notifyRenderer(`chat:event:${record.agentId}`, { type: 'session.error', message });
+      throw error;
+    }
+  };
+  const completion = queueAgentTurn(record, async () => {
+    const queue = turnQueues.get(record)!;
+    queue.retry = finish;
+    await finish();
+    queue.retry = undefined;
+  });
+  record.turnCompletion = completion;
+  void completion.then(
+    () => { if (record.turnCompletion === completion) record.turnCompletion = undefined; },
+    () => { if (record.turnCompletion === completion) record.turnCompletion = undefined; },
+  );
+  return completion;
+}
 let subagentTracker: SubagentTracker;
 
 /**
@@ -220,7 +276,7 @@ const PERSISTED_CHAT_EVENT_TYPES = new Set<string>([
 ]);
 
 /** Transcript event types that carry bookkeeping rather than conversation. */
-const NON_CONVERSATIONAL_CHAT_EVENT_TYPES = new Set<string>(['assistant.usage']);
+const NON_CONVERSATIONAL_CHAT_EVENT_TYPES = new Set<string>(['assistant.usage', RUNTIME_HISTORY_REQUIRED_EVENT]);
 
 export function initSdkRunner(deps: {
   registry: AgentRegistry;
@@ -1072,11 +1128,14 @@ export async function sendChatMessage(
   // abort flag is what tells them apart — an agent the user put down is one
   // they can pick back up, so drop the spent record and take the same resume
   // path a restarted app would take.
-  const stoppedByUser = record?.aborted === true;
   const stoppedRecord = record;
-  if (stoppedByUser) {
-    await record?.turnCompletion;
-    await record?.scheduledResultEditor?.endTurn(true);
+  if (record?.aborted) {
+    const stopped = record;
+    try {
+      await queueAgentTurn(stopped, async () => { await stopped.scheduledResultEditor?.endTurn(true); });
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : 'Failed to finish the previous turn' };
+    }
     registry.delete(agentId);
     record = undefined;
   }
@@ -1084,7 +1143,13 @@ export async function sendChatMessage(
   if (!record) {
     // Agent not in memory — might be historical (app restarted), or just
     // stopped by the user. Try to re-create a session for it.
-    const result = await resumeAgentSession(agentId);
+    let result: Awaited<ReturnType<typeof resumeAgentSession>>;
+    try {
+      result = await resumeAgentSession(agentId);
+    } catch (error) {
+      if (stoppedRecord) registry.set(agentId, stoppedRecord);
+      return { error: error instanceof Error ? error.message : 'Failed to resume the agent session' };
+    }
     if (!result) {
       // Put the stopped record back rather than leaving the agent missing from
       // the registry entirely — the send failed, the agent should not.
@@ -1098,7 +1163,21 @@ export async function sendChatMessage(
     record.status = 'running';
     record.aborted = false;
   }
-  await record.turnCompletion;
+  const activeRecord = record;
+  try {
+    return await queueAgentTurn(activeRecord, () => sendChatTurn(activeRecord, prompt, attachments, restarted));
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : 'Failed to finish the previous turn' };
+  }
+}
+
+async function sendChatTurn(
+  record: AgentRecord,
+  prompt: string,
+  attachments: Array<{ type: 'file'; path: string; displayName?: string }> | undefined,
+  restarted: boolean,
+): Promise<{ error?: string; restarted?: boolean; messageId?: string }> {
+  const { agentId } = record;
   if (record.scheduledResult || record.scheduledOccurrence) {
     return { error: 'The scheduled run is still running. Wait for it to finish before editing the result.' };
   }
@@ -1272,6 +1351,10 @@ export async function resumeAgentSession(
   const workingDir = persisted.working_dir || workspaceRoot;
   const isCloud = persisted.run_location === 'cloud';
 
+  // This acknowledgement must precede resume and its live subscriptions.
+  // Otherwise a new suffix can make an unmirrored transcript look complete.
+  const runtimeHistory = await persistence.prepareHistoryMirror(agentId, persisted.session_id);
+
   try {
     const mcpServers = getAllMcpServers();
     const findRecord = (sid: string) => registry.findBySessionId(sid);
@@ -1339,6 +1422,7 @@ export async function resumeAgentSession(
       agentId,
       sessionId: persisted.session_id,
       session,
+      runtimeHistory,
       spaceId: persisted.space_id || '__workspace__',
       selectedText: persisted.prompt,
       anchor: { quote: '', prefix: '', suffix: '' },
@@ -1383,7 +1467,7 @@ export async function resumeAgentSession(
     //
     // This is fire-and-forget; if remote re-enable fails, the user can still
     // chat with the resumed session and toggle remote manually.
-    if (isCloud) {
+    if (isCloud && (restoredStatus === 'running' || restoredStatus === 'waiting-approval')) {
       enableRemoteControl(agentId).catch((err: any) => {
         console.warn(`[sdk-runner] Failed to rediscover remote URL on cloud session resume agent=${agentId}:`, err?.message ?? err);
       });
@@ -1954,18 +2038,28 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     }));
   });
 
-  const onIdle = async () => {
-    if (record.aborted) return;
+  let pendingIdle: Promise<void> | undefined;
+  const onIdle = () => {
+    if (record.aborted) return record.turnCompletion;
     // A newly-created session can emit an idle event before its initial prompt
     // has been submitted. Comment launches keep phase='starting' until send()
     // is accepted so that startup idle cannot falsely complete the worker.
-    if (record.phase === 'starting') return;
-    if (record.status === 'running') {
+    if (record.phase === 'starting' || record.status !== 'running') return record.turnCompletion;
+    if (pendingIdle) return pendingIdle;
+    let canvasOutcome: Awaited<ReturnType<typeof reportFinishedCanvasRun>>;
+    const completion = queueTurnCleanup(record, [async () => {
+      if (record.aborted) return;
       record.status = 'completed';
       record.summary = 'Completed';
-      const canvasOutcome = (await reportFinishedCanvasRun(agentId, record.spaceId));
+      canvasOutcome = (await reportFinishedCanvasRun(agentId, record.spaceId));
+    }, async () => {
+      if (record.aborted) return;
       record.status = (await finishScheduledAgent(record, undefined, canvasOutcome === null ? undefined : canvasOutcome === 'published'));
+    }, async () => {
+      if (record.aborted) return;
       (await persistence.updateStatus(record));
+    }, async () => {
+      if (record.aborted) return;
       if (record.status === 'failed') {
         notifier.notifyRenderer('agent:status-changed', {
           agentId, status: record.status, summary: record.summary, spaceId: record.spaceId,
@@ -1984,14 +2078,16 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
         const { cleanupSandboxConfigs } = require('../ai');
         cleanupSandboxConfigs(agentId);
       }
-
+    }, async () => {
+      if (record.aborted) return;
       // Handle comment agent auto-reply + presence cleanup
       if (record.commentContext) {
         // Dynamically import to avoid circular dependency
         const { handleCommentAgentCompletion } = await import('./comment-workflow');
         await handleCommentAgentCompletion(record);
       }
-
+    }, async () => {
+      if (record.aborted) return;
       // Fallback canvas change detection for ALL agent types.
       // The file watcher handles real-time detection while the canvas is open,
       // but this catches changes when the canvas was closed or the watcher missed something.
@@ -2027,12 +2123,15 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
       if (record.ephemeral) {
         setTimeout(() => { releaseCanvasInstances(agentId); endCanvasRun(agentId); registry.delete(agentId); }, 30_000);
       }
-    }
+    }]);
+    pendingIdle = completion;
+    void completion.then(
+      () => { if (pendingIdle === completion) pendingIdle = undefined; },
+      () => { if (pendingIdle === completion) pendingIdle = undefined; },
+    );
+    return completion;
   };
-  observeSession(session, 'session.idle', () => {
-    if (record.aborted || record.phase === 'starting' || record.status !== 'running') return record.turnCompletion;
-    return record.turnCompletion = onIdle();
-  });
+  observeSession(session, 'session.idle', onIdle);
 
   const onError = async (event: any) => {
     if (record.aborted) return;
@@ -2070,11 +2169,7 @@ export function setupAgentEventListeners(session: CopilotSession, record: AgentR
     }
   };
   observeSession(session, 'session.error', (event: any) => {
-    const preceding = record.turnCompletion;
-    const completion = onError(event);
-    return record.turnCompletion = preceding
-      ? Promise.all([preceding, completion]).then(() => undefined)
-      : completion;
+    return queueTurnCleanup(record, [() => onError(event)]);
   });
 
   // Sub-agent tracking via catch-all listener

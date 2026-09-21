@@ -1,6 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { execFile } from 'child_process';
+import * as os from 'os';
+import { execFile, spawn } from 'child_process';
 import type { GitSyncStatus } from '../shared/ipc-contract';
 import { notifyAllWindows } from './notify';
 import { getLogRoot as getLogRootForWhim, migrateLegacyEventLog } from './log-store';
@@ -333,12 +334,45 @@ let commitInFlight = false;
 const COMMIT_DEBOUNCE_MS = 2000;
 
 function runGit(workspaceRoot: string, args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    execFile('git', args, { cwd: workspaceRoot, timeout: 10000 }, (err) => {
-      if (err) reject(err);
-      else resolve();
-    });
+  return runGitStreaming(workspaceRoot, args);
+}
+
+async function runGitStreaming(
+  workspaceRoot: string, args: string[], visitPath?: (file: string) => Promise<void>,
+): Promise<void> {
+  const child = spawn('git', args, { cwd: workspaceRoot, timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
+  let error: Error | undefined;
+  let stderr = '';
+  child.on('error', caught => { error = caught; });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk: string) => { stderr += chunk.slice(0, Math.max(0, 16 * 1024 - stderr.length)); });
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+    child.once('close', (code, signal) => resolve({ code, signal }));
   });
+  child.stdout.setEncoding('utf8');
+  let remainder = '';
+  try {
+    for await (const chunk of child.stdout) {
+      if (!visitPath) continue;
+      remainder += chunk;
+      let start = 0;
+      let end: number;
+      while ((end = remainder.indexOf('\0', start)) !== -1) {
+        if (end > start) await visitPath(remainder.slice(start, end));
+        start = end + 1;
+      }
+      remainder = remainder.slice(start);
+    }
+    const result = await closed;
+    if (error) throw error;
+    if (result.code !== 0) {
+      throw Object.assign(new Error(`git ${args[0]} failed (${result.signal ?? result.code}): ${stderr.trim()}`), result);
+    }
+    if (remainder) throw new Error('Incomplete Git path listing');
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await closed;
+  }
 }
 
 function runGitOutput(workspaceRoot: string, args: string[]): Promise<string> {
@@ -384,30 +418,58 @@ export async function drainGitOperations(): Promise<void> {
   await gitQueue.drain();
 }
 
+async function writeOversizedPathspecs(
+  workspaceRoot: string, args: string[], target: string, exclude: boolean,
+): Promise<number> {
+  const output = await fs.promises.open(target, 'w');
+  let count = 0;
+  try {
+    if (exclude) await output.writeFile('.\0');
+    await runGitStreaming(workspaceRoot, args, async file => {
+      let stat: fs.Stats;
+      try { stat = await fs.promises.lstat(path.join(workspaceRoot, file)); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+        throw error;
+      }
+      if (stat.isFile() && stat.size > 50 * 1024 * 1024) {
+        await output.writeFile(`:(top,${exclude ? 'exclude,' : ''}literal)${file}\0`);
+        count++;
+      }
+    });
+    return count;
+  } finally { await output.close(); }
+}
+
 async function stageWorkspace(workspaceRoot: string): Promise<void> {
-  const paths = (await runGitOutput(workspaceRoot, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']))
-    .split('\0').filter(Boolean);
-  const large: string[] = [];
-  for (const file of new Set(paths)) {
-    try {
-      const stat = await fs.promises.lstat(path.join(workspaceRoot, file));
-      if (stat.isFile() && stat.size > 50 * 1024 * 1024) large.push(file);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  const temporary = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'whim-git-stage-'));
+  try {
+    // Stream both the inventory and exclusions: neither stdout nor argv grows
+    // with the repository. Git still owns ignore, deletion and pathspec semantics.
+    const exclusions = path.join(temporary, 'exclusions');
+    const large = await writeOversizedPathspecs(workspaceRoot,
+      ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], exclusions, true);
+    await runGit(workspaceRoot, ['add', '-A', `--pathspec-from-file=${exclusions}`, '--pathspec-file-nul']);
+    if (large) {
+      const staged = path.join(temporary, 'staged');
+      const stagedLarge = await writeOversizedPathspecs(workspaceRoot,
+        ['diff', '--cached', '--name-only', '-z'], staged, false);
+      if (stagedLarge) {
+        let hasHead = true;
+        try { await runGit(workspaceRoot, ['rev-parse', '--verify', '--quiet', 'HEAD']); }
+        catch (error) {
+          if (!(error instanceof Error) || !('code' in error) || error.code !== 1) throw error;
+          hasHead = false;
+        }
+        await runGit(workspaceRoot, [
+          ...(hasHead ? ['restore', '--staged'] : ['rm', '--cached', '--force', '--ignore-unmatch']),
+          `--pathspec-from-file=${staged}`, '--pathspec-file-nul',
+        ]);
+      }
+      console.warn('[workspace] Excluded oversized files from auto-commit:', { count: large, limitBytes: 50 * 1024 * 1024 });
     }
-  }
-  // Exclude BEFORE add: hashing a giant file and then resetting it is too late.
-  await runGit(workspaceRoot, ['add', '-A', '--', '.', ...large.map(file => `:(top,exclude,literal)${file}`)]);
-  if (large.length) {
-    const staged = new Set((await runGitOutput(workspaceRoot, ['diff', '--cached', '--name-only', '-z'])).split('\0'));
-    const stagedLarge = large.filter(file => staged.has(file));
-    let hasHead = true;
-    try { await runGit(workspaceRoot, ['rev-parse', '--verify', 'HEAD']); }
-    catch { hasHead = false; }
-    if (stagedLarge.length) await runGit(workspaceRoot, hasHead
-      ? ['restore', '--staged', '--', ...stagedLarge]
-      : ['rm', '--cached', '--ignore-unmatch', '--', ...stagedLarge]);
-    console.warn('[workspace] Excluded oversized files from auto-commit:', { count: large.length, limitBytes: 50 * 1024 * 1024 });
+  } finally {
+    await fs.promises.rm(temporary, { recursive: true, force: true });
   }
 }
 

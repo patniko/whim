@@ -3,7 +3,7 @@
  * presence, decorations and interaction UI, but mirror collection stores rather
  * than independently fetching the same lists.
  */
-import type { WhimAPI } from '../ipc-client';
+import { getReadAPI, type WhimAPI } from '../ipc-client';
 import type { AgentListAllItem } from '../../shared/ipc-contract';
 import { spaceStore } from './space-store';
 import { agentStore } from './agent-store';
@@ -62,6 +62,7 @@ export function getRefreshTimings(api: WhimAPI): RefreshTiming[] {
 }
 
 function coordinator(api: WhimAPI): RefreshCoordinator {
+  api = getReadAPI(api);
   let value = coordinators.get(api);
   if (!value) {
     value = new RefreshCoordinator(() => !state || state.api !== api || (state.workspace && state.visible()));
@@ -134,14 +135,16 @@ export function refreshVisibleCollections(): Promise<void> {
 
 export function installIpcBridge(api: WhimAPI, options: BridgeOptions = {}): void {
   if (state) return;
+  api = getReadAPI(api);
   state = {
     api, visible: options.isListVisible ?? (() => true), timer: null,
     pending: new Set(), workspace: true, wasVisible: false,
   };
   api.onSpaceIndexChanged?.(data => {
     if (data.error) console.error('[search]', data.error);
-    else schedule('spaces');
+    else schedule('spaces', 'history');
   });
+  api.onSpaceDeleted?.(() => schedule('spaces', 'history'));
 
   api.onAgentApprovalNeeded(data => {
     agentStore.updateAgent(data.agentId, { status: 'waiting-approval' });
@@ -179,20 +182,20 @@ export function installIpcBridge(api: WhimAPI, options: BridgeOptions = {}): voi
         ...(data.summary === undefined ? {} : { summary: data.summary }),
       });
     }
-    schedule('spaces', 'agents', 'active');
+    schedule('spaces', 'agents', 'active', 'history');
   });
   api.onAgentCompleted(data => {
     // The completion payload does not distinguish success from failure.
     if (data.summary !== undefined) agentStore.updateAgent(data.agentId, { summary: data.summary });
-    schedule('spaces', 'agents', 'active');
+    schedule('spaces', 'agents', 'active', 'history');
   });
   api.onSpaceProcessed(id => {
     agentStore.removeProcessingIntent(id);
-    schedule('spaces', 'agents', 'active');
+    schedule('spaces', 'agents', 'active', 'history');
   });
   api.onSpaceTitleUpdated(data => {
     spaceStore.updateSpaceTitle(data.spaceId, data.title);
-    schedule('spaces');
+    schedule('spaces', 'history');
   });
   api.onRecurrenceApplied(() => schedule('spaces', 'history'));
   api.onSkillsChanged(() => schedule('skills'));
@@ -236,6 +239,7 @@ function isAgentStatus(status: string): status is AgentListAllItem['status'] {
 }
 
 export function loadSpacesSnapshot(api: WhimAPI, options: SnapshotOptions = {}): Promise<void> {
+  api = getReadAPI(api);
   if (state?.api === api && state.visible() && state.workspace) state.wasVisible = true;
   consumePending(api, 'spaces', 'agents', 'active');
   if (options.invalidate) invalidate(api, ['spaces', 'agents', 'active']);
@@ -265,6 +269,7 @@ function loadActiveSessions(api: WhimAPI, options: SnapshotOptions = {}): Promis
 }
 
 export function loadAgentsSnapshot(api: WhimAPI, options: SnapshotOptions = {}): Promise<void> {
+  api = getReadAPI(api);
   consumePending(api, 'agents');
   if (options.invalidate) invalidate(api, ['agents']);
   return coordinator(api).request('agents', async current => {
@@ -281,6 +286,7 @@ export function loadAgentsSnapshot(api: WhimAPI, options: SnapshotOptions = {}):
 }
 
 export function loadSkillsSnapshot(api: WhimAPI, options: SnapshotOptions = {}): Promise<void> {
+  api = getReadAPI(api);
   consumePending(api, 'skills');
   if (options.invalidate) invalidate(api, ['skills']);
   return coordinator(api).request('skills', async current => {
@@ -290,6 +296,7 @@ export function loadSkillsSnapshot(api: WhimAPI, options: SnapshotOptions = {}):
 }
 
 export function loadPersonasSnapshot(api: WhimAPI, options: SnapshotOptions = {}): Promise<void> {
+  api = getReadAPI(api);
   consumePending(api, 'personas');
   if (options.invalidate) invalidate(api, ['personas']);
   return coordinator(api).request('personas', async current => {
@@ -299,6 +306,7 @@ export function loadPersonasSnapshot(api: WhimAPI, options: SnapshotOptions = {}
 }
 
 export function loadHistorySnapshot(api: WhimAPI, limit = 60, options: SnapshotOptions = {}): Promise<void> {
+  api = getReadAPI(api);
   consumePending(api, 'history');
   if (options.invalidate) invalidate(api, ['history']);
   const previousLimit = historyLimits.get(api);
@@ -316,6 +324,7 @@ export function loadHistorySnapshot(api: WhimAPI, limit = 60, options: SnapshotO
 }
 
 export function loadCanvasArtifactsSnapshot(api: WhimAPI): Promise<void> {
+  api = getReadAPI(api);
   consumePending(api, 'artifacts');
   return coordinator(api).request('artifacts', async current => {
     artifactFullRevision += 1;
@@ -331,6 +340,7 @@ export function loadCanvasArtifactsSnapshot(api: WhimAPI): Promise<void> {
 }
 
 export function loadSpaceArtifacts(api: WhimAPI, spaceId: string, force = false): Promise<void> {
+  api = getReadAPI(api);
   return coordinator(api).request(`artifact:${spaceId}`, async current => {
     const fullRevision = artifactFullRevision;
     artifactRevisions.set(spaceId, (artifactRevisions.get(spaceId) ?? 0) + 1);
@@ -350,6 +360,19 @@ export async function openCanvasArtifact(api: WhimAPI, spaceId: string, artifact
     console.error('[refresh] artifact open failed');
     if (generation === workspaceGeneration) await loadSpaceArtifacts(api, spaceId, true);
   }
+}
+
+export async function refreshSpaceActivity(api: WhimAPI): Promise<void> {
+  await Promise.all([
+    loadSpacesSnapshot(api, { invalidate: true }),
+    loadHistorySnapshot(api, 60, { invalidate: true }),
+  ]);
+}
+
+export async function restoreSpace(api: WhimAPI, spaceId: string) {
+  const result = await api.unarchive(spaceId);
+  if (result) await refreshSpaceActivity(api);
+  return result;
 }
 
 export function _resetIpcBridgeForTests(): void {

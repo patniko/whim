@@ -1,4 +1,33 @@
-import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+
+const transition = vi.hoisted(() => ({
+  resume: undefined as (() => void) | undefined,
+  restoreWatchers: vi.fn(async () => {}),
+}));
+vi.mock('../notify', () => ({ notifyAllWindows: vi.fn() }));
+vi.mock('../canvas-watcher', async () => {
+  const actual = await vi.importActual<typeof import('../canvas-watcher')>('../canvas-watcher');
+  return {
+    ...actual,
+    stopAllWatchers: vi.fn(() => {
+      const restore = actual.stopAllWatchers();
+      return async () => {
+        await restore();
+        await transition.restoreWatchers();
+      };
+    }),
+  };
+});
+vi.mock('../producer-tasks', async () => {
+  const actual = await vi.importActual<typeof import('../producer-tasks')>('../producer-tasks');
+  return {
+    ...actual,
+    pauseWorkspaceCommands: () => {
+      transition.resume = actual.pauseWorkspaceCommands();
+      return transition.resume;
+    },
+  };
+});
 
 // ── Capture handlers registered via ipcMain.handle / ipcMain.on ─────
 const handleHandlers = new Map<string, Function>();
@@ -35,6 +64,7 @@ vi.mock('../storage', async () => ({
   withStorageGeneration: (_generation: number, run: () => unknown) => run(),
 
   isInitialized: vi.fn(() => true),
+  getStorageReadiness: vi.fn(() => ({ state: 'ready', pending: 0 })),
   initDatabase: vi.fn(),
   closeDatabase: vi.fn(),
   mergeSessionIds: vi.fn(),
@@ -98,12 +128,17 @@ vi.mock('../voice', () => ({
 // ── Import after mocks ─────────────────────────────────────────────
 import { registerWorkspaceHandlers } from '../../main/ipc/workspace-handlers';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { closeDatabase, initDatabase, mergeSessionIds, syncCanvasContent } from '../storage';
 import { setConfigValue, getConfig, getProfiles, getActiveProfileId, getProfileById, getNextProfile, upsertProfileForPath, setActiveProfile, updateProfile, removeProfileById } from '../config';
 import { initWorkspace, getGitSyncStatus, gitPush, gitPull } from '../workspace';
 import { startSkillWatcher, stopSkillWatcher } from '../skill-watcher';
 import { dialog, BrowserWindow } from 'electron';
 import { flushEditors } from '../lifecycle';
+import { notifyAllWindows } from '../notify';
+import { stopAllWatchers, startWatching, stopWatching, isWatching, refreshWatchedCanvases } from '../canvas-watcher';
+import { runWorkspaceCommand } from '../producer-tasks';
 
 const fakeEvent = { sender: { id: 1 } } as any;
 
@@ -124,7 +159,13 @@ describe('workspace handlers', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    transition.restoreWatchers.mockResolvedValue(undefined);
     vi.mocked(fs.existsSync).mockReturnValue(true as any);
+  });
+
+  afterEach(() => {
+    transition.resume?.();
+    transition.resume = undefined;
   });
 
   it('keeps the old profile and workspace intact when editor flushing fails', async () => {
@@ -143,6 +184,74 @@ describe('workspace handlers', () => {
     expect(setActiveProfile).not.toHaveBeenCalledWith('new');
     expect(setConfigValue).not.toHaveBeenCalledWith('workspace', '/new');
     expect(initDatabase).toHaveBeenLastCalledWith('/mock/workspace/.whim/spaces.db', '/mock/workspace/.whim/events');
+    expect(stopAllWatchers).toHaveBeenCalledOnce();
+    expect(transition.restoreWatchers).toHaveBeenCalledOnce();
+    expect(await runWorkspaceCommand('space:create', () => 'resumed')).toBe('resumed');
+  });
+
+  it('restores the old workspace after a partially failed database close', async () => {
+    vi.mocked(getProfileById).mockReturnValueOnce({ id: 'new', path: '/new', name: null, tint: null });
+    vi.mocked(closeDatabase).mockRejectedValueOnce(new Error('Close interrupted'));
+    await expect(invoke('profiles:activate', 'new')).rejects.toThrow('Close interrupted');
+    expect(initDatabase).toHaveBeenCalledWith('/mock/workspace/.whim/spaces.db', '/mock/workspace/.whim/events');
+    expect(transition.restoreWatchers).toHaveBeenCalledOnce();
+    expect(await runWorkspaceCommand('space:create', () => 'resumed')).toBe('resumed');
+  });
+
+  it('reconciles edits made during a failed switch and keeps the original editor watching afterward', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'whim-workspace-rollback-'));
+    const canvas = path.join(directory, 'canvas.md');
+    fs.writeFileSync(canvas, 'Original content');
+    const delivered = vi.fn();
+    startWatching('original-editor', canvas, delivered);
+    try {
+      vi.mocked(getProfileById).mockReturnValueOnce({ id: 'new', path: '/new', name: null, tint: null });
+      vi.mocked(initDatabase).mockImplementationOnce(async () => {
+        fs.writeFileSync(canvas, 'Edited while the watcher was suspended');
+        throw new Error('Destination unavailable');
+      });
+      await expect(invoke('profiles:activate', 'new')).rejects.toThrow('Destination unavailable');
+      expect(isWatching('original-editor')).toBe(true);
+      expect(delivered).toHaveBeenCalledWith('Edited while the watcher was suspended');
+      fs.writeFileSync(canvas, 'Edited after rollback');
+      await refreshWatchedCanvases();
+      expect(delivered).toHaveBeenLastCalledWith('Edited after rollback');
+    } finally {
+      stopWatching('original-editor');
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps commands blocked if both destination initialization and restoration fail', async () => {
+    vi.mocked(getProfileById).mockReturnValueOnce({ id: 'new', path: '/new', name: null, tint: null });
+    vi.mocked(initDatabase)
+      .mockRejectedValueOnce(new Error('Destination unavailable'))
+      .mockRejectedValueOnce(new Error('Old workspace unavailable'));
+    await expect(invoke('profiles:activate', 'new')).rejects.toThrow('restoration failed');
+    const write = vi.fn();
+    await expect(runWorkspaceCommand('canvas:write', write)).rejects.toThrow('transition');
+    expect(write).not.toHaveBeenCalled();
+    expect(transition.restoreWatchers).not.toHaveBeenCalled();
+  });
+
+  it('blocks writes if rollback indexing fails after new workspace configuration was applied', async () => {
+    vi.mocked(getProfileById).mockReturnValueOnce({ id: 'new', path: '/new', name: null, tint: null });
+    vi.mocked(startSkillWatcher).mockRejectedValueOnce(new Error('New services unavailable'));
+    vi.mocked(syncCanvasContent)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('Old indexing unavailable'));
+    await expect(invoke('profiles:activate', 'new')).rejects.toThrow('restoration failed');
+    expect(setConfigValue).toHaveBeenCalledWith('workspace', '/new');
+    expect(initDatabase).toHaveBeenLastCalledWith('/mock/workspace/.whim/spaces.db', '/mock/workspace/.whim/events');
+    await expect(runWorkspaceCommand('canvas:write', vi.fn())).rejects.toThrow('transition');
+  });
+
+  it('does not resume commands if restoring the original document watchers fails', async () => {
+    vi.mocked(getProfileById).mockReturnValueOnce({ id: 'new', path: '/new', name: null, tint: null });
+    vi.mocked(initDatabase).mockRejectedValueOnce(new Error('Destination unavailable'));
+    transition.restoreWatchers.mockRejectedValueOnce(new Error('Watch unavailable'));
+    await expect(invoke('profiles:activate', 'new')).rejects.toThrow('restoration failed');
+    await expect(runWorkspaceCommand('space:create', vi.fn())).rejects.toThrow('transition');
   });
 
   describe('workspace:clear', () => {
@@ -163,7 +272,7 @@ describe('workspace handlers', () => {
 
     it('sends workspace:changed with null to all windows', async () => {
       await invoke('workspace:clear');
-      expect(mockSend).toHaveBeenCalledWith('workspace:changed', null);
+      expect(notifyAllWindows).toHaveBeenCalledWith('workspace:changed', null);
     });
 
     it('returns ok', async () => {
@@ -198,7 +307,7 @@ describe('workspace handlers', () => {
 
       await invoke('workspace:select');
 
-      expect(mockSend).toHaveBeenCalledWith('workspace:changed', '/new/workspace');
+      expect(notifyAllWindows).toHaveBeenCalledWith('workspace:changed', '/new/workspace');
     });
 
     it('saves workspace to config', async () => {
@@ -297,7 +406,7 @@ describe('workspace handlers', () => {
       expect(closeDatabase).toHaveBeenCalled();
       expect(initDatabase).toHaveBeenCalled();
       expect(setActiveProfile).toHaveBeenCalledWith('b');
-      expect(mockSend).toHaveBeenCalledWith('workspace:changed', '/personal');
+      expect(notifyAllWindows).toHaveBeenCalledWith('workspace:changed', '/personal');
       expect(mockSend).toHaveBeenCalledWith('profiles:changed', expect.anything());
     });
 
@@ -359,6 +468,15 @@ describe('workspace handlers', () => {
   });
 
   describe('profiles:remove', () => {
+    it('removes an inactive profile without switching or flushing the active workspace', async () => {
+      vi.mocked(getActiveProfileId).mockReturnValueOnce('a');
+      expect(await invoke('profiles:remove', 'b')).toEqual({ ok: true });
+      expect(removeProfileById).toHaveBeenCalledWith('b');
+      expect(flushEditors).not.toHaveBeenCalled();
+      expect(closeDatabase).not.toHaveBeenCalled();
+      expect(setActiveProfile).not.toHaveBeenCalled();
+    });
+
     it('removes and switches to a remaining profile when the active one is removed', async () => {
       vi.mocked(getActiveProfileId).mockReturnValueOnce('a');
       vi.mocked(getProfiles).mockReturnValueOnce([{ id: 'b', path: '/personal', name: null, tint: null }] as any);
@@ -375,7 +493,7 @@ describe('workspace handlers', () => {
       const result = await invoke('profiles:remove', 'a');
       expect(result).toEqual({ ok: true });
       expect(setConfigValue).toHaveBeenCalledWith('workspace', null);
-      expect(mockSend).toHaveBeenCalledWith('workspace:changed', null);
+      expect(notifyAllWindows).toHaveBeenCalledWith('workspace:changed', null);
     });
 
     it('skips missing fallback profile paths when the active profile is removed', async () => {
@@ -404,7 +522,7 @@ describe('workspace handlers', () => {
       expect(result).toEqual({ ok: true });
       expect(setConfigValue).toHaveBeenCalledWith('workspace', null);
       expect(setActiveProfile).toHaveBeenCalledWith(null);
-      expect(mockSend).toHaveBeenCalledWith('workspace:changed', null);
+      expect(notifyAllWindows).toHaveBeenCalledWith('workspace:changed', null);
     });
   });
 

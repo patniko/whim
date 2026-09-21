@@ -58,6 +58,8 @@ export interface CanvasArtifactManifest {
   updatedAt: string;
   /** Set on the first successful publish; absent while an artifact is only bound. */
   publishedAt?: string;
+  /** Changed content whose host-side publication delivery has not been acknowledged. */
+  pendingPublicationId?: string;
 }
 
 export interface CanvasArtifact extends CanvasArtifactManifest {
@@ -396,10 +398,33 @@ export function publishArtifact(input: PublishArtifactInput): Promise<PublishArt
       hasData: hasData || existing?.hasData === true,
       updatedAt: now,
       publishedAt: now,
+      ...(changed ? { pendingPublicationId: crypto.randomUUID() } : {}),
     };
 
     writeManifest(dir, manifest);
     return { artifact: toArtifact(dir, manifest), changed };
+  });
+}
+
+export interface AcknowledgeArtifactPublicationInput {
+  workspaceRoot: string;
+  folder: string;
+  artifactId: string;
+  publicationId: string;
+}
+
+/** A late delivery must not acknowledge a newer publication of the same artifact. */
+export function acknowledgeArtifactPublication(input: AcknowledgeArtifactPublicationInput): Promise<boolean> {
+  if (typeof input.publicationId !== 'string' || !input.publicationId) {
+    throw new CanvasArtifactError('invalid_publication_id', 'A publication delivery id is required');
+  }
+  const dir = resolveArtifactDir(input.workspaceRoot, input.folder, input.artifactId);
+  return withArtifactLock(dir, () => {
+    const existing = readManifest(dir);
+    if (!existing || existing.pendingPublicationId !== input.publicationId) return false;
+    delete existing.pendingPublicationId;
+    writeManifest(dir, existing);
+    return true;
   });
 }
 

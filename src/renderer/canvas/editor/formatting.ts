@@ -1,9 +1,9 @@
 import { setBlockType, toggleMark, wrapIn } from '@milkdown/kit/prose/commands';
 import { closeHistory, redo, undo } from '@milkdown/kit/prose/history';
-import type { Node, NodeRange } from '@milkdown/kit/prose/model';
+import { Fragment, NodeRange, type Node, type NodeType } from '@milkdown/kit/prose/model';
 import { liftListItem, sinkListItem, splitListItem, wrapRangeInList } from '@milkdown/kit/prose/schema-list';
 import { AllSelection, EditorState, Selection, TextSelection, type Command } from '@milkdown/kit/prose/state';
-import { liftTarget } from '@milkdown/kit/prose/transform';
+import { findWrapping, liftTarget } from '@milkdown/kit/prose/transform';
 import type { FormatMark } from './geometry';
 
 export const TEXT_STYLES = [
@@ -60,6 +60,27 @@ function listKind(range: NodeRange): ListKind | null {
   return range.parent.type.name === 'ordered_list' ? 'orderedList' : 'bulletList';
 }
 
+function canWrapList(state: EditorState, type: NodeType): boolean {
+  const { $from, $to } = contentSelection(state);
+  const range = $from.blockRange($to);
+  if (!range) return false;
+  if (wrapRangeInList(null, range, type)) return true;
+
+  // The command normalizes headings/code to paragraphs before wrapping.
+  // Probe that content shape without constructing or applying a transaction.
+  const paragraph = state.schema.nodes.paragraph;
+  const first = range.parent.child(range.startIndex);
+  if (!first.isTextblock || first.type === paragraph ||
+    !range.parent.canReplaceWith(range.startIndex, range.startIndex + 1, paragraph)) return false;
+  const blocks = [paragraph.create(null, first.content)];
+  for (let index = range.startIndex + 1; index < range.endIndex; index++) {
+    blocks.push(range.parent.child(index));
+  }
+  const projected = range.parent.copy(Fragment.fromArray(blocks));
+  const inner = new NodeRange(projected.resolve(0), projected.resolve(projected.content.size), 0);
+  return findWrapping(range, type, null, inner) !== null;
+}
+
 export function toggleList(kind: ListKind): Command {
   return (state, dispatch) => {
     if (state.selection instanceof AllSelection) {
@@ -78,6 +99,7 @@ export function toggleList(kind: ListKind): Command {
     if (existing && listKind(existing) === kind) {
       return liftListItem(itemType)(state, dispatch);
     }
+    if (!dispatch) return existing !== null || canWrapList(state, type);
 
     const tr = state.tr;
     let range = existing;
@@ -101,7 +123,7 @@ export function toggleList(kind: ListKind): Command {
         listType: kind === 'orderedList' ? 'ordered' : 'bullet',
       });
     });
-    dispatch?.(closeHistory(tr).scrollIntoView());
+    dispatch(closeHistory(tr).scrollIntoView());
     return true;
   };
 }
@@ -128,6 +150,7 @@ function inlineCode(): Command {
   return (state, dispatch) => {
     const type = state.schema.marks.inlineCode;
     if (!toggleMark(type)(state)) return false;
+    if (!dispatch) return true;
     const { from, to, empty } = state.selection;
     const tr = state.tr;
     if (markActive(state, 'inlineCode')) {
@@ -138,7 +161,7 @@ function inlineCode(): Command {
     } else {
       tr.removeMark(from, to).addMark(from, to, type.create());
     }
-    dispatch?.(tr.scrollIntoView());
+    dispatch(tr.scrollIntoView());
     return true;
   };
 }

@@ -77,7 +77,7 @@ export interface AgentRecord {
   canvasSnapshot?: { path: string; hashBefore: string };
   scheduledResult?: ScheduledResultContext;
   scheduledResultEditor?: ScheduledResultEditor;
-  /** Follow-up messages wait for the preceding turn's asynchronous cleanup. */
+  /** Pending asynchronous cleanup; failed steps are retried by the turn queue. */
   turnCompletion?: Promise<void>;
   scheduledOccurrence?: { workspaceRoot: string; invocation: ScheduledInvocation };
   /** True when session was recreated after the original SDK session expired. */
@@ -112,7 +112,7 @@ export interface AgentRecord {
   runLocation?: 'local' | 'cloud';
   /** When true, this agent is ephemeral — no DB persistence, in-memory session FS. */
   ephemeral?: boolean;
-  /** This session's older events are served by the bounded runtime projection. */
+  /** Cached routing hint; the durable history source marker survives restarts. */
   runtimeHistory?: boolean;
   /**
    * When true, this agent is the dedicated supervisor session launched by the

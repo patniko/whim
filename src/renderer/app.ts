@@ -468,6 +468,8 @@ import {
   loadHistorySnapshot,
   loadCanvasArtifactsSnapshot,
   refreshVisibleCollections,
+  refreshSpaceActivity,
+  restoreSpace,
   getWorkspaceGeneration,
   openCanvasArtifact as openCanvasArtifactAndReconcile,
 } from './state/ipc-bridge';
@@ -2156,7 +2158,7 @@ function insertSpaceOptimistically(space: Space): void {
 async function loadSpaces(): Promise<void> {
   // Mutation callers invalidate an older flight; window/show readers use the
   // bridge's shared hydration path without creating another refresh owner.
-  await loadSpacesSnapshot(bridgeApi, { invalidate: true });
+  await refreshSpaceActivity(bridgeApi);
 }
 
 function render(): void {
@@ -3592,11 +3594,10 @@ async function deleteSpace(id: string): Promise<void> {
 
 // @ts-ignore - called from onclick in HTML
 async function unarchiveIntent(id: string): Promise<void> {
-  const result = await whimAPI.unarchive(id);
+  const result = await restoreSpace(bridgeApi, id);
   if (result) {
     showStatus('✓ Restored to Spaces');
     setTimeout(hideStatus, 2000);
-    await loadSpaces();
   }
 }
 

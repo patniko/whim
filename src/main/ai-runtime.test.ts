@@ -257,8 +257,21 @@ describe('client lifecycle', () => {
   });
 
   it('coalesces concurrent initCopilot() calls into one spawn', async () => {
-    await Promise.all([(await initCopilot()), (await initCopilot()), (await initCopilot())]);
+    let release!: () => void;
+    startupBehavior.start.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    const starts = [initCopilot(), initCopilot(), initCopilot()];
+    const completed = vi.fn();
+    void Promise.all(starts).then(completed);
+    try {
+      await vi.waitFor(() => expect(startupBehavior.start).toHaveBeenCalledTimes(1));
+      expect(spawned).toHaveLength(1);
+      expect(completed).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+    await Promise.all(starts);
     expect(spawned).toHaveLength(1);
+    expect(getCopilotClient()).not.toBeNull();
   });
 
   it('reuses an already initialized client', async () => {
@@ -284,7 +297,17 @@ describe('client lifecycle', () => {
 
   it('coalesces concurrent ephemeral starts into one spawn', async () => {
     await initCopilot();
-    const [a, b] = await Promise.all([(await ensureEphemeralCopilotClient()), (await ensureEphemeralCopilotClient())]);
+    let release!: () => void;
+    startupBehavior.start.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    const starts = [ensureEphemeralCopilotClient(), ensureEphemeralCopilotClient()];
+    try {
+      await vi.waitFor(() => expect(startupBehavior.start).toHaveBeenCalledTimes(2));
+      expect(spawned).toHaveLength(2);
+      expect(getEphemeralCopilotClient()).toBeNull();
+    } finally {
+      release();
+    }
+    const [a, b] = await Promise.all(starts);
     expect(a).toBe(b);
     expect(spawned).toHaveLength(2);
   });

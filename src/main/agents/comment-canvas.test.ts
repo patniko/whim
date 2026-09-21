@@ -19,6 +19,7 @@ vi.mock('electron', () => ({
   app: { getPath: () => os.tmpdir() },
   session: { fromPartition: () => ({ protocol: { handle: vi.fn() }, setPermissionRequestHandler: vi.fn() }) },
 }));
+vi.mock('../notify', () => ({ notifyAllWindows: vi.fn() }));
 
 vi.mock('../ai', () => ({
   getCopilotClient: () => ({

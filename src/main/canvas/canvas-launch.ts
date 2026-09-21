@@ -105,11 +105,11 @@ function defaultHooks(run: CanvasRunContext, agentId: string | undefined, extra?
       }
       return extra?.onArtifactBound?.(artifact, ctx);
     },
-    onArtifactPublished: (artifact, ctx) => {
+    onArtifactPublished: async (artifact, ctx) => {
+      await extra?.onArtifactPublished?.(artifact, ctx);
       show(artifact, ctx.instanceId);
       announce(artifact);
       if (agentId) recordCanvasPublication(agentId, artifact);
-      return extra?.onArtifactPublished?.(artifact, ctx);
     },
     onArtifactChanged: (artifact, ctx) => {
       setArtifactWindowTitle({ spaceId: run.spaceId, artifactId: artifact.artifactId }, artifact.title);

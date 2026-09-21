@@ -77,10 +77,13 @@ function App() {
   }, [connectionAttempt]);
 
   useEffect(() => {
-    const reconnect = () => setConnectionAttempt(attempt => attempt + 1);
+    const reconnect = () => {
+      // An authenticated app owns drafts; its transport reconnects in place.
+      if (authState === 'offline') setConnectionAttempt(attempt => attempt + 1);
+    };
     window.addEventListener('online', reconnect);
     return () => window.removeEventListener('online', reconnect);
-  }, []);
+  }, [authState]);
 
   if (authState === 'offline') {
     return <main className="login">

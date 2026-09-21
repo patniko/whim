@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Skill, SkillInvocationResult } from '../../shared/types';
+import type { AgentSession, Skill, SkillInvocationResult } from '../../shared/types';
 
 // Mock the database and other native-dependent modules so we can import
 // the scheduler without loading better-sqlite3.
@@ -58,11 +58,6 @@ import {
   migrateLegacySkillSchedule, recordScheduledRunLaunch, saveSkillSchedule,
 } from './skill-schedule-store';
 
-/**
- * Tests for the pure schedule-computation function. The async tick loop
- * (checkAndRunDueSkills) is harder to exercise without a real DB; we rely on
- * integration testing for that path.
- */
 describe('computeNextRunAt', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -115,6 +110,46 @@ describe('computeNextRunAt', () => {
       expect(invokeSkill).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps scheduling after a completed occurrence gets an interactive approval-waiting followup', async () => {
+      const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
+      vi.setSystemTime(new Date(schedule.nextRunAt!));
+      await checkAndRunDueSkills();
+      const first = getSkillSchedule(workspace, skill.id)!.lastRun!;
+      completeScheduledRun(workspace, schedule.id, first.id, {
+        status: 'ready', summary: 'Original daily result', spaceId: 'result',
+      });
+      const completed = listScheduledRuns(workspace, schedule.id)[0];
+      const followup: AgentSession = {
+        id: 'agent', session_id: 'session', space_id: 'result', prompt: 'Investigate this result',
+        status: 'waiting-approval', summary: 'Waiting for an interactive approval',
+        source: 'sdk', run_location: 'local', working_dir: workspace,
+        persona_handle: null, quoted_text: null,
+        created_at: first.startedAt, updated_at: '2024-01-01T10:00:00.000Z',
+      };
+      vi.mocked(getAgentSession).mockImplementation(async id => id === followup.id ? followup : null);
+      vi.mocked(getAgentSessionId).mockImplementation(id => id === followup.id ? followup.session_id : null);
+      vi.mocked(invokeSkill).mockResolvedValue({
+        space: { id: 'next-result' }, agent: { agentId: 'next-agent', sessionId: 'next-session' }, canvasContent: '',
+      } as SkillInvocationResult);
+
+      for (const day of [2, 3]) {
+        vi.setSystemTime(new Date(`2024-01-0${day}T09:00:00Z`));
+        await checkAndRunDueSkills();
+        const next = getSkillSchedule(workspace, skill.id)!.lastRun!;
+        expect(next).toMatchObject({
+          scheduledAt: `2024-01-0${day}T09:00:00.000Z`, status: 'running',
+          attempt: 1, agentId: 'next-agent',
+        });
+        expect(next.id).not.toBe(first.id);
+        completeScheduledRun(workspace, schedule.id, next.id, { status: 'ready', summary: 'Next daily result' });
+      }
+
+      expect(invokeSkill).toHaveBeenCalledTimes(3);
+      expect(listScheduledRuns(workspace, schedule.id)[0]).toEqual(completed);
+      expect(followup.status).toBe('waiting-approval');
+      expect(abortAgent).not.toHaveBeenCalled();
+    });
+
     it('recovers interrupted read-only claims and retries the same occurrence', async () => {
       const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
       vi.setSystemTime(new Date(schedule.nextRunAt!));
@@ -160,12 +195,12 @@ describe('computeNextRunAt', () => {
       expect(getSkillSchedule(workspace, skill.id)?.lastSuccessfulRun).toMatchObject({ status: 'ready', summary: 'Report published' });
     });
 
-    it('stops a live timed-out agent before marking its run failed or launching again', async () => {
+    it.each(['running', 'waiting-approval'] as const)('stops an unfinished %s agent on timeout before launching again', async status => {
       const schedule = saveSkillSchedule(workspace, skill.id, 'daily', '09:00', null, options);
       vi.setSystemTime(new Date(schedule.nextRunAt!));
       const run = claimScheduledRun(workspace, schedule.id)!;
       recordScheduledRunLaunch(workspace, schedule.id, run.id, { spaceId: 's', agentId: 'agent' });
-      vi.mocked(getAgentSession).mockResolvedValue({ status: 'running' } as NonNullable<Awaited<ReturnType<typeof getAgentSession>>>);
+      vi.mocked(getAgentSession).mockResolvedValue({ status } as NonNullable<Awaited<ReturnType<typeof getAgentSession>>>);
       vi.mocked(getAgentSessionId).mockReturnValue('session');
       await checkAndRunDueSkills(true);
       expect(getSkillSchedule(workspace, skill.id)?.lastRun?.status).toBe('running');

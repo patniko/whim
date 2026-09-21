@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { startWatching, stopWatching, markSelfWrite, isWatching, stopAllWatchers } from './canvas-watcher';
+import { startWatching, stopWatching, markSelfWrite, isWatching, stopAllWatchers, refreshWatchedCanvases } from './canvas-watcher';
 
 describe('canvas-watcher', () => {
   let tmpDir: string;
@@ -16,6 +16,7 @@ describe('canvas-watcher', () => {
 
   afterEach(() => {
     stopAllWatchers();
+    vi.restoreAllMocks();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -43,6 +44,59 @@ describe('canvas-watcher', () => {
     expect(onChange).toHaveBeenCalledWith('# Agent modified\n');
 
     stopWatching('space1');
+  });
+
+  it('retries a failed delivery without another disk revision or fs event', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onChange = vi.fn().mockRejectedValueOnce(new Error('Storage busy')).mockResolvedValue(undefined);
+    startWatching('space1', canvasPath, onChange);
+    fs.writeFileSync(canvasPath, '# Retry this revision\n');
+    await expect(refreshWatchedCanvases()).rejects.toThrow('Storage busy');
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    await refreshWatchedCanvases();
+    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(onChange.mock.calls.map(call => call[0])).toEqual(['# Retry this revision\n', '# Retry this revision\n']);
+  });
+
+  it('serializes refreshes and reads the newest revision after a pending delivery', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const delivered: string[] = [];
+    const onChange = vi.fn(async (content: string) => {
+      if (content === '# First\n') { entered(); await pending; }
+      delivered.push(content);
+    });
+    startWatching('space1', canvasPath, onChange);
+    fs.writeFileSync(canvasPath, '# First\n');
+    const first = refreshWatchedCanvases();
+    await ready;
+    fs.writeFileSync(canvasPath, '# Superseded\n');
+    const second = refreshWatchedCanvases();
+    fs.writeFileSync(canvasPath, '# Newest\n');
+    const third = refreshWatchedCanvases();
+    expect(onChange).toHaveBeenCalledTimes(1);
+    release();
+    await Promise.all([first, second, third]);
+    expect(delivered).toEqual(['# First\n', '# Newest\n']);
+    await refreshWatchedCanvases();
+    expect(onChange).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains self-write suppression after a failed external delivery', async () => {
+    const onChange = vi.fn().mockRejectedValueOnce(new Error('Storage busy')).mockResolvedValue(undefined);
+    startWatching('space1', canvasPath, onChange);
+    fs.writeFileSync(canvasPath, '# External\n');
+    await expect(refreshWatchedCanvases()).rejects.toThrow('Storage busy');
+    markSelfWrite('space1', '# Editor\n');
+    fs.writeFileSync(canvasPath, '# Editor\n');
+    await refreshWatchedCanvases();
+    expect(onChange).toHaveBeenCalledTimes(1);
+    fs.writeFileSync(canvasPath, '# New external\n');
+    await refreshWatchedCanvases();
+    expect(onChange).toHaveBeenLastCalledWith('# New external\n');
+    expect(onChange).toHaveBeenCalledTimes(2);
   });
 
   it('ignores self-writes when markSelfWrite is called', async () => {

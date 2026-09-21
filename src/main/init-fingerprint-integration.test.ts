@@ -28,6 +28,8 @@ import {
   fingerprintPathFor,
   readFingerprint,
   SCHEMA_VERSION,
+  computeFingerprint,
+  writeFingerprint,
 } from './db-fingerprint';
 import { listLogFiles } from './log-store';
 
@@ -52,6 +54,22 @@ afterEach(() => {
 });
 
 describe('initDatabase fingerprint fast path', () => {
+  it('upgrades schema-4 history containing the baseline writer\'s missing-row space updates', () => {
+    initDatabase(dbPath, logRoot);
+    createSpace({ body: 'Obsolete cache contents' });
+    closeDatabase();
+    const file = listLogFiles(logRoot)[0];
+    fs.copyFileSync(path.resolve('src/main/fixtures/legacy-space-noop.jsonl'), file);
+    writeFingerprint(fingerprintPathFor(dbPath), { ...computeFingerprint(logRoot, dbPath), schemaVersion: 4 });
+
+    initDatabase(dbPath, logRoot);
+    expect(listSpaces()).toMatchObject([{ id: 'legacy-retained', description: 'Retained space' }]);
+    expect(readFingerprint(fingerprintPathFor(dbPath))?.schemaVersion).toBe(SCHEMA_VERSION);
+    closeDatabase();
+    initDatabase(dbPath, logRoot);
+    expect(listSpaces().map(space => space.id)).toEqual(['legacy-retained']);
+  });
+
   it('retains a complete final JSON event without LF before admitting another durable save', () => {
     initDatabase(dbPath, logRoot);
     createSpace({ body: 'Before restart' });

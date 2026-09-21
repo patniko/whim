@@ -8,6 +8,7 @@ vi.mock('electron', () => ({
   app: { getPath: () => '/mock/electron-path' },
   BrowserWindow: { getAllWindows: () => [] },
 }));
+vi.mock('./notify', () => ({ notifyAllWindows: vi.fn() }));
 
 // Mock eventlog
 vi.mock('./eventlog', () => ({
@@ -27,6 +28,7 @@ vi.mock('./workspace', () => ({
 
 import { initDatabase, listSkills } from './database';
 import { syncAllSkills, getSkillsDir, ensureSkillsDir } from './skill-watcher';
+import { notifyAllWindows } from './notify';
 
 let testDir: string;
 let wsRoot: string;
@@ -98,6 +100,7 @@ describe('skill-watcher', () => {
       // PDF skill should get the document emoji
       const pdf = skills.find(s => s.id === 'pdf-processing')!;
       expect(pdf.emoji).toBe('📄');
+      expect(notifyAllWindows).toHaveBeenCalledWith('skills:changed');
     });
 
     it('uses folder name as fallback when no name in frontmatter', async () => {

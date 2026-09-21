@@ -1,7 +1,7 @@
 import { registerIpcHandler } from './registry';
 import { BrowserWindow, shell } from 'electron';
 import * as fs from 'fs';
-import { isInitialized, closeDatabase } from '../storage';
+import { isInitialized, closeDatabase, getStorageReadiness } from '../storage';
 import { launchSession, getActiveSessionIntentIds } from '../session';
 import { transcribeAudio } from '../voice';
 import {
@@ -103,7 +103,7 @@ export function stopSyncPolling(): void {
 /**
  * Tear down the current workspace and bring up `dir`: close the DB, re-init
  * workspace + DB + watchers, sync canvases, schedule compaction, refresh
- * pre-warmed popouts, broadcast `workspace:changed`, and (re)start git polling.
+ * popouts, broadcast `workspace:changed`, and (re)start git polling.
  * Mirrors `dir` into `config.workspace`.
  */
 async function openWorkspace(dir: string | null, profileId: string | null = null): Promise<void> {
@@ -111,26 +111,25 @@ async function openWorkspace(dir: string | null, profileId: string | null = null
   const previousDir = getConfigValue('workspace');
   const previousProfile = getActiveProfileId();
   let resume: (() => void) | undefined;
-  let closed = false;
+  let restoreWatchers: (() => Promise<void>) | undefined;
+  let storageTransitionStarted = false;
+  let startingServices = false;
+  let canResume = false;
   try {
   resume = pauseWorkspaceCommands();
-  stopStorageMaintenance();
-  stopAllCloudPollers();
-  stopCliExitMonitor();
-  stopSkillWatcher();
-  stopSyncPolling();
-  stopScheduler();
-  stopAllWatchers();
+  stopWorkspaceServices();
+  restoreWatchers = stopAllWatchers();
   await stopWorkspaceAgents();
   await shutdownCopilot();
   await drainProducers();
   clearWorkspaceAgentState();
   await drainGitOperations();
+  storageTransitionStarted = true;
   await closeDatabase();
-  closed = true;
   await initializeWorkspace(dir);
   setActiveProfile(profileId);
   setConfigValue('workspace', dir);
+  startingServices = true;
   await restartWorkspaceServices(dir);
 
   // Destroy any pre-warmed settings + canvas windows so their next opens
@@ -140,25 +139,49 @@ async function openWorkspace(dir: string | null, profileId: string | null = null
 
   // Notify all windows to reload data
   withWorkspaceContext(() => notifyAllWindows('workspace:changed', dir));
+  canResume = true;
 
   } catch (error) {
     if (resume) {
       try {
-        if (closed) {
+        if (startingServices) {
+          stopWorkspaceServices();
+          await stopWorkspaceAgents();
+          await shutdownCopilot();
+          await drainProducers();
+          clearWorkspaceAgentState();
+          await drainGitOperations();
+        }
+        if (storageTransitionStarted || (previousDir && getStorageReadiness().state !== 'ready')) {
           await withWorkspaceContext(() => closeDatabase());
           await initializeWorkspace(previousDir);
         }
         setActiveProfile(previousProfile);
         setConfigValue('workspace', previousDir);
         await restartWorkspaceServices(previousDir);
+        await withWorkspaceContext(async () => { await restoreWatchers?.(); });
+        canResume = true;
       } catch (recoveryError) {
+        stopWorkspaceServices();
         console.error('[workspace] Switch failed:', error);
         console.error('[workspace] Restoration failed:', recoveryError);
         throw new Error('Workspace switch and restoration failed; drafts retained. Restart before saving.');
       }
     }
     throw error;
-  } finally { resume?.(); release(); }
+  } finally {
+    if (canResume) resume?.();
+    release();
+  }
+}
+
+function stopWorkspaceServices(): void {
+  stopStorageMaintenance();
+  stopAllCloudPollers();
+  stopCliExitMonitor();
+  stopSkillWatcher();
+  stopSyncPolling();
+  stopScheduler();
 }
 
 async function initializeWorkspace(dir: string | null): Promise<void> {
@@ -376,8 +399,8 @@ export function registerWorkspaceHandlers(): void {
       } else {
         (await enterFreshStartWorkspaceState());
       }
-      removeProfileById(id);
     }
+    removeProfileById(id);
 
     await broadcastProfilesChanged();
     return { ok: true };

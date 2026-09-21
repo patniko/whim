@@ -9,6 +9,7 @@ vi.mock('electron', () => ({
 
 import {
   bindArtifact,
+  acknowledgeArtifactPublication,
   publishArtifact,
   setArtifactStatus,
   getArtifact,
@@ -156,6 +157,51 @@ describe('bindArtifact', () => {
 });
 
 describe('publishArtifact', () => {
+  it('persists incomplete delivery independently of whether a retry changes the bytes', async () => {
+    const first = await publishHtml('<h1>Same</h1>');
+    expect(first.artifact.pendingPublicationId).toEqual(expect.any(String));
+    const retry = await publishHtml('<h1>Same</h1>');
+    expect(retry.changed).toBe(false);
+    expect(retry.artifact.pendingPublicationId).toBe(first.artifact.pendingPublicationId);
+    expect(readManifest(retry.artifact.dir)?.pendingPublicationId).toBe(first.artifact.pendingPublicationId);
+
+    expect(await acknowledgeArtifactPublication({
+      workspaceRoot: workspace, folder: FOLDER, artifactId: first.artifact.artifactId,
+      publicationId: first.artifact.pendingPublicationId!,
+    })).toBe(true);
+    const delivered = await publishHtml('<h1>Same</h1>');
+    expect(delivered.changed).toBe(false);
+    expect(delivered.artifact.pendingPublicationId).toBeUndefined();
+  });
+
+  it('does not acknowledge a newer publication when an older delivery finishes late', async () => {
+    const first = await publishHtml('<h1>First</h1>');
+    const second = await publishHtml('<h1>Second</h1>');
+    const input = { workspaceRoot: workspace, folder: FOLDER, artifactId: first.artifact.artifactId };
+    expect(second.artifact.pendingPublicationId).not.toBe(first.artifact.pendingPublicationId);
+    expect(await acknowledgeArtifactPublication({
+      ...input, publicationId: first.artifact.pendingPublicationId!,
+    })).toBe(false);
+    expect(getArtifact(workspace, FOLDER, input.artifactId)?.pendingPublicationId)
+      .toBe(second.artifact.pendingPublicationId);
+    expect(await acknowledgeArtifactPublication({
+      ...input, publicationId: second.artifact.pendingPublicationId!,
+    })).toBe(true);
+    const delivered = getArtifact(workspace, FOLDER, input.artifactId)!;
+    expect(delivered.updatedAt).toBe(second.artifact.updatedAt);
+    expect(delivered.publishedAt).toBe(second.artifact.publishedAt);
+    expect(delivered.contentHash).toBe(second.artifact.contentHash);
+    expect(await acknowledgeArtifactPublication({
+      ...input, publicationId: second.artifact.pendingPublicationId!,
+    })).toBe(false);
+  });
+
+  it('does not create a new delivery when publication fails before commit', async () => {
+    const first = await publishHtml('<h1>First</h1>');
+    await expect(publishHtml('<h1>Second</h1>', { contentHash: 'invalid' })).rejects.toThrow(/hash/);
+    expect(getArtifact(workspace, FOLDER, first.artifact.artifactId)).toEqual(first.artifact);
+  });
+
   it('imports an agent-written file and records its hash', async () => {
     const { artifact, changed } = await publishHtml('<h1>Report</h1>');
 

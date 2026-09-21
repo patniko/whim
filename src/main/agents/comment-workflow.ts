@@ -232,11 +232,6 @@ export async function launchCommentAgent(
       pinnedArtifactId: artifactId,
       hooks: {
         onArtifactPublished: async (artifact) => {
-          record.commentContext?.publishedArtifacts?.push({
-            artifactId: artifact.artifactId,
-            title: artifact.title,
-            ...(artifact.status ? { status: artifact.status } : {}),
-          });
           (await linkArtifactIntoDocument({
             workspaceRoot,
             spaceId: realSpaceId,
@@ -249,6 +244,17 @@ export async function launchCommentAgent(
               ...(artifact.status ? { status: artifact.status } : {}),
             },
           }));
+          const published = record.commentContext?.publishedArtifacts;
+          if (published) {
+            const entry = {
+              artifactId: artifact.artifactId,
+              title: artifact.title,
+              ...(artifact.status ? { status: artifact.status } : {}),
+            };
+            const index = published.findIndex(item => item.artifactId === artifact.artifactId);
+            if (index === -1) published.push(entry);
+            else published[index] = entry;
+          }
         },
       },
     });

@@ -84,7 +84,7 @@ function shouldBlurHide(): boolean {
 }
 
 function shouldCanvasBeOnTop(win: BrowserWindow): boolean {
-  return getConfigValue('pinned') || canvasUserPinned.has(win);
+  return canvasUserPinned.has(win);
 }
 
 // ── Canvas target tracking (for the tray menu) ───────────
@@ -533,8 +533,6 @@ export function registerWindowIpcHandlers(preloadPath: string): void {
   });
 
   // Toggle user-pinned state for the calling canvas window.
-  // When the side pane is pinned all canvases are already alwaysOnTop;
-  // per-canvas pin gives the user independent control.
   ipcMain.on('canvas-window:set-always-on-top', (event, pinned: boolean) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win && !win.isDestroyed()) {
@@ -871,7 +869,7 @@ function createCanvasWindow(preloadPath: string, options: { isPrimary?: boolean 
     x: Math.round(x + (width - CANVAS_WIDTH) / 2),
     y: Math.round(y + (height - CANVAS_HEIGHT) / 2),
     show: false,
-    alwaysOnTop: getConfigValue('pinned'),
+    alwaysOnTop: false,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 20 },
     vibrancy: 'under-window',

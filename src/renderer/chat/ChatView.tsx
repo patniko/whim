@@ -163,27 +163,16 @@ export function parseHistoryEvents(events: any[]): ChatMessage[] {
         responded: false,
         timestamp: ts,
       };
-      approvalMsgMap.set(reqId, messages.length);
+      approvalMsgMap.set(data.requestId || reqId, messages.length);
       messages.push(approvalMsg);
     } else if (type === 'permission.completed') {
       const reqId = data.requestId || '';
       const approved = data.result?.kind === 'approved' || data.result?.kind === 'approve-once' || data.result?.kind === 'approve-for-session' || data.result?.kind === 'approve-for-location';
-      // Try to match by SDK requestId — approvalMsgMap stores by toolCallId,
-      // but permission.completed uses SDK requestId. Scan for unresolved approvals.
       const idx = approvalMsgMap.get(reqId);
       if (idx !== undefined && messages[idx]?.type === 'approval') {
         const msg = messages[idx] as ApprovalMessage;
         msg.responded = true;
         msg.approved = approved;
-      } else {
-        // Fallback: find most recent unresolved approval
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].type === 'approval' && !(messages[i] as ApprovalMessage).responded) {
-            (messages[i] as ApprovalMessage).responded = true;
-            (messages[i] as ApprovalMessage).approved = approved;
-            break;
-          }
-        }
       }
     }
   }

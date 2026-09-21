@@ -5,7 +5,7 @@ import * as path from 'path';
 import { build } from 'esbuild';
 import { performance } from 'perf_hooks';
 
-const fixture = vi.hoisted(() => ({ worker: '' }));
+const fixture = vi.hoisted(() => ({ worker: '', instance: undefined as import('worker_threads').Worker | undefined }));
 vi.mock('worker_threads', async importOriginal => {
   const actual = await importOriginal<typeof import('worker_threads')>();
   return {
@@ -13,6 +13,7 @@ vi.mock('worker_threads', async importOriginal => {
     Worker: class extends actual.Worker {
       constructor(_file: string | URL, options?: import('worker_threads').WorkerOptions) {
         super(fixture.worker, options);
+        fixture.instance = this;
       }
     },
   };
@@ -29,9 +30,12 @@ import {
   createSkillDocument, deleteSkillDirectory, getSkillCanvasSettings, readDocument,
   openRuntimeHistory, appendRuntimeHistory, queryRuntimeHistory, listAgentChatEvents,
   saveSkillSchedule,
+  indexSkills, listSkills, setSpaceSessionId, updateCanvasContent,
+  publishArtifact, acknowledgeArtifactPublication,
 } from './storage';
 import { appendEvent } from './eventlog';
 import { notifyAllWindows } from './notify';
+import { startWatching, stopAllWatchers, refreshWatchedCanvases } from './canvas-watcher';
 
 let bundle: string;
 let workspace: string;
@@ -62,11 +66,34 @@ beforeEach(async () => {
   await initDatabase(path.join(workspace, '.whim', 'spaces.db'), path.join(workspace, '.whim', 'events'));
 });
 afterEach(async () => {
+  stopAllWatchers();
   await closeDatabase();
   fs.rmSync(workspace, { recursive: true, force: true });
 });
 
 describe('sole persistence worker', () => {
+  it('durably acknowledges artifact publications through the worker boundary', async () => {
+    const space = await createSpace({ body: '# Artifact fixture' });
+    const folder = path.join(workspace, space.folder!);
+    fs.mkdirSync(folder);
+    fs.writeFileSync(path.join(folder, 'report.html'), '<h1>Fixture</h1>');
+    const input = {
+      workspaceRoot: workspace, folder: space.folder!, spaceId: space.id,
+      artifactId: 'fixture', title: 'Fixture', sourceRelativePath: 'report.html',
+    };
+    const published = await publishArtifact(input);
+    const publicationId = published.artifact.pendingPublicationId;
+    expect(publicationId).toBeTypeOf('string');
+    if (!publicationId) throw new Error('Missing publication receipt');
+    const receipt = { ...input, publicationId };
+    expect(await acknowledgeArtifactPublication({ ...receipt, publicationId: 'stale' })).toBe(false);
+    expect(await acknowledgeArtifactPublication(receipt)).toBe(true);
+    expect(await acknowledgeArtifactPublication(receipt)).toBe(false);
+    const retry = await publishArtifact(input);
+    expect(retry.changed).toBe(false);
+    expect(retry.artifact.pendingPublicationId).toBeUndefined();
+  });
+
   it('starts without Electron and forwards schedule notifications to the main process', async () => {
     vi.mocked(notifyAllWindows).mockClear();
     const schedule = await saveSkillSchedule(workspace, 'fixture-skill', 'daily', '09:00', null, {
@@ -144,6 +171,82 @@ describe('sole persistence worker', () => {
     await applyIncomingChanges();
     expect(await listSubagentToolCalls('sub')).toHaveLength(1);
     expect((await getSpace(space.id))?.description).toBe('remote suffix');
+  });
+
+  it('restores disk projections before acknowledging a compaction storage barrier', async () => {
+    const space = await createSpace({ body: '# Original logged title' });
+    const deleted = await createSpace({ body: '# Deleted remotely' });
+    const missingCanvas = await createSpace({ body: '# Missing canvas title' });
+    for (const [item, content] of [
+      [space, '# Disk title\ncanvasexclusive'],
+      [deleted, '# Deleted disk title\ndeletedexclusive'],
+      [missingCanvas, '# Removed disk title\nremovedexclusive'],
+    ] as const) {
+      const folder = path.join(workspace, item.folder!);
+      fs.mkdirSync(folder);
+      fs.writeFileSync(path.join(folder, 'canvas.md'), content);
+      await setSpaceSessionId(item.id, `local-session-${item.id}`);
+    }
+    await createSkillDocument(workspace, 'fixture', '---\nname: Fixture\n---\n');
+    await createSkillDocument(workspace, 'removed', '---\nname: Removed\n---\n');
+    await syncCanvasContent(workspace);
+    await indexSkills(workspace);
+    expect((await getSpace(space.id))?.description).toBe('Disk title');
+    expect((await listSpaceSummaries({ query: 'canvasexclusive' })).total).toBe(1);
+    expect((await listSkills()).map(skill => skill.id).sort()).toEqual(['fixture', 'removed']);
+
+    const root = path.join(workspace, '.whim', 'events');
+    appendEvent(root, 'space.delete', { id: deleted.id });
+    fs.unlinkSync(path.join(workspace, missingCanvas.folder!, 'canvas.md'));
+    await deleteSkillDirectory(workspace, '.agents/skills/removed');
+    const compaction = await compactOldSegments(root, { now: new Date(Date.now() + 90 * 86400_000) });
+    expect(compaction.ran).toBe(true);
+
+    await withStorageBarrier(async () => {
+      expect(await getSpace(space.id)).toMatchObject({ description: 'Disk title', session_id: `local-session-${space.id}` });
+      expect((await listSpaceSummaries({ query: 'canvasexclusive' })).total).toBe(1);
+      expect(await getSpace(deleted.id)).toBeNull();
+      expect((await listSpaceSummaries({ query: 'deletedexclusive' })).total).toBe(0);
+      expect((await listSpaceSummaries({ query: 'removedexclusive' })).total).toBe(0);
+      expect((await getSpace(missingCanvas.id))?.description).toBe('Missing canvas title');
+      expect((await listSkills()).map(skill => skill.id)).toEqual(['fixture']);
+    });
+    await closeDatabase();
+    await initDatabase(path.join(workspace, '.whim', 'spaces.db'), root);
+    expect(await getSpace(space.id)).toMatchObject({ description: 'Disk title', session_id: `local-session-${space.id}` });
+    expect((await listSpaceSummaries({ query: 'canvasexclusive' })).total).toBe(1);
+    expect((await listSkills()).map(skill => skill.id)).toEqual(['fixture']);
+  });
+
+  it('rejects an incomplete projection rebuild, retains the prior cache, and retries safely', async () => {
+    const space = await createSpace({ body: '# Logged title' });
+    const folder = path.join(workspace, space.folder!);
+    const canvas = path.join(folder, 'canvas.md');
+    fs.mkdirSync(folder);
+    fs.writeFileSync(canvas, '# Disk title\nindexedexclusive');
+    await setSpaceSessionId(space.id, 'local-session');
+    await syncCanvasContent(workspace);
+    await checkpointAppliedState();
+    const sidecar = path.join(workspace, '.whim', 'db.fingerprint.json');
+    const fingerprint = fs.readFileSync(sidecar);
+    expect((await compactOldSegments(path.join(workspace, '.whim', 'events'), {
+      now: new Date(Date.now() + 90 * 86400_000),
+    })).ran).toBe(true);
+    fs.unlinkSync(canvas);
+    fs.mkdirSync(canvas);
+    const synchronized = vi.fn(async () => {});
+    await expect(withStorageBarrier(synchronized)).rejects.toThrow('EISDIR');
+    expect(synchronized).not.toHaveBeenCalled();
+    expect(fs.readFileSync(sidecar)).toEqual(fingerprint);
+    expect(await getSpace(space.id)).toMatchObject({ description: 'Disk title', session_id: 'local-session' });
+    await expect(checkpointAppliedState()).rejects.toThrow('requires recovery');
+
+    fs.rmdirSync(canvas);
+    fs.writeFileSync(canvas, '# Retried disk title\nindexedexclusive');
+    await withStorageBarrier(synchronized);
+    expect(synchronized).toHaveBeenCalledOnce();
+    expect(await getSpace(space.id)).toMatchObject({ description: 'Retried disk title', session_id: 'local-session' });
+    expect((await listSpaceSummaries({ query: 'indexedexclusive' })).total).toBe(1);
   });
 
   it('preserves historical session-only canvas no-ops without relaxing unrelated update targets', async () => {
@@ -230,6 +333,51 @@ describe('sole persistence worker', () => {
     expect(getStorageReadiness().state).toBe('closed');
   });
 
+  it('coalesces overlapping closes and settles every waiter after draining the real worker', async () => {
+    const saved = createSpace({ body: 'before overlapping close' });
+    const first = closeDatabase();
+    const second = closeDatabase();
+    expect(second).toBe(first);
+    const space = await saved;
+    await Promise.all([first, second]);
+    expect(getStorageReadiness()).toMatchObject({ state: 'closed', pending: 0 });
+    await initDatabase(path.join(workspace, '.whim', 'spaces.db'), path.join(workspace, '.whim', 'events'));
+    expect(await getSpace(space.id)).toMatchObject({ body: space.body });
+  });
+
+  it('coalesces closes waiting on a barrier without orphaning deferred requests', async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const synchronization = withStorageBarrier(async () => { entered(); await wait; });
+    await ready;
+    const saved = createSpace({ body: 'admitted before barrier close' });
+    const first = closeDatabase();
+    const second = closeDatabase();
+    expect(second).toBe(first);
+    release();
+    await Promise.all([synchronization, saved, first, second]);
+    expect(getStorageReadiness()).toMatchObject({ state: 'closed', pending: 0 });
+  });
+
+  it('settles overlapping closes after a worker failure and allows reopening', async () => {
+    const saved = await createSpace({ body: 'saved before worker failure' });
+    await fixture.instance!.terminate();
+    const first = closeDatabase();
+    const second = closeDatabase();
+    expect(second).toBe(first);
+    const results = await Promise.allSettled([first, second]);
+    for (const result of results) {
+      expect(result.status).toBe('rejected');
+      if (result.status === 'rejected') expect(String(result.reason)).toContain('Storage worker exited');
+    }
+    expect(getStorageReadiness()).toMatchObject({ state: 'closed', pending: 0 });
+    await closeDatabase();
+    await initDatabase(path.join(workspace, '.whim', 'spaces.db'), path.join(workspace, '.whim', 'events'));
+    expect((await getSpace(saved.id))?.body).toBe(saved.body);
+  });
+
   it('rejects continuations retained from an earlier workspace generation', async () => {
     let resume!: () => void;
     const wait = new Promise<void>(resolve => { resume = resolve; });
@@ -241,6 +389,90 @@ describe('sole persistence worker', () => {
     await initDatabase(path.join(workspace, '.whim', 'spaces.db'), path.join(workspace, '.whim', 'events'));
     resume();
     await expect(stale).rejects.toThrow('Stale workspace');
+  });
+
+  it('rejects stale skill indexing from A without inserting old skills or deleting B skills', async () => {
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'whim-storage-other-'));
+    let resume!: () => void;
+    const wait = new Promise<void>(resolve => { resume = resolve; });
+    try {
+      await createSkillDocument(workspace, 'old-only', '---\nname: Old workspace\n---\n');
+      const stale = withWorkspaceContext(async () => {
+        await wait;
+        return Promise.allSettled([
+          createSpace({ body: 'old continuation' }),
+          indexSkills(workspace),
+        ]);
+      });
+      await closeDatabase();
+      await initWorkspace(other);
+      await initDatabase(path.join(other, '.whim', 'spaces.db'), path.join(other, '.whim', 'events'));
+      await createSkillDocument(other, 'new-only', '---\nname: New workspace\n---\n');
+      await indexSkills(other);
+      resume();
+      const results = await stale;
+      for (const result of results) {
+        expect(result.status).toBe('rejected');
+        if (result.status === 'rejected') expect(String(result.reason)).toContain('Stale workspace');
+      }
+      expect((await listSkills()).map(skill => skill.id)).toEqual(['new-only']);
+    } finally {
+      resume();
+      await closeDatabase();
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('revalidates skill indexing when the workspace changes between batches', async () => {
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'whim-storage-batch-other-'));
+    try {
+      for (let i = 0; i < 20; i++) {
+        await createSkillDocument(workspace, `old-${i}`, `---\nname: Old ${i}\n---\n`);
+      }
+      const indexing = indexSkills(workspace);
+      const result = Promise.allSettled([indexing]);
+      await initWorkspace(other);
+      await initDatabase(path.join(other, '.whim', 'spaces.db'), path.join(other, '.whim', 'events'));
+      expect((await result)[0].status).toBe('rejected');
+      await createSkillDocument(other, 'new-only', '---\nname: New workspace\n---\n');
+      await indexSkills(other);
+      expect((await listSkills()).map(skill => skill.id)).toEqual(['new-only']);
+    } finally {
+      await closeDatabase();
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it('retries the same canvas revision after the real barrier exhausts storage admission', async () => {
+    const space = await createSpace({ body: '# Original title' });
+    const folder = path.join(workspace, space.folder!);
+    const canvas = path.join(folder, 'canvas.md');
+    fs.mkdirSync(folder);
+    fs.writeFileSync(canvas, '# Original title');
+    const changed = vi.fn(async (content: string) => { await updateCanvasContent(space.id, content); });
+    startWatching(space.id, canvas, changed);
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const synchronization = withStorageBarrier(async () => { entered(); await wait; });
+    await ready;
+    const admitted = Array.from({ length: 256 }, () => getSpace(space.id));
+    try {
+      fs.writeFileSync(canvas, '# Retried title\nretryexclusive');
+      await expect(refreshWatchedCanvases()).rejects.toThrow('Storage busy');
+      expect(getStorageReadiness().pending).toBe(256);
+    } finally {
+      release();
+      await synchronization;
+      await Promise.all(admitted);
+    }
+    await refreshWatchedCanvases();
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect((await getSpace(space.id))?.description).toBe('Retried title');
+    expect((await listSpaceSummaries({ query: 'retryexclusive' })).total).toBe(1);
+    await refreshWatchedCanvases();
+    expect(changed).toHaveBeenCalledTimes(2);
   });
 
   it('applies remote suffixes before reads and refuses unseen changes as a checkpoint', async () => {

@@ -15,6 +15,17 @@ import type { WhimAPI, SubagentAPI } from '../shared/whim-api';
 
 export type { WhimAPI, SubagentAPI };
 
+const readAPIs = new WeakMap<object, object>();
+
+/** Write-tracking wrappers share their underlying transport's read ownership. */
+export function registerReadAPI<T extends object>(wrapper: T, source: T): void {
+  readAPIs.set(wrapper, getReadAPI(source));
+}
+
+export function getReadAPI<T extends object>(api: T): T {
+  return (readAPIs.get(api) as T | undefined) ?? api;
+}
+
 // ── IPC contract types ──────────────────────────────────────────────────────
 export type {
   AgentPersona,

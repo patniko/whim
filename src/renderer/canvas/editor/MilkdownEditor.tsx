@@ -89,6 +89,8 @@ export interface MilkdownEditorProps {
   initialContent: string;
   theme: 'light' | 'dark';
   onContentChanged: (markdown: string) => void;
+  /** Synchronous document revision notification; does not serialize markdown. */
+  onDocumentChanged?: () => void;
   onFocus?: () => void;
   onBlur?: () => void;
   decorations?: readonly CanvasDecoration[];
@@ -180,12 +182,16 @@ function replaceChangedRange(view: EditorView, nextDoc: ProseNode): void {
 
 const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
   function MilkdownInner(
-    { initialContent, theme, onContentChanged, onFocus, onBlur, decorations, presence, commentThreads, commentAgentStatuses, activeCommentId, commentTrigger, resolveImageSrc, uploadFile, onCommentActivate, onSelectionChange, onMentionQuery, onLinkClick, onLinkEditingChange },
+    { initialContent, theme, onContentChanged, onDocumentChanged, onFocus, onBlur, decorations, presence, commentThreads, commentAgentStatuses, activeCommentId, commentTrigger, resolveImageSrc, uploadFile, onCommentActivate, onSelectionChange, onMentionQuery, onLinkClick, onLinkEditingChange },
     ref,
   ) {
     // Latest callbacks via refs so the editor factory (created once) never goes stale.
     const onChangeRef = useRef(onContentChanged);
     onChangeRef.current = onContentChanged;
+    const onDocumentChangedRef = useRef(onDocumentChanged);
+    onDocumentChangedRef.current = onDocumentChanged;
+    const replacingRef = useRef(false);
+    const markdownSnapshotRef = useRef<{ doc: ProseNode; markdown: string } | null>(null);
     const onFocusRef = useRef(onFocus);
     onFocusRef.current = onFocus;
     const onBlurRef = useRef(onBlur);
@@ -375,6 +381,9 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
         .use($prose(() => new Plugin({
           view(view) {
             const update = (view: EditorView, previous?: EditorState) => {
+              if (previous && previous.doc !== view.state.doc && !replacingRef.current) {
+                runIsolated('documentChanged', () => onDocumentChangedRef.current?.());
+              }
               runIsolated('formattingUpdated', () => {
                 const next = getFormattingState(view.state);
                 setFormatting(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next);
@@ -454,7 +463,13 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
       ref,
       () => ({
         isReady: () => !!get(),
-        getMarkdown: () => get()?.action(getMarkdown()) ?? '',
+        getMarkdown: () => get()?.action(ctx => {
+          const doc = ctx.get(editorViewCtx).state.doc;
+          if (markdownSnapshotRef.current?.doc !== doc) {
+            markdownSnapshotRef.current = { doc, markdown: getMarkdown()(ctx) };
+          }
+          return markdownSnapshotRef.current.markdown;
+        }) ?? '',
         replaceAll: (markdown: string, options?: ReplaceAllOptions) => {
           const ed = get();
           if (!ed) return;
@@ -462,6 +477,7 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
             const view = ctx.get(editorViewCtx);
             const animate = options?.animate === true;
             if (!animate) view.dispatch(view.state.tr.setMeta(SUPPRESS_TYPING_EFFECTS, true));
+            replacingRef.current = true;
             try {
               if (animate) {
                 const nextDoc = ctx.get(parserCtx)(markdown);
@@ -478,6 +494,7 @@ const MilkdownInner = forwardRef<MilkdownEditorHandle, MilkdownEditorProps>(
                 pendingEchoRef.current = markdown;
               }
             } finally {
+              replacingRef.current = false;
               if (!animate) view.dispatch(view.state.tr.setMeta(SUPPRESS_TYPING_EFFECTS, false));
             }
           });

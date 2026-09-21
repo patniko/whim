@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AgentRecord, AgentStatus } from './agent-registry';
+import { CopilotSession, type SessionEvent } from '@github/copilot-sdk';
 
 const mocks = vi.hoisted(() => {
   const config = { workspace: '/mock/workspace' };
@@ -120,7 +121,7 @@ vi.mock('../canvas/canvas-notifier', () => ({
 }));
 
 import { AgentRegistry } from './agent-registry';
-import { initSdkRunner, sendChatMessage } from './sdk-runner';
+import { initSdkRunner, sendChatMessage, setupAgentEventListeners } from './sdk-runner';
 
 function makeSession() {
   return {
@@ -130,6 +131,20 @@ function makeSession() {
     disconnect: vi.fn().mockResolvedValue(undefined),
     rpc: { remote: { enable: vi.fn(), disable: vi.fn() } },
   };
+}
+
+function makeDispatchedSession() {
+  const sendRequest = vi.fn().mockResolvedValue({ messageId: 'accepted' });
+  // The SDK deliberately omits its internal constructor/dispatcher from its
+  // public declarations. Exercise the real implementation, not an emitter stub.
+  const session = Reflect.construct(CopilotSession, ['dispatched-session', { sendRequest }]) as CopilotSession & {
+    _dispatchEvent(event: SessionEvent): void;
+  };
+  const idle = () => session._dispatchEvent({
+    id: 'idle', type: 'session.idle', timestamp: '2026-09-10', parentId: null,
+    ephemeral: true, data: {},
+  });
+  return { session, sendRequest, idle };
 }
 
 function makeRecord(
@@ -179,6 +194,7 @@ describe('sendChatMessage', () => {
     getSession: ReturnType<typeof vi.fn>;
     updateStatus: ReturnType<typeof vi.fn>;
     appendChatEvent: ReturnType<typeof vi.fn>;
+    prepareHistoryMirror: ReturnType<typeof vi.fn>;
   };
   let notifier: { notifyRenderer: ReturnType<typeof vi.fn> };
   let broker: {
@@ -195,6 +211,7 @@ describe('sendChatMessage', () => {
       getSession: vi.fn(),
       updateStatus: vi.fn(),
       appendChatEvent: vi.fn(),
+      prepareHistoryMirror: vi.fn(),
     };
     notifier = { notifyRenderer: vi.fn() };
     broker = {
@@ -213,7 +230,7 @@ describe('sendChatMessage', () => {
       persistence: persistence as any,
       notifier: notifier as any,
       broker: broker as any,
-      subagentTracker: { handleSessionEvent: vi.fn() } as any,
+      subagentTracker: { handleSessionEvent: vi.fn(), clearParent: vi.fn() } as any,
     });
   });
 
@@ -278,5 +295,66 @@ describe('sendChatMessage', () => {
     expect(client.resumeSession).not.toHaveBeenCalled();
     expect(stoppedSession.send).not.toHaveBeenCalled();
     expect(registry.get(agentId)).toBe(stoppedRecord);
+  });
+
+  it('retries a failed SDK idle acknowledgement before accepting a later send', async () => {
+    const { session, sendRequest, idle } = makeDispatchedSession();
+    const record = makeRecord('recovered', 'running', undefined);
+    Object.assign(record, { session, sessionId: session.sessionId, spaceId: '__workspace__', phase: 'active' });
+    registry.set(record.agentId, record);
+    setupAgentEventListeners(session, record);
+    persistence.updateStatus.mockRejectedValueOnce(new Error('storage temporarily unavailable'));
+
+    idle();
+    await vi.waitFor(() => expect(notifier.notifyRenderer).toHaveBeenCalledWith(
+      'chat:event:recovered',
+      expect.objectContaining({ type: 'session.error', message: expect.stringContaining('storage temporarily unavailable') }),
+    ));
+    expect(notifier.notifyRenderer).not.toHaveBeenCalledWith('agent:completed', expect.anything());
+    expect(record.turnCompletion).toBeUndefined();
+
+    persistence.updateStatus.mockRejectedValueOnce(new Error('storage still unavailable'));
+    expect(await sendChatMessage(record.agentId, 'too early')).toEqual({ error: 'storage still unavailable' });
+    expect(sendRequest).not.toHaveBeenCalled();
+    expect(await sendChatMessage(record.agentId, 'retry after recovery')).toEqual({ messageId: 'accepted' });
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    expect(sendRequest).toHaveBeenCalledWith('session.send', expect.objectContaining({
+      sessionId: session.sessionId, prompt: 'retry after recovery',
+    }));
+    expect(notifier.notifyRenderer.mock.calls.filter(([channel]) => channel === 'agent:completed')).toHaveLength(1);
+    expect(mocks.reportCanvasRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes overlapping sends and an SDK turn boundary through the durable acknowledgement', async () => {
+    const { session, sendRequest, idle } = makeDispatchedSession();
+    const record = makeRecord('overlap', 'running', undefined);
+    Object.assign(record, { session, sessionId: session.sessionId, spaceId: '__workspace__', phase: 'active' });
+    registry.set(record.agentId, record);
+    setupAgentEventListeners(session, record);
+    const statuses: AgentStatus[] = [];
+    let releaseFirst!: () => void;
+    let releaseIdle!: () => void;
+    persistence.updateStatus.mockImplementation(async (current: AgentRecord) => {
+      statuses.push(current.status);
+      if (statuses.length === 1) await new Promise<void>(resolve => { releaseFirst = resolve; });
+      if (current.status === 'completed') await new Promise<void>(resolve => { releaseIdle = resolve; });
+    });
+    const first = sendChatMessage(record.agentId, 'first');
+    await vi.waitFor(() => expect(statuses).toEqual(['running']));
+    idle();
+    idle();
+    const second = sendChatMessage(record.agentId, 'second');
+    expect(sendRequest).not.toHaveBeenCalled();
+    releaseFirst();
+    expect(await first).toEqual({ messageId: 'accepted' });
+    await vi.waitFor(() => expect(statuses).toEqual(['running', 'completed']));
+    expect(sendRequest).toHaveBeenCalledTimes(1);
+    expect(sendRequest).toHaveBeenLastCalledWith('session.send', expect.objectContaining({ prompt: 'first' }));
+    releaseIdle();
+    expect(await second).toEqual({ messageId: 'accepted' });
+    expect(statuses).toEqual(['running', 'completed', 'running']);
+    expect(sendRequest).toHaveBeenCalledTimes(2);
+    expect(sendRequest).toHaveBeenLastCalledWith('session.send', expect.objectContaining({ prompt: 'second' }));
+    expect(mocks.reportCanvasRun).toHaveBeenCalledTimes(1);
   });
 });

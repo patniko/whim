@@ -8,6 +8,7 @@ import { execFileSync } from 'child_process';
 vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] },
 }));
+vi.mock('./notify', () => ({ notifyAllWindows: vi.fn() }));
 
 import { CANVASES_DIR } from './canvas/artifact-store';
 import {
@@ -32,6 +33,7 @@ import {
   invalidateProfileNameCache,
   createPage,
   readPage,
+  commitNow,
 } from './workspace';
 
 let tmpDir: string;
@@ -40,9 +42,9 @@ beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-test-'));
 });
 
-afterEach(() => {
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-});
+afterEach(async () => {
+  await fs.promises.rm(tmpDir, { recursive: true, force: true });
+}, 30_000);
 
 // ── Path helpers ────────────────────────────────────────
 
@@ -202,6 +204,96 @@ describe('initWorkspace', () => {
     expect(content.match(/\.whim\/\*\.db\n/g)?.length).toBe(1);
     expect(content.match(/\*\/attachments\//g)?.length).toBe(1);
     expect(content.match(/\*\/uploads\//g)?.length).toBe(1);
+  });
+});
+
+describe('workspace auto-commit staging', () => {
+  function git(args: string[]): string {
+    return execFileSync('git', args, { cwd: tmpDir, encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 });
+  }
+
+  function initGit(): void {
+    initWorkspace(tmpDir);
+    git(['init', '-q']);
+    git(['config', 'user.name', 'Storage fixture']);
+    git(['config', 'user.email', 'storage-fixture@example.invalid']);
+    git(['config', 'commit.gpgsign', 'false']);
+  }
+
+  function write(file: string, content: string): void {
+    const target = path.join(tmpDir, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content);
+  }
+
+  function oversized(file: string): void {
+    const target = path.join(tmpDir, file);
+    if (!fs.existsSync(target)) write(file, '');
+    fs.truncateSync(target, 50 * 1024 * 1024 + 1);
+  }
+
+  it('stages an inventory above 1 MiB while preserving Git ignores, deletions, and artifact exclusions', async () => {
+    initGit();
+    const names = Array.from({ length: 8000 }, (_, i) => `file-${String(i).padStart(4, '0')}-${'x'.repeat(121)}.md`);
+    for (const name of names) write(name, 'original\n');
+    write('tracked.txt', 'tracked despite later ignore\n');
+    write('[large].bin', 'original small content\n');
+    git(['add', '-A']);
+    git(['commit', '-q', '-m', 'fixture baseline', '--no-verify']);
+    expect(Buffer.byteLength(git(['ls-files', '-z', '--', 'file-*']))).toBe(1_080_000);
+
+    write(names[0], 'changed\n');
+    fs.unlinkSync(path.join(tmpDir, names[1]));
+    fs.appendFileSync(path.join(tmpDir, '.gitignore'), '\ntracked.txt\nignored.txt\n');
+    write('tracked.txt', 'tracked modification\n');
+    write('ignored.txt', 'must remain ignored\n');
+    const unusual = process.platform === 'win32' ? 'name [literal].txt' : 'name [literal]\n.txt';
+    write(unusual, 'literal path\n');
+    const report = `space/${CANVASES_DIR}/report/index.html`;
+    const largeReport = `space/${CANVASES_DIR}/large/index.html`;
+    write(report, '<h1>Tracked report</h1>\n');
+    for (const ignored of ['space/uploads/file.bin', 'space/attachments/file.bin', '.whim/local.db']) write(ignored, 'local only\n');
+    write('[large].bin', 'already staged small content\n');
+    git(['--literal-pathspecs', 'add', '--', '[large].bin']);
+    oversized('[large].bin');
+    oversized('untracked [large].bin');
+    oversized(largeReport);
+
+    await commitNow(tmpDir);
+    expect(git(['show', `HEAD:${names[0]}`])).toBe('changed\n');
+    expect(git(['show', 'HEAD:tracked.txt'])).toBe('tracked modification\n');
+    expect(git(['show', `HEAD:${unusual}`])).toBe('literal path\n');
+    expect(git(['show', `HEAD:${report}`])).toBe('<h1>Tracked report</h1>\n');
+    expect(git(['show', 'HEAD:[large].bin'])).toBe('original small content\n');
+    const tracked = new Set(git(['ls-files', '-z']).split('\0'));
+    for (const excluded of [
+      names[1], 'ignored.txt', 'untracked [large].bin', largeReport,
+      'space/uploads/file.bin', 'space/attachments/file.bin', '.whim/local.db',
+    ]) expect(tracked.has(excluded)).toBe(false);
+    expect(git(['diff', '--cached', '--name-only'])).toBe('');
+    expect(git(['rev-list', '--count', 'HEAD']).trim()).toBe('2');
+  }, 30_000);
+
+  it('unstages oversized files on an unborn branch and keeps their literal siblings', async () => {
+    initGit();
+    write('[large].bin', 'staged while small\n');
+    git(['add', '-A']);
+    oversized('[large].bin');
+    write('l.bin', 'not matched by the exclusion\n');
+    await commitNow(tmpDir);
+    expect(git(['ls-files', '-z']).split('\0')).not.toContain('[large].bin');
+    expect(git(['show', 'HEAD:l.bin'])).toBe('not matched by the exclusion\n');
+  });
+
+  it('reports a staging failure rather than treating it as an empty commit', async () => {
+    initGit();
+    write('capture.md', '# Pending\n');
+    const lock = path.join(tmpDir, '.git', 'index.lock');
+    fs.writeFileSync(lock, 'fixture lock\n');
+    await expect(commitNow(tmpDir)).rejects.toThrow('index.lock');
+    fs.unlinkSync(lock);
+    await commitNow(tmpDir);
+    expect(git(['show', 'HEAD:capture.md'])).toBe('# Pending\n');
   });
 });
 

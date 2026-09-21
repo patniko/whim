@@ -20,8 +20,10 @@ interface WatchEntry {
   debounceTimer: ReturnType<typeof setTimeout> | null;
   /** MD5 of the last content written by the editor (to ignore self-writes). */
   selfWriteHash: string | null;
-  /** MD5 of the last content seen on disk (to avoid duplicate notifications). */
+  /** MD5 of the last successfully delivered content (or acknowledged self-write). */
   lastSeenHash: string | null;
+  refresh: Promise<void>;
+  stopped: boolean;
   onChange: (content: string) => void | Promise<void>;
 }
 
@@ -65,17 +67,14 @@ export function startWatching(
     debounceTimer: null,
     selfWriteHash: null,
     lastSeenHash,
+    refresh: Promise.resolve(),
+    stopped: false,
     onChange,
   };
 
   watcher.on('change', (_event, filename) => {
     if (filename && filename.toString() !== path.basename(canvasPath)) return;
-    // Debounce rapid changes (agents may write multiple times quickly)
-    if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
-    entry.debounceTimer = setTimeout(() => {
-      entry.debounceTimer = null;
-      void handleFileChange(entry).catch(error => console.error('[canvas-watcher] Refresh failed:', error));
-    }, DEBOUNCE_MS);
+    scheduleRefresh(entry);
   });
 
   watcher.on('error', error => {
@@ -86,7 +85,30 @@ export function startWatching(
   watches.set(spaceId, entry);
 }
 
-async function handleFileChange(entry: WatchEntry): Promise<void> {
+function scheduleRefresh(entry: WatchEntry): void {
+  if (entry.stopped) return;
+  if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
+  entry.debounceTimer = setTimeout(() => {
+    entry.debounceTimer = null;
+    void handleFileChange(entry).catch(error => {
+      console.error('[canvas-watcher] Refresh failed:', error);
+    });
+  }, DEBOUNCE_MS);
+}
+
+function handleFileChange(entry: WatchEntry): Promise<void> {
+  // Read after the preceding delivery settles, so an older callback cannot
+  // finish after a newer revision. A failed delivery must not poison retries.
+  const refresh = () => deliverFileChange(entry);
+  entry.refresh = entry.refresh.then(refresh, refresh).catch(error => {
+    scheduleRefresh(entry);
+    throw error;
+  });
+  return entry.refresh;
+}
+
+async function deliverFileChange(entry: WatchEntry): Promise<void> {
+  if (entry.stopped) return;
   let content: string;
   try {
     content = await fs.promises.readFile(entry.canvasPath, 'utf-8');
@@ -94,7 +116,7 @@ async function handleFileChange(entry: WatchEntry): Promise<void> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
     throw error;
   }
-  if (![...watches.values()].includes(entry)) return;
+  if (entry.stopped) return;
 
   const hash = contentHash(content);
 
@@ -108,8 +130,8 @@ async function handleFileChange(entry: WatchEntry): Promise<void> {
     return;
   }
 
-  entry.lastSeenHash = hash;
   await entry.onChange(content);
+  entry.lastSeenHash = hash;
 }
 
 /** Sync completion waits for disk-authoritative updates, without changing editor bases. */
@@ -122,6 +144,7 @@ export function stopWatching(spaceId: string): void {
   const entry = watches.get(spaceId);
   if (!entry) return;
 
+  entry.stopped = true;
   if (entry.debounceTimer) clearTimeout(entry.debounceTimer);
   try { entry.watcher.close(); } catch { /* already closed */ }
   watches.delete(spaceId);

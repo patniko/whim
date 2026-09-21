@@ -7,7 +7,8 @@ import { Editor, defaultValueCtx, editorViewCtx, editorViewOptionsCtx, rootCtx }
 import { commonmark } from '@milkdown/kit/preset/commonmark';
 import { gfm } from '@milkdown/kit/preset/gfm';
 import { history } from '@milkdown/kit/plugin/history';
-import { AllSelection, TextSelection } from '@milkdown/kit/prose/state';
+import { AllSelection, EditorState, NodeSelection, TextSelection } from '@milkdown/kit/prose/state';
+import { Transform } from '@milkdown/kit/prose/transform';
 import type { EditorView } from '@milkdown/kit/prose/view';
 import { $prose, getMarkdown } from '@milkdown/kit/utils';
 import { EditorToolbar, LinkEditor } from './EditorControls';
@@ -96,6 +97,76 @@ function pasteEvent(text: string, html = ''): ClipboardEvent {
 }
 
 describe('editor formatting commands', () => {
+  it('queries 5,000 real list items without allocating transactions or performing transforms', async () => {
+    const { view } = await makeEditor('- Seed');
+    const { schema } = view.state;
+    const items = Array.from({ length: 5000 }, (_, index) => schema.nodes.list_item.create(
+      { checked: null, listType: 'bullet' },
+      schema.nodes.paragraph.create(null, schema.text(`Item ${index}`)),
+    ));
+    const doc = schema.nodes.doc.create(null, schema.nodes.bullet_list.create(null, items));
+    const state = EditorState.create({ schema, doc, selection: TextSelection.create(doc, 3) });
+    const transaction = vi.spyOn(EditorState.prototype, 'tr', 'get');
+    const markup = vi.spyOn(Transform.prototype, 'setNodeMarkup');
+    const step = vi.spyOn(Transform.prototype, 'step');
+    const first = getFormattingState(state);
+    const last = getFormattingState(EditorState.create({
+      schema, doc, selection: TextSelection.create(doc, doc.content.size - 3),
+    }));
+    const all = getFormattingState(EditorState.create({ schema, doc, selection: new AllSelection(doc) }));
+    for (const result of [first, last, all]) {
+      expect(result.active.bulletList).toBe(true);
+      expect(result.enabled).toMatchObject({ bulletList: true, orderedList: true, taskList: true });
+    }
+    expect(first.enabled.indent).toBe(false);
+    expect(last.enabled.indent).toBe(true);
+    expect(all.enabled.indent).toBe(false);
+    expect(first.enabled.outdent).toBe(true);
+    expect(last.enabled.outdent).toBe(true);
+    expect(all.enabled.outdent).toBe(false);
+    expect(transaction).not.toHaveBeenCalled();
+    expect(markup).not.toHaveBeenCalled();
+    expect(step).not.toHaveBeenCalled();
+    expect(state.doc).toBe(doc);
+
+    const dispatch = vi.fn();
+    expect(formatCommand('taskList')(state, dispatch)).toBe(true);
+    expect(markup).toHaveBeenCalledTimes(5001);
+    expect(dispatch).toHaveBeenCalledOnce();
+    const changed = dispatch.mock.calls[0][0].doc;
+    expect(changed.firstChild.childCount).toBe(5000);
+    expect(changed.firstChild.lastChild.attrs.checked).toBe(false);
+    expect(doc.firstChild!.lastChild!.attrs.checked).toBeNull();
+  });
+
+  it.each(['Paragraph', '## Heading', '```\nCode\n```', '> ## Quoted heading'])(
+    'keeps read-only list availability consistent with the actual command for %s', async markdown => {
+      const { view } = await makeEditor(markdown);
+      const state = view.state;
+      for (const action of ['bulletList', 'orderedList', 'taskList'] as const) {
+        const transaction = vi.spyOn(EditorState.prototype, 'tr', 'get');
+        expect(formatCommand(action)(state)).toBe(true);
+        expect(transaction).not.toHaveBeenCalled();
+        transaction.mockRestore();
+        const dispatch = vi.fn();
+        expect(formatCommand(action)(state, dispatch)).toBe(true);
+        expect(dispatch).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it('disables list creation for a selected non-text block without building a transaction', async () => {
+    const { view } = await makeEditor('---');
+    const state = EditorState.create({
+      schema: view.state.schema, doc: view.state.doc, selection: NodeSelection.create(view.state.doc, 0),
+    });
+    const transaction = vi.spyOn(EditorState.prototype, 'tr', 'get');
+    for (const action of ['bulletList', 'orderedList', 'taskList'] as const) {
+      expect(formatCommand(action)(state)).toBe(false);
+    }
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
   it.each(['bulletList', 'orderedList', 'taskList'] as const)('handles Select All when creating and removing a %s', async action => {
     const { view } = await makeEditor('One\n\nTwo');
     view.dispatch(view.state.tr.setSelection(new AllSelection(view.state.doc)));

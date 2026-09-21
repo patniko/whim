@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyChatEvent, applyChatEvents, parseHistory, type Bubble } from './transcript';
+import { applyChatEvent, applyChatEvents, historyBubbles, parseHistory, type Bubble } from './transcript';
 import { acknowledgeUserMessage, mergeHistoryWithLocal } from '../../shared/chat-identity';
 
 it('retains mobile follow-ups across snapshots and acknowledgements in either order', () => {
@@ -10,6 +10,18 @@ it('retains mobile follow-ups across snapshots and acknowledgements in either or
   const acknowledged = acknowledgeUserMessage([local], 'local', 'sdk');
   expect(mergeHistoryWithLocal(history, acknowledged, new Set(['user:sdk']))).toEqual(history);
   expect(mergeHistoryWithLocal([], [local], new Set(['local']))).toEqual([local]);
+});
+
+it('shows incomplete-history recovery notices without assigning them a durable sequence', () => {
+  const message = 'Showing saved history, which may be incomplete. Reopen this conversation to retry recovering older runtime history.';
+  const [bubble] = historyBubbles([{
+    id: 'history-recovery:legacy', type: 'session_event', eventType: 'info',
+    message, timestamp: '2026-09-10T12:00:00Z',
+  }]);
+  expect(bubble).toMatchObject({
+    id: 'history-recovery:legacy', kind: 'event', level: 'info', text: message,
+  });
+  expect(bubble.sequence).toBeUndefined();
 });
 
 describe('parseHistory', () => {

@@ -30,12 +30,18 @@ npm run dev    # build + tsc watch + esbuild watch + Electron
 All PRs must pass CI, which runs:
 
 ```bash
-npm run typecheck   # tsc -p tsconfig.main.json --noEmit
+npm run typecheck   # main, shared, renderer, and web production TypeScript
 npm run lint        # oxlint src/
 npm test            # vitest run
 ```
 
 Please run these locally before pushing.
+
+Regression tests should exercise the boundaries involved in the change: use
+the real editor for merge races, real storage workers for persistence ordering,
+and lifecycle handlers for workspace recovery. Keep fixtures in disposable
+directories, never an existing user workspace. Coverage reporting includes all
+four source surfaces; `npm test` also runs the renderer and web tests.
 
 ### Known issue on Windows
 

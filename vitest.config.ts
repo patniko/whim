@@ -9,8 +9,8 @@ export default defineConfig({
     globalSetup: ['./scripts/vitest-global-setup.ts'],
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
     coverage: {
-      include: ['src/main/**/*.ts'],
-      exclude: ['src/main/main.ts', 'src/main/preload.ts'],
+      include: ['src/{main,shared,renderer,web}/**/*.{ts,tsx}'],
+      exclude: ['src/main/main.ts', 'src/main/preload.ts', 'src/**/*.test.ts', 'src/**/*.test.tsx', 'src/**/vitest.config.ts'],
     },
   },
 });

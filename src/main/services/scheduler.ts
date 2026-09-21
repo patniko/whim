@@ -4,6 +4,7 @@ import { observeProducer } from '../producer-tasks';
 import { invokeSkill } from '../skill-invocation';
 import { claimScheduledRun, clearSkillSchedule, completeScheduledRun, failScheduledRun, getSkillSchedule, listSkillSchedules, migrateLegacySkillSchedule, recordScheduledRunLaunch } from '../storage';
 import type { ScheduledRun, SkillSchedule } from '../../shared/skill-schedule';
+import { isRestartInterruptedSession } from './scheduled-run-recovery';
 
 export { computeNextRunAt } from './skill-schedule-store';
 const CHECK_INTERVAL_MS = 60_000;
@@ -64,10 +65,10 @@ async function stopExpiredRun(workspace: string, scheduleId: string, run: Schedu
 
 async function reconcileRun(workspace: string, schedule: SkillSchedule, startup: boolean): Promise<boolean> {
   const run = schedule.lastRun;
-  if (!run) return false;
+  // A terminal occurrence no longer owns the agent's later interactive turns.
+  if (!run || run.status !== 'running') return false;
   const agent = run.agentId ? (await getAgentSession(run.agentId)) : null;
   const live = await hasLiveAgent(run);
-  if (run.status !== 'running') return live;
   if (agent?.status === 'completed') {
     // Canvas completion is owned by result delivery, never inferred from launch.
     if (schedule.output === 'legacy') {
@@ -79,7 +80,8 @@ async function reconcileRun(workspace: string, schedule: SkillSchedule, startup:
     }
     return false;
   }
-  if (agent?.status === 'failed') {
+  const interrupted = isRestartInterruptedSession(agent);
+  if (agent?.status === 'failed' && !interrupted) {
     (await failScheduledRun(workspace, schedule.id, run.id, agent.summary || 'Scheduled agent failed.', false));
     return false;
   }
@@ -88,7 +90,7 @@ async function reconcileRun(workspace: string, schedule: SkillSchedule, startup:
     else await failScheduledRun(workspace, schedule.id, run.id, RUN_TIMEOUT_SUMMARY, false);
     return live;
   }
-  if (startup && !live) {
+  if ((startup || interrupted) && !live) {
     (await failScheduledRun(workspace, schedule.id, run.id, 'Scheduled run was interrupted by an app restart.', schedule.output === 'canvas'));
     return false;
   }

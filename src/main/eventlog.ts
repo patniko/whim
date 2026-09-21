@@ -406,7 +406,11 @@ function applyEvent(db: Database.Database, event: LogEvent): void {
     'subagent.updated': 'subagent_records',
   };
   const table = updateTable[op];
-  if (table && !prepare(db, `SELECT 1 FROM ${table} WHERE id = ?`).get(d.id)) {
+  // Legacy updateSpace always logged its timestamped fields, even when the
+  // UPDATE matched no row. Still execute the SQL below to validate its bindings.
+  const legacySpaceUpdate = op === 'space.update' && typeof d.id === 'string' && d.id.length > 0 &&
+    typeof d.fields.updated_at === 'string' && Number.isFinite(Date.parse(d.fields.updated_at));
+  if (table && !legacySpaceUpdate && !prepare(db, `SELECT 1 FROM ${table} WHERE id = ?`).get(d.id)) {
     // Older quick/comment sessions emitted this update without owning a canvas
     // row. Accept only that identifiable historical no-op, not arbitrary misses.
     if (op === 'canvas_agent.updated' && tableExists(db, 'agent_sessions') &&

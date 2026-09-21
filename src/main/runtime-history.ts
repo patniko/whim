@@ -43,7 +43,8 @@ export class RuntimeHistory {
         agent_id TEXT NOT NULL, seq INTEGER NOT NULL, event_id TEXT NOT NULL,
         type TEXT NOT NULL, timestamp TEXT NOT NULL, payload TEXT NOT NULL,
         PRIMARY KEY(agent_id, seq), UNIQUE(agent_id, event_id)
-      )`);
+      );
+      CREATE INDEX idx_runtime_chat_type ON agent_chat_events(agent_id, type)`);
       createChatProjection(db);
       this.histories.set(agentId, { db, sessionId, seq: 0 });
     } catch (error) {

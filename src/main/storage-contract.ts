@@ -16,7 +16,7 @@ export type StorageCommands = Omit<typeof Database, 'getDatabase' | 'isInitializ
   & typeof Skills
   & Pick<typeof Workspace, 'readCanvas' | 'writeCanvas' | 'initSpaceCanvas' | 'ensureSpaceCanvas' | 'materializeSpaceCanvas' | 'archiveSpaceFolder' | 'unarchiveSpaceFolder' | 'deleteSpaceFolder' | 'saveAttachment' | 'readSpaceFile' | 'createPage' | 'readPage' | 'writePage' | 'listPages'>
   & Pick<typeof Schedules, 'getSkillSchedule' | 'listSkillSchedules' | 'listScheduledRuns' | 'saveSkillSchedule' | 'migrateLegacySkillSchedule' | 'clearSkillSchedule' | 'claimScheduledRun' | 'recordScheduledRunLaunch' | 'completeScheduledRun' | 'failScheduledRun'>
-  & Pick<typeof Artifacts, 'bindArtifact' | 'publishArtifact' | 'setArtifactStatus' | 'getArtifact' | 'listArtifacts' | 'getPrimaryArtifact' | 'findArtifactByInstance' | 'deleteArtifact' | 'writeArtifactFile'>
+  & Pick<typeof Artifacts, 'bindArtifact' | 'publishArtifact' | 'acknowledgeArtifactPublication' | 'setArtifactStatus' | 'getArtifact' | 'listArtifacts' | 'getPrimaryArtifact' | 'findArtifactByInstance' | 'deleteArtifact' | 'writeArtifactFile'>
   & {
   getActivityStats: typeof getActivityStats;
   initWorkspace: typeof initWorkspace;

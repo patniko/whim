@@ -15,6 +15,7 @@ import { listLogFiles, SNAPSHOT_FILENAME } from './log-store';
 import { readCanvas, slugify, resolveSpaceFolder } from './workspace';
 import { deriveMarkdownTitle, ensureMarkdownH1Title } from '../shared/markdown-title';
 import { initContentStore, closeContentStore, storeContent, type ContentRef } from './subagent-content-store';
+import { indexSkills } from './storage-index';
 import {
   canSkipReplay,
   computeFingerprint,
@@ -184,8 +185,29 @@ export function applyIncomingChanges(): void {
     return;
   }
   const location: [string, string] = [dbFilePath, logRoot];
-  closeDatabase();
-  initDatabase(...location);
+  const workspaceRoot = path.dirname(path.dirname(dbFilePath));
+  const sessions = db.prepare('SELECT id, session_id FROM spaces WHERE session_id IS NOT NULL')
+    .all() as { id: string; session_id: string }[];
+  const acknowledgedFiles = new Map(expectedLogFiles);
+  try {
+    initializeDatabase(...location, () => {
+      mergeSessionIds(Object.fromEntries(sessions.map(row => [row.id, row.session_id])));
+      syncCanvasContent(workspaceRoot);
+      indexSkills(workspaceRoot);
+    });
+  } catch (error) {
+    // The replacement is published only after all projections succeed. Keep
+    // the last usable cache available, but force a validating rebuild on retry.
+    db = new Database(location[0]);
+    db.pragma('journal_mode = DELETE');
+    db.pragma('recursive_triggers = ON');
+    initContentStore(path.join(path.dirname(location[0]), 'subagent-content'));
+    appliedFingerprint = previous;
+    expectedLogFiles = acknowledgedFiles;
+    fingerprintEligible = false;
+    canvasMetadata.clear();
+    throw error;
+  }
 }
 
 /**
@@ -202,6 +224,10 @@ export function applyIncomingChanges(): void {
  * publish it with a fresh fingerprint sidecar.
  */
 export function initDatabase(dbPath: string, eventLogRoot: string): void {
+  initializeDatabase(dbPath, eventLogRoot);
+}
+
+function initializeDatabase(dbPath: string, eventLogRoot: string, restoreProjections?: () => void): void {
   canvasMetadata.clear();
   if (db?.open) {
     db.close();
@@ -225,7 +251,7 @@ export function initDatabase(dbPath: string, eventLogRoot: string): void {
   const previous = readFingerprint(sidecarPath);
   const current = computeFingerprint(eventLogRoot, dbPath, previous);
 
-  const reuseCache = fs.existsSync(dbPath) && canSkipReplay(previous, current);
+  const reuseCache = !restoreProjections && fs.existsSync(dbPath) && canSkipReplay(previous, current);
   if (process.env.WHIM_PERF === '1') console.info('[perf:storage-open]', {
     reuseCache, logFiles: current.logFiles.length,
   });
@@ -260,6 +286,10 @@ export function initDatabase(dbPath: string, eventLogRoot: string): void {
     createSchema(db);
     const replayResult = replayLog(eventLogRoot, db);
     createQueryIndexes(db);
+    if (restoreProjections) {
+      if (!replayResult.complete) throw new Error('Incomplete event log during synchronization');
+      restoreProjections();
+    }
     db.close();
     db = undefined as any;
     const afterReplay = computeFingerprint(eventLogRoot, temporaryPath, current);

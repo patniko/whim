@@ -7,6 +7,7 @@ import type {
 } from "../shared/chat-types";
 import type { ChatHistoryPage, PageRequest } from "../shared/paging";
 import { decodeCursor, encodeCursor, pageLimit } from "./paged-queries";
+import { RUNTIME_HISTORY_REQUIRED_EVENT } from "../shared/chat-history";
 
 export function createChatProjection(db: Database.Database): void {
   db.exec(`
@@ -126,7 +127,9 @@ export function projectChatHistory(db: Database.Database, agentId: string): numb
         message = {
           id,
           type: "approval",
-          requestId: identity,
+          // The SDK completion correlates by requestId, but the broker's
+          // actionable permission callback is keyed by toolCallId.
+          requestId: request.toolCallId || identity,
           agentId,
           permissionKind: request.kind || "permission",
           intention: request.intention,
@@ -191,13 +194,20 @@ export function queryChatHistoryPage(
   agentId: string,
   request: PageRequest = {},
   scope = `chat:${agentId}`,
-): ChatHistoryPage {
+): ChatHistoryPage & { runtimeSessionId?: string } {
   if (typeof agentId !== "string" || !agentId) throw new Error("Invalid agent ID");
   const limit = pageLimit(request);
   const keys = decodeCursor(request.cursor, scope, 1);
   if (keys && (!Number.isSafeInteger(keys[0]) || Number(keys[0]) < 1))
     throw new Error("Invalid history cursor");
   const watermark = projectChatHistory(db, agentId);
+  const source = db.prepare(
+    "SELECT json_extract(payload,'$.sessionId') AS session_id FROM agent_chat_events WHERE agent_id=? AND type=? ORDER BY seq DESC LIMIT 1",
+  ).get(agentId, RUNTIME_HISTORY_REQUIRED_EVENT) as { session_id: unknown } | undefined;
+  const runtimeSessionId = source?.session_id;
+  if (source && (typeof runtimeSessionId !== "string" || !runtimeSessionId))
+    throw new Error("Invalid runtime history source");
+  const sourceMetadata = typeof runtimeSessionId === "string" ? { runtimeSessionId } : {};
   const before = keys ? Number(keys[0]) : watermark + 1;
   const rows = db
     .prepare(
@@ -211,8 +221,9 @@ export function queryChatHistoryPage(
   ).n;
   const items: (ChatMessage & { sequence: number })[] = [];
   let bytes = Buffer.byteLength(JSON.stringify({
-    items: [], total, watermark, nextCursor: encodeCursor(scope, [before]),
+    items: [], total, watermark, nextCursor: encodeCursor(scope, [before]), ...sourceMetadata,
   }));
+  if (bytes > 4 * 1024 * 1024) throw new Error("Transcript metadata exceeds the 4 MiB page budget");
   let last: number | undefined;
   let more = false;
   for (const row of rows) {
@@ -250,5 +261,6 @@ export function queryChatHistoryPage(
     total,
     watermark,
     nextCursor: more && last !== undefined ? encodeCursor(scope, [last]) : null,
+    ...sourceMetadata,
   };
 }

@@ -78,6 +78,23 @@ const render = async (agentId: string) => {
 const emit = (agentId: string, event: ChatEvent) => act(() => listeners.get(agentId)!(event));
 
 describe('chat event/history races', () => {
+  it('shows an incomplete saved-history notice alongside available messages without legacy RPC fallback', async () => {
+    const api = (globalThis as unknown as { whimAPI: Record<string, unknown> }).whimAPI;
+    const saved: ChatMessage[] = [
+      { id: 'assistant:saved', type: 'assistant', content: 'Available saved answer', isStreaming: false, timestamp: 't', sequence: 2 },
+      { id: 'history-recovery:a', type: 'session_event', eventType: 'info',
+        message: 'Showing saved history, which may be incomplete. Reopen this conversation to retry recovering older runtime history.',
+        timestamp: 't' },
+    ];
+    api.getAgentHistoryPage = vi.fn(async () => ({ items: saved, total: 3, watermark: 2, nextCursor: 'saved-older' }));
+    const legacy = vi.fn();
+    api.getAgentHistory = legacy;
+    api.getAgent = vi.fn(async () => ({ status: 'completed' }));
+    await render('a');
+    expect(captured.messages).toEqual(saved);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
   it('uses normalized backend pages and drops overlapping identified snapshot/live text', async () => {
     const page = deferred<import('../../shared/paging').ChatHistoryPage>();
     const api = (globalThis as unknown as { whimAPI: Record<string, unknown> }).whimAPI;

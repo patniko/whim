@@ -8,7 +8,7 @@ import { initWorkspace, readCanvas, writeCanvas, initSpaceCanvas, ensureSpaceCan
 import { getSkillSchedule, listSkillSchedules, listScheduledRuns, saveSkillSchedule,
   migrateLegacySkillSchedule, clearSkillSchedule, claimScheduledRun,
   recordScheduledRunLaunch, completeScheduledRun, failScheduledRun } from './services/skill-schedule-store';
-import { bindArtifact, publishArtifact, setArtifactStatus, getArtifact, listArtifacts,
+import { bindArtifact, publishArtifact, acknowledgeArtifactPublication, setArtifactStatus, getArtifact, listArtifacts,
   getPrimaryArtifact, findArtifactByInstance, deleteArtifact, writeArtifactFile } from './canvas/artifact-store';
 import { indexSkills, indexSkillsBatch } from './storage-index';
 import { resolveContent } from './subagent-content-store';
@@ -48,7 +48,7 @@ const commands: StorageCommands = {
   getSkillSchedule, listSkillSchedules, listScheduledRuns, saveSkillSchedule,
   migrateLegacySkillSchedule, clearSkillSchedule, claimScheduledRun,
   recordScheduledRunLaunch, completeScheduledRun, failScheduledRun,
-  bindArtifact, publishArtifact, setArtifactStatus, getArtifact, listArtifacts,
+  bindArtifact, publishArtifact, acknowledgeArtifactPublication, setArtifactStatus, getArtifact, listArtifacts,
   getPrimaryArtifact, findArtifactByInstance, deleteArtifact, writeArtifactFile,
   getActivityStats, initWorkspace, indexSkills, indexSkillsBatch,
   migrateOldDatabase,

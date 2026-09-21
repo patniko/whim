@@ -10,9 +10,11 @@ import {
   appendAgentChatEvent,
   listAgentChatEvents,
   clearAgentChatEvents,
+  listAgentHistoryPage,
 } from '../storage';
 import type { AgentSession, AgentChatEvent, CanvasAgent } from '../../shared/types';
 import type { AgentRecord } from './agent-registry';
+import { RUNTIME_HISTORY_REQUIRED_EVENT } from '../../shared/chat-history';
 
 export class AgentPersistence {
   async createCanvasAgentRecord(data: CanvasAgent): Promise<void> {
@@ -58,6 +60,19 @@ export class AgentPersistence {
   /** Update session_id in both agent_sessions and canvas_agents tables. */
   async updateSessionId(agentId: string, newSessionId: string): Promise<void> {
     (await updateAgentSessionId(agentId, newSessionId));
+  }
+
+  /** Legacy mirror watermarks do not prove that earlier runtime events were captured. */
+  async prepareHistoryMirror(agentId: string, sessionId: string): Promise<boolean> {
+    const page = await listAgentHistoryPage(agentId, { limit: 1 });
+    if (page.runtimeSessionId) return page.runtimeSessionId === sessionId;
+    await appendAgentChatEvent(agentId, {
+      event_id: `whim:runtime-history:${sessionId}`,
+      type: RUNTIME_HISTORY_REQUIRED_EVENT,
+      timestamp: new Date().toISOString(),
+      payload: JSON.stringify({ sessionId }),
+    });
+    return true;
   }
 
   /**

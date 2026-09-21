@@ -7,6 +7,7 @@
  * without them rather than failing to launch.
  */
 import type { Canvas } from '@github/copilot-sdk';
+import { acknowledgeArtifactPublication, getArtifact } from '../storage';
 import type { CanvasArtifact } from './artifact-store';
 import type { CanvasArtifactPolicy } from './canvas-policy';
 import { createSkillTemplateCanvas } from './skill-canvas-provider';
@@ -21,7 +22,7 @@ import {
 } from './sdk-canvas-provider';
 
 export interface CanvasSessionHooks {
-  /** Fired once per publish that changed the artifact's bytes. */
+  /** Delivered for changed content, retried until acknowledged. Must be idempotent. */
   onArtifactPublished?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext; instanceId?: string }) => void | Promise<void>;
   /** Fired when an instance is bound to an artifact, including on reconnect. */
   onArtifactBound?: (artifact: CanvasArtifact, ctx: { run: CanvasRunContext; instanceId: string }) => void | Promise<void>;
@@ -52,6 +53,36 @@ export interface CanvasSessionSetup {
   canvasId: string;
 }
 
+const publicationDeliveries = new Map<string, Promise<void>>();
+
+/** Serialize delivery across sessions; the manifest, not this queue, owns retry state. */
+async function deliverPublication(
+  artifact: CanvasArtifact,
+  run: CanvasRunContext,
+  deliver: (current: CanvasArtifact) => void | Promise<void>,
+): Promise<void> {
+  const previous = publicationDeliveries.get(artifact.dir) ?? Promise.resolve();
+  const delivery = previous.then(async () => {
+    const current = await getArtifact(run.workspaceRoot, run.folder, artifact.artifactId);
+    // Another publisher may have superseded this revision or acknowledged it.
+    if (!current?.published || current.pendingPublicationId !== artifact.pendingPublicationId) return;
+    await deliver(current);
+    if (current.pendingPublicationId) {
+      await acknowledgeArtifactPublication({
+        workspaceRoot: run.workspaceRoot, folder: run.folder, artifactId: current.artifactId,
+        publicationId: current.pendingPublicationId,
+      });
+    }
+  });
+  const tail = delivery.then(() => {}, () => {});
+  publicationDeliveries.set(artifact.dir, tail);
+  try {
+    await delivery;
+  } finally {
+    if (publicationDeliveries.get(artifact.dir) === tail) publicationDeliveries.delete(artifact.dir);
+  }
+}
+
 /**
  * Produce the canvas session fields for a run, or `null` when the run is not
  * allowed to produce artifacts.
@@ -76,7 +107,10 @@ export function buildCanvasSessionConfig(
       },
       onPublished: async (artifact, ctx) => {
         await hooks.onArtifactChanged?.(artifact, { run });
-        if (ctx.changed) await hooks.onArtifactPublished?.(artifact, { run, instanceId: ctx.instanceId });
+        if (ctx.changed || artifact.pendingPublicationId) {
+          await deliverPublication(artifact, run, current =>
+            hooks.onArtifactPublished?.(current, { run, instanceId: ctx.instanceId }));
+        }
       },
       onStatusChanged: (artifact) => hooks.onArtifactChanged?.(artifact, { run }),
       onClosed: (ctx) => hooks.onInstanceClosed?.({ instanceId: ctx.instanceId, run }),

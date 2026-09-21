@@ -19,6 +19,7 @@ let worker: Worker | undefined;
 let sequence = 0;
 let initialized = false;
 let closing = false;
+let closePromise: Promise<void> | undefined;
 let pendingBytes = 0;
 const interrupt = new Int32Array(new SharedArrayBuffer(4));
 let failure: Error | undefined;
@@ -94,7 +95,7 @@ function ensureWorker(): Worker {
     if (reply.ok) entry.resolve(reply.value);
     else entry.reject(new Error(reply.error));
   });
-  instance.on('error', fail);
+  instance.on('error', error => { if (worker === instance) fail(error); });
   instance.on('exit', code => {
     if (worker === instance) {
       worker = undefined;
@@ -165,20 +166,33 @@ export async function initDatabase(...args: Parameters<typeof Database.initDatab
 }
 
 /** Admission closes synchronously; the final message follows every admitted operation. */
-export async function closeDatabase(): Promise<void> {
+export function closeDatabase(): Promise<void> {
+  if (!closePromise) {
+    closePromise = closeWorker().finally(() => { closePromise = undefined; });
+  }
+  return closePromise;
+}
+
+async function closeWorker(): Promise<void> {
   if (barrier && !barrierContext.getStore()) await barrier;
-  if (failure) throw failure;
-  if (!worker) { initialized = false; return; }
+  const instance = worker;
   closing = true;
   initialized = false;
   try {
-    await request('closeDatabase', [], true);
+    if (failure) throw failure;
+    if (instance) await request('closeDatabase', [], true);
   } finally {
-    const instance = worker;
-    worker = undefined;
-    if (instance) await instance.terminate();
-    advanceWorkspaceGeneration();
-    closing = false;
+    try {
+      if (instance) await instance.terminate();
+    } finally {
+      // Keep the instance registered until exit so unexpected exits settle
+      // admitted requests. A failed worker can be reopened after this close.
+      if (worker === instance) worker = undefined;
+      if (pending.size) fail(new Error('Storage closed before pending operations completed'));
+      failure = undefined;
+      if (instance) advanceWorkspaceGeneration();
+      closing = false;
+    }
   }
 }
 
@@ -196,11 +210,12 @@ export async function syncCanvasContent(workspace: string): Promise<void> {
 }
 
 export async function indexSkills(workspace: string): Promise<void> {
-  const current = generation;
+  const current = workspaceContext.getStore() ?? generation;
   let cursor: string | undefined;
   do {
-    cursor = await withStorageGeneration(current, async () =>
-      (await request('indexSkillsBatch', [workspace, cursor])).cursor);
+    const batch = await withStorageGeneration(current, () => request('indexSkillsBatch', [workspace, cursor]));
+    if (current !== generation) throw new Error('Stale workspace operation');
+    cursor = batch.cursor;
   } while (cursor);
 }
 
@@ -231,7 +246,7 @@ export const {
   getSkillSchedule, listSkillSchedules, listScheduledRuns, saveSkillSchedule,
   migrateLegacySkillSchedule, clearSkillSchedule, claimScheduledRun,
   recordScheduledRunLaunch, completeScheduledRun, failScheduledRun,
-  bindArtifact, publishArtifact, setArtifactStatus, getArtifact, listArtifacts,
+  bindArtifact, publishArtifact, acknowledgeArtifactPublication, setArtifactStatus, getArtifact, listArtifacts,
   getPrimaryArtifact, findArtifactByInstance, deleteArtifact, writeArtifactFile,
 } = commands;
 

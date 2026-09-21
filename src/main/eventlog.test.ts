@@ -384,6 +384,27 @@ describe('replayLog', () => {
       expect(() => replayLog(logRoot, db)).toThrow('Unsupported space update field');
       expect(getSpace('u1')).toBeUndefined();
     });
+
+    it.each(['space.update', 'intent.update'])('replays validated legacy %s no-ops without creating rows', op => {
+      writeLog([{
+        ts: '2024-01-02T00:00:00.000Z', op,
+        data: { id: 'missing', fields: { updated_at: '2024-01-02T00:00:00.000Z', description: 'No row' } },
+      }]);
+      expect(replayLog(logRoot, db)).toEqual({ complete: true });
+      expect(getSpace('missing')).toBeUndefined();
+      expect(getSpace('u1').description).toBe('Original');
+    });
+
+    it.each([
+      { fields: { unsupported_field: 'not a historical update' }, error: 'Unsupported space update field' },
+      { fields: [], error: 'Invalid space update fields' },
+    ])('still rejects malformed legacy no-ops ($error)', ({ fields, error }) => {
+      writeLog([{
+        ts: '2024-01-02T00:00:00.000Z', op: 'space.update', data: { id: 'missing', fields },
+      }]);
+      expect(() => replayLog(logRoot, db)).toThrow(error);
+      expect(getSpace('missing')).toBeUndefined();
+    });
   });
 
   // ── space.delete ─────────────────────────────────────

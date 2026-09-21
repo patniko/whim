@@ -6,7 +6,7 @@ import { AgentNotifier } from './agents/agent-notifier';
 import { AgentPersistence } from './agents/agent-persistence';
 import { InteractionBroker } from './agents/interaction-broker';
 import { deleteAgentSession, listAllRunningAgents, updateCanvasAgentStatus, listAgentSummaries, getAgentSession, listAgentSessions, listAgentHistoryPage, isInitialized } from './storage';
-import type { AgentPageRequest, AgentPage, PageRequest } from '../shared/paging';
+import type { AgentPageRequest, AgentPage, PageRequest, ChatHistoryPage } from '../shared/paging';
 import type { AgentSummaryRow } from './paged-queries';
 import { pageLimit, encodeCursor, decodeCursor } from './paged-queries';
 import { subscribeWebRemoteEvents } from './web/event-hub';
@@ -18,6 +18,7 @@ import { initCliRunner } from './agents/cli-runner';
 import { initCommentWorkflow } from './agents/comment-workflow';
 import { releaseCanvasInstances } from './canvas/canvas-lifecycle';
 import { endCanvasRun } from './canvas/canvas-outcome';
+import { RESTART_INTERRUPTION_SUMMARY } from './services/scheduled-run-recovery';
 
 export type { AgentStatus } from './agents/agent-registry';
 
@@ -636,26 +637,117 @@ function snapshotAgent(row: AgentSummaryRow, preview: boolean): AgentListSnapsho
     };
   }
 
+  const historyAttachments = new Map<string, ReturnType<typeof resumeAgentSession>>();
+  async function attachHistorySession(agentId: string) {
+    let flight = historyAttachments.get(agentId);
+    if (!flight) {
+      flight = resumeAgentSession(agentId, { allowRestart: false });
+      historyAttachments.set(agentId, flight);
+    }
+    try {
+      return await flight;
+    } finally {
+      if (historyAttachments.get(agentId) === flight) historyAttachments.delete(agentId);
+    }
+  }
+
+  function savedHistoryCursor(agentId: string, cursor: string | null): string | null {
+    if (!cursor) return null;
+    const keys = decodeCursor(cursor, `chat:${agentId}`, 1);
+    if (!keys) throw new Error('Invalid history cursor');
+    return encodeCursor(`save:${agentId}`, keys);
+  }
+
+  function savedHistoryWithNotice(agentId: string, page: ChatHistoryPage, failure?: unknown, replaced = false): ChatHistoryPage {
+    const detail = failure instanceof Error ? ` ${failure.message.slice(0, 240)}` : '';
+    const notice: import('../shared/chat-types').ChatMessage = {
+      id: `history-recovery:${agentId}`,
+      type: 'session_event',
+      eventType: 'info',
+      message: replaced
+        ? 'Showing saved history, which may be incomplete. The earlier runtime was replaced; messages absent from the saved transcript cannot be recovered from the replacement session.'
+        : `Showing saved history, which may be incomplete.${detail} Reopen this conversation to retry recovering older runtime history. No replacement session was created.`,
+      timestamp: page.items[page.items.length - 1]?.timestamp ?? new Date().toISOString(),
+    };
+    const result: ChatHistoryPage = {
+      ...page,
+      total: page.total + 1,
+      items: [...page.items, notice],
+      nextCursor: savedHistoryCursor(agentId, page.nextCursor),
+    };
+    // An almost-full message still needs to remain accessible. In that case
+    // page the saved rows after the notice, without mixing runtime ordinals.
+    return Buffer.byteLength(JSON.stringify(result)) <= 4 * 1024 * 1024 ? result : {
+      ...result, items: [notice], nextCursor: encodeCursor(`save:${agentId}`, [page.watermark + 1]),
+    };
+  }
+
   export async function getAgentHistoryPage(agentId: string, request: PageRequest = {}) {
     pageLimit(request);
     if (typeof agentId !== 'string' || !agentId) throw new Error('Invalid agent ID');
+    if (request.cursor !== undefined && typeof request.cursor !== 'string') throw new Error('Invalid history cursor');
     if (!isInitialized()) throw new Error('No workspace is open');
     let record = registry.get(agentId);
-    if (record?.ephemeral || record?.runtimeHistory) {
+    if (record?.ephemeral) {
       if (!record.session) throw new Error('Agent is still starting; retry history when it is active');
-      return loadRuntimeHistoryPage(agentId, record.session, !!record.ephemeral, request);
+      return loadRuntimeHistoryPage(agentId, record.session, true, request);
     }
-    const page = await listAgentHistoryPage(agentId, request);
-    if (page.watermark === 0 && await getAgentSession(agentId)) {
+    const persisted = await getAgentSession(agentId);
+    const retainedRuntime = persisted?.source === 'sdk' || persisted?.source === 'cli';
+    const runtimeId = record?.session?.sessionId ?? persisted?.session_id;
+    if (request.cursor) {
+      let savedKeys: ReturnType<typeof decodeCursor> = null;
+      try {
+        savedKeys = decodeCursor(request.cursor, `save:${agentId}`, 1);
+      } catch { /* Validate the other two history cursor domains below. */ }
+      if (savedKeys) {
+        const page = await listAgentHistoryPage(agentId, {
+          ...request, cursor: encodeCursor(`chat:${agentId}`, savedKeys),
+        });
+        return { ...page, total: page.total + 1, nextCursor: savedHistoryCursor(agentId, page.nextCursor) };
+      }
+      let mirrorCursor = false;
+      try {
+        decodeCursor(request.cursor, `chat:${agentId}`, 1);
+        mirrorCursor = true;
+      } catch (error) {
+        if (!runtimeId) throw error;
+        const keys = decodeCursor(request.cursor, `runtime:${agentId}:${runtimeId}`, 1);
+        if (!keys || !Number.isSafeInteger(keys[0]) || Number(keys[0]) < 1)
+          throw new Error('Invalid history cursor');
+      }
+      // Never switch sequence domains midway through paging a saved fallback.
+      if (mirrorCursor) {
+        return listAgentHistoryPage(agentId, request);
+      }
+    }
+    const page = await listAgentHistoryPage(agentId, request.cursor ? { limit: 1 } : request);
+    const needsRuntime = !!record?.runtimeHistory || !!request.cursor || (persisted && (
+      page.watermark === 0 || page.runtimeSessionId === persisted.session_id
+      || (retainedRuntime && !record && !page.runtimeSessionId)
+    ));
+    const needsLiveAttachment = !record && persisted?.source === 'sdk'
+      && persisted.run_location === 'cloud' && ACTIVE_WORKER_STATUSES.has(persisted.status);
+    if (!needsRuntime && !needsLiveAttachment) {
+      return page.runtimeSessionId ? savedHistoryWithNotice(agentId, page, undefined, true) : page;
+    }
+    try {
       if (!record) {
-        if (!await resumeAgentSession(agentId, { allowRestart: false })) throw new Error('The runtime session is unavailable; no mirrored history exists');
+        if (!await attachHistorySession(agentId)) throw new Error('The runtime session is unavailable; no complete mirrored history exists');
         record = registry.get(agentId);
       }
       if (!record?.session) throw new Error('Agent history is not available yet; retry when the session is active');
+      if (!needsRuntime) return savedHistoryWithNotice(agentId, page, undefined, true);
+      if (!record.runtimeHistory && persisted) await persistence.prepareHistoryMirror(agentId, persisted.session_id);
       record.runtimeHistory = true;
-      return loadRuntimeHistoryPage(agentId, record.session, !!record.ephemeral, request);
+      const runtimePage = await loadRuntimeHistoryPage(agentId, record.session, false, request);
+      if (runtimePage.total === 0 && page.total > 0) throw new Error('The runtime returned no retained conversation history.');
+      return runtimePage;
+    } catch (error) {
+      if (request.cursor || page.total === 0) throw error;
+      console.warn(`[agent-service] Retained history recovery failed for ${agentId}; keeping the saved transcript:`, error);
+      return savedHistoryWithNotice(agentId, page, error);
     }
-    return page;
   }
 
 /** Minimal worker shape consumed by the system tray menu. */
@@ -747,7 +839,7 @@ export async function reconcileStaleAgents(): Promise<void> {
         continue;
       }
       try {
-        (await persistence.updateSessionStatus(row.id, 'failed', 'Session lost — app restarted'));
+        (await persistence.updateSessionStatus(row.id, 'failed', RESTART_INTERRUPTION_SUMMARY));
         console.log(`[agent-service] Reconciled stale agent session ${row.id}: ${row.status} → failed`);
       } catch { /* non-fatal */ }
     }

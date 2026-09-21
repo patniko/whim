@@ -139,6 +139,7 @@ describe('window-manager canvas helpers', () => {
     // Fire each window's 'closed' handler to drop it from module-level state.
     for (const win of createdWindows) win.__fire('closed');
     createdWindows.length = 0;
+    ipcOnHandlers.get('window:set-pinned')?.({}, false);
   });
 
   it('lists only visible canvases with a label from the target title', async () => {
@@ -228,5 +229,21 @@ describe('window-manager canvas helpers', () => {
 
     win.__fire('closed');
     expect((await getOpenCanvases()).map((c) => c.winId)).not.toContain(win.id);
+  });
+
+  it('keeps canvas always-on-top independent from the side panel pin', () => {
+    const win = openCanvas({ kind: 'space', id: 's1', title: 'A' });
+    const setSidePanelPinned = ipcOnHandlers.get('window:set-pinned')!;
+    const setCanvasPinned = ipcOnHandlers.get('canvas-window:set-always-on-top')!;
+
+    win.setAlwaysOnTop.mockClear();
+    setSidePanelPinned({}, true);
+    expect(win.setAlwaysOnTop).toHaveBeenLastCalledWith(false);
+
+    setCanvasPinned({ sender: win.webContents }, true);
+    expect(win.setAlwaysOnTop).toHaveBeenLastCalledWith(true);
+
+    setSidePanelPinned({}, false);
+    expect(win.setAlwaysOnTop).toHaveBeenLastCalledWith(true);
   });
 });

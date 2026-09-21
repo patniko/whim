@@ -1,10 +1,20 @@
 import type { WhimAPI } from '../shared/whim-api';
+import { registerReadAPI } from './ipc-client';
 
 /** Track admitted setting writes, including writes started outside the legacy shell. */
 export function trackSettingWrites<T extends object>(api: T, showError: () => void = () => {}) {
   const pending = new Set<Promise<unknown>>();
-  const failures = new Map<string, Error>();
+  const failures = new Map<string, Map<Promise<unknown>, Error>>();
   const writes = /^(setSetting|save|setHotkey|resetHotkey|setWebRemote|regenerateWebRemote|revokeWebRemote)/;
+  const recordFailure = (identity: string, operation: Promise<unknown>, error: Error) => {
+    let failed = failures.get(identity);
+    if (!failed) {
+      failed = new Map();
+      failures.set(identity, failed);
+    }
+    failed.set(operation, error);
+    showError();
+  };
   // Electron freezes contextBridge objects. Proxying that object directly
   // cannot legally replace its non-configurable function properties.
   const tracked = new Proxy({ ...api }, {
@@ -13,28 +23,30 @@ export function trackSettingWrites<T extends object>(api: T, showError: () => vo
       if (typeof key !== 'string' || typeof value !== 'function' || !writes.test(key)) return value;
       return (...args: unknown[]) => {
         const identity = key === 'setSetting' ? `${key}:${String(args[0])}` : key;
-        const result = Promise.resolve().then(() => Reflect.apply(value, target, args)).then(result => {
+        const operation = Promise.resolve().then(() => Reflect.apply(value, target, args)).then(result => {
           if (result && typeof result === 'object' && ('error' in result && result.error || 'success' in result && result.success === false)) {
-            failures.set(identity, new Error('Settings write failed; changes retained'));
-            showError();
+            recordFailure(identity, operation, new Error('Settings write failed; changes retained'));
             return result;
           }
           failures.delete(identity);
           return result;
         }).catch(error => {
-          failures.set(identity, error instanceof Error ? error : new Error(String(error)));
-          showError();
+          recordFailure(identity, operation, error instanceof Error ? error : new Error(String(error)));
           throw error;
         });
-        pending.add(result);
-        void result.then(() => pending.delete(result), () => pending.delete(result));
-        return result;
+        pending.add(operation);
+        void operation.then(() => pending.delete(operation), () => pending.delete(operation));
+        return operation;
       };
     },
   });
+  registerReadAPI(tracked, api);
   return {
     api: tracked,
-    discardFailure(method: string) { failures.delete(method); },
+    discardFailure(method: string, operation?: Promise<unknown>) {
+      if (operation) failures.get(method)?.delete(operation);
+      if (!operation || failures.get(method)?.size === 0) failures.delete(method);
+    },
     async flush() {
       while (pending.size) await Promise.all(pending);
       if (failures.size) throw new Error('A settings write failed. Retry it before closing.');

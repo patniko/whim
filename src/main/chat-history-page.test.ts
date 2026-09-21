@@ -80,6 +80,28 @@ describe("durable normalized transcript pages", () => {
       { type: "approval", requestId: "request", responded: true, approved: true },
     ]);
   });
+  it("correlates SDK permission completions independently from actionable broker IDs", () => {
+    append("permission.requested", {
+      requestId: "rpc-first", permissionRequest: { toolCallId: "tool-first", kind: "write" },
+    });
+    append("permission.requested", {
+      requestId: "rpc-second", permissionRequest: { toolCallId: "tool-second", kind: "write" },
+    });
+    expect(queryChatHistoryPage(db, "agent").items).toMatchObject([
+      { requestId: "tool-first", responded: false },
+      { requestId: "tool-second", responded: false },
+    ]);
+    append("permission.completed", { requestId: "rpc-first", result: { kind: "approve-once" } });
+    expect(queryChatHistoryPage(db, "agent").items).toMatchObject([
+      { requestId: "tool-first", responded: true, approved: true },
+      { requestId: "tool-second", responded: false },
+    ]);
+    append("permission.completed", { requestId: "rpc-second", result: { kind: "reject" } });
+    expect(queryChatHistoryPage(db, "agent").items).toMatchObject([
+      { requestId: "tool-first", responded: true, approved: true },
+      { requestId: "tool-second", responded: true, approved: false },
+    ]);
+  });
   it("applies only the suffix after a read and invalidates projections on transcript deletion", () => {
     append("tool.execution_start", { toolCallId: "tool", toolName: "view" });
     expect(queryChatHistoryPage(db, "agent").items[0]).toMatchObject({ completed: false });
