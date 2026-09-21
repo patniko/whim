@@ -320,6 +320,9 @@
       <header>
         <button id="canvas-back" class="header-icon-btn" title="Back">←</button>
         <div class="canvas-title-wrap">
+          <button id="canvas-open-folder" class="canvas-title-folder hidden" title="Open folder" aria-label="Open folder">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+          </button>
           <h1 id="canvas-title" class="canvas-title-header"></h1>
           <button id="canvas-title-ai" class="canvas-title-ai hidden" title="Generate title from content">✨</button>
           <button id="canvas-schedule-indicator" class="canvas-schedule-indicator hidden" title="Edit schedule">
@@ -404,10 +407,6 @@
               <button id="canvas-schedule" class="canvas-menu-item" data-context="skill">
                 <span class="canvas-menu-icon">🕐</span>
                 <span class="canvas-menu-label" id="canvas-schedule-label">Set Schedule…</span>
-              </button>
-              <button id="canvas-open-folder" class="canvas-menu-item">
-                <span class="canvas-menu-icon">📁</span>
-                <span>Open Folder</span>
               </button>
             </div>
           </div>

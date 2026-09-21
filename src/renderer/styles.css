@@ -5391,6 +5391,50 @@ body.platform-darwin .kbd-mod::after { content: '⌘'; }
   min-width: 0;
 }
 
+.canvas-title-folder {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: rgba(0, 0, 0, 0.5);
+  background: none;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.canvas-title-wrap:hover .canvas-title-folder,
+.canvas-title-folder:focus-visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.canvas-title-folder:hover {
+  color: rgba(0, 0, 0, 0.8);
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.canvas-title-folder.hidden {
+  display: none;
+}
+
+body.dark .canvas-title-folder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+body.dark .canvas-title-folder:hover {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .canvas-title-ai {
   flex-shrink: 0;
   background: none;

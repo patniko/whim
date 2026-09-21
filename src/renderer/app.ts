@@ -4022,6 +4022,7 @@ function updateCanvasMenuContext(isSkill: boolean): void {
     el.classList.toggle('hidden', !isSkill);
   });
   canvasLaunchLabel.textContent = isSkill ? 'Run Skill' : 'Run Canvas';
+  canvasOpenFolder.classList.toggle('hidden', !(canvasSpaceId || canvasPageSpaceId));
 
   // Sharing isn't supported for skill templates yet — hide the share control.
   canvasShareWrap?.classList.toggle('hidden', isSkill);
@@ -4685,10 +4686,8 @@ canvasSaveBtn.addEventListener('click', saveCanvas);
 canvasBack.addEventListener('click', closeCanvas);
 
 canvasOpenFolder.addEventListener('click', () => {
-  closeCanvasMenu();
-  if (canvasSpaceId) {
-    whimAPI.openSpaceFolder(canvasSpaceId);
-  }
+  const folderSpaceId = canvasSpaceId ?? canvasPageSpaceId;
+  if (folderSpaceId) whimAPI.openSpaceFolder(folderSpaceId);
 });
 
 canvasLaunchBtn.addEventListener('click', async () => {
