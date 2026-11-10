@@ -14,9 +14,10 @@ const mock = vi.hoisted(() => ({
 vi.mock('react-dom/client', () => ({
   createRoot: () => ({ render: mock.render }),
 }));
+const establishSession = vi.hoisted(() => vi.fn());
 vi.mock('./lib/client', () => ({
   hasSession: mock.health,
-  establishSession: vi.fn(),
+  establishSession,
   endSession: vi.fn(),
   WebRemoteClient: class {
     invoke = mock.invoke;
@@ -42,6 +43,7 @@ beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.clearAllMocks();
   mock.health.mockReset().mockResolvedValue(true);
+  establishSession.mockReset();
   mock.write.mockReset().mockResolvedValue({ success: true });
   mock.invoke.mockReset().mockImplementation(async (channel: string, ...args: unknown[]) => {
     if (channel === 'personas:list') return [];
@@ -78,6 +80,13 @@ async function typeInto(textarea: HTMLTextAreaElement, text: string): Promise<vo
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, text);
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
+async function typeIntoInput(input: HTMLInputElement, text: string): Promise<void> {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, text);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
   });
 }
 
@@ -132,5 +141,79 @@ describe('mobile reconnect draft preservation', () => {
     const savedUnload = new Event('beforeunload', { cancelable: true });
     window.dispatchEvent(savedUnload);
     expect(savedUnload.defaultPrevented).toBe(false);
+  });
+});
+
+describe('sign-in page', () => {
+  it('shows a sign-in form when there is no session', async () => {
+    mock.health.mockResolvedValueOnce(false);
+    await mount();
+    expect(document.querySelector('h1')!.textContent).toBe('Sign in');
+    expect(document.querySelector('#login-token')).not.toBeNull();
+  });
+
+  it('toggles token visibility and signs in with the entered token', async () => {
+    mock.health.mockResolvedValueOnce(false);
+    establishSession.mockResolvedValueOnce(undefined);
+    await mount();
+
+    const input = document.querySelector<HTMLInputElement>('#login-token')!;
+    expect(input.type).toBe('password');
+    const [showButton] = Array.from(document.querySelectorAll<HTMLButtonElement>('.login-token-row button'));
+    await act(async () => { showButton.click(); });
+    expect(input.type).toBe('text');
+
+    await typeIntoInput(input, 'my-token');
+    const form = document.querySelector('form')!;
+    await act(async () => { form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true })); });
+
+    expect(establishSession).toHaveBeenCalledWith('my-token');
+    expect(document.querySelector('.tabs')).not.toBeNull();
+  });
+
+  it('shows the server error when the token is rejected', async () => {
+    mock.health.mockResolvedValueOnce(false);
+    establishSession.mockRejectedValueOnce(new Error('That token was not accepted.'));
+    await mount();
+
+    const input = document.querySelector<HTMLInputElement>('#login-token')!;
+    await typeIntoInput(input, 'bad-token');
+    const form = document.querySelector('form')!;
+    await act(async () => { form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true })); });
+
+    expect(document.querySelector('.login-error')!.textContent).toBe('That token was not accepted.');
+  });
+
+  it('pastes a trimmed token from the clipboard and enables submission', async () => {
+    mock.health.mockResolvedValueOnce(false);
+    const readText = vi.fn().mockResolvedValue('  clipboard-token  ');
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { readText } });
+    await mount();
+
+    const input = document.querySelector<HTMLInputElement>('#login-token')!;
+    const submit = document.querySelector<HTMLButtonElement>('form button[type="submit"]')!;
+    expect(submit.disabled).toBe(true);
+    const [, pasteButton] = Array.from(document.querySelectorAll<HTMLButtonElement>('.login-token-row button'));
+    await act(async () => { pasteButton.click(); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(readText).toHaveBeenCalledOnce();
+    expect(input.value).toBe('clipboard-token');
+    expect(submit.disabled).toBe(false);
+  });
+
+  it('shows an inline error when clipboard access is denied', async () => {
+    mock.health.mockResolvedValueOnce(false);
+    const readText = vi.fn().mockRejectedValue(new DOMException('Denied', 'NotAllowedError'));
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { readText } });
+    await mount();
+
+    const [, pasteButton] = Array.from(document.querySelectorAll<HTMLButtonElement>('.login-token-row button'));
+    await act(async () => { pasteButton.click(); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(readText).toHaveBeenCalledOnce();
+    expect(document.querySelector('.login-error')!.textContent).toBe('Could not read the clipboard. Paste the token manually.');
+    expect(document.querySelector<HTMLInputElement>('#login-token')!.value).toBe('');
   });
 });

@@ -130,13 +130,24 @@ function Login({ onLogin, error }: { onLogin: (token: string) => Promise<void>; 
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(error);
+  const [reveal, setReveal] = useState(false);
+
+  async function pasteToken() {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) { setValue(text.trim()); setFailure(null); }
+    } catch {
+      // Clipboard access can be denied by the browser; the user can still type the token manually.
+      setFailure('Could not read the clipboard. Paste the token manually.');
+    }
+  }
 
   return (
     <main className="login">
       <div className="brand">whim</div>
-      <h1>Remote access</h1>
-      <p>Enter the token from the desktop app's settings, or scan the QR code from your phone.</p>
-      {failure && <p className="login-error">{failure}</p>}
+      <h1>Sign in</h1>
+      <p>Enter the pairing token from the desktop app's settings, or scan the QR code from your phone.</p>
+      {failure && <p className="login-error" role="alert">{failure}</p>}
       <form
         onSubmit={async (e) => {
           e.preventDefault();
@@ -152,8 +163,23 @@ function Login({ onLogin, error }: { onLogin: (token: string) => Promise<void>; 
           }
         }}
       >
-        <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="Token" autoFocus />
-        <button type="submit" disabled={busy}>{busy ? 'Connecting…' : 'Connect'}</button>
+        <label className="login-field" htmlFor="login-token">Pairing token</label>
+        <div className="login-token-row">
+          <input
+            id="login-token"
+            type={reveal ? 'text' : 'password'}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="Token"
+            autoComplete="off"
+            autoFocus
+          />
+          <button type="button" className="ghost" onClick={() => setReveal(r => !r)}>
+            {reveal ? 'Hide' : 'Show'}
+          </button>
+          <button type="button" className="ghost" onClick={() => void pasteToken()}>Paste</button>
+        </div>
+        <button type="submit" disabled={busy || !value.trim()}>{busy ? 'Signing in…' : 'Sign in'}</button>
       </form>
     </main>
   );

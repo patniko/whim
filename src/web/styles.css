@@ -312,6 +312,9 @@ button.icon-btn { padding: 6px 12px; font-size: 1.2rem; line-height: 1; }
 .login h1 { font-size: 2rem; }
 .login p { margin: 0; color: var(--muted); line-height: 1.55; }
 .login form { display: flex; flex-direction: column; gap: 12px; }
+.login-field { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+.login-token-row { display: flex; gap: 8px; }
+.login-token-row input { flex: 1; min-width: 0; }
 .login-error { color: #ff8f8f; font-size: 0.9rem; }
 .login button[disabled] { opacity: 0.6; cursor: default; }
 
