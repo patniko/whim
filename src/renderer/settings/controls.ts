@@ -1724,9 +1724,9 @@ export function mountSettings(host: SettingsHost) {
   function cliSourceLabel(source: string): string {
     switch (source) {
       case "bundled":
+        return "Bundled in-process";
+      case "stdio":
         return "Bundled native stdio";
-      case "inprocess":
-        return "Bundled in-process (experimental)";
       case "auto":
         return "Auto-detected";
       case "path":
@@ -1816,7 +1816,7 @@ export function mountSettings(host: SettingsHost) {
         source !== "path" || cliDiscoveredSelect?.value !== host.CLI_CUSTOM_OPTION;
     }
     if (cliServerFields) cliServerFields.hidden = source !== "server";
-    if (cliInProcessWarning) cliInProcessWarning.hidden = source !== "inprocess";
+    if (cliInProcessWarning) cliInProcessWarning.hidden = source !== "bundled";
   }
 
   async function loadRuntimeSourceSettings(): Promise<void> {
@@ -1905,7 +1905,7 @@ export function mountSettings(host: SettingsHost) {
       const runtime = await host.whimAPI.getCliRuntimeStatus();
       if (
         runtime.source === "bundled" ||
-        runtime.source === "inprocess" ||
+        runtime.source === "stdio" ||
         runtime.source === "server"
       ) {
         cliMxcIndicator.textContent =

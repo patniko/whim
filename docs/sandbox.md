@@ -2,6 +2,8 @@
 
 This document summarizes the sandbox implementation across the three layers — **Whim** (Electron client), **copilot-sdk** (SDK), and **copilot-agent-runtime** (runtime) — covering what's been built, the end-to-end flows, and remaining gaps.
 
+> **SDK 2.0 option names:** the flows below use the SDK 1.x flat names. With `@microsoft/copilot-sdk` 2.0, `onPermissionRequest` is `permissions.onRequest`, `hooks` is `hooks.handlers`, `onUserInputRequest`/`onElicitationRequest` live under `interaction`, `mcpServers` is `mcp.servers`, and runtime enforcement is pushed with `session.rpc.options.update({ permissions: { sandbox } })`.
+
 ---
 
 ## Architecture

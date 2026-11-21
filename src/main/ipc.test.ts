@@ -425,7 +425,7 @@ describe('IPC handlers', () => {
       expect(setConfigValue).not.toHaveBeenCalled();
     });
 
-    it.each(['bundled', 'inprocess', 'auto', 'path', 'server'])('preserves the selected runtime source: %s', async source => {
+    it.each(['bundled', 'stdio', 'auto', 'path', 'server'])('preserves the selected runtime source: %s', async source => {
       vi.mocked(setConfigValue).mockClear();
       expect(await invoke('settings:set', 'cli_source', source)).toBe(source);
       expect(setConfigValue).toHaveBeenCalledExactlyOnceWith('cliSource', source);

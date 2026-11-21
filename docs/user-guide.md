@@ -351,13 +351,13 @@ Keep separate repos — for example **work** and **personal** — and switch bet
 The active profile's name appears next to the whim logo at the bottom of the panel.
 
 ### Copilot Runtime
-whim ships with the Copilot SDK's **native runtime** and uses it over stdio by default — nothing to install. In Settings → **Copilot Runtime** you can choose where the runtime comes from:
+whim ships with the Copilot SDK's **native runtime** and, like the SDK itself, hosts it inside the app by default — nothing to install. In Settings → **Copilot Runtime** you can choose where the runtime comes from:
 
-- **Bundled native stdio** *(default, recommended)* — the SDK's native runtime in a separate process, without starting the full CLI.
-- **Bundled in-process** *(experimental, opt-in)* — the same native runtime loaded into Whim's main process. Avoids the runtime subprocess but shares its crash and resource-lifecycle risks with the app. If sessions hang, switch back to bundled native stdio; restart Whim if needed. Changing native runtime builds requires an app restart.
-- **Auto-detect local CLI** — find and use a locally-installed CLI, preferring the newest self-updated version (under `~/.copilot/pkg/…`). Use this for terminal-resumable sessions that share state with your own `copilot` install.
-- **Custom CLI path** — point at a specific `copilot` binary or entry point.
-- **Remote CLI server** — connect to an already-running runtime by URL (`host:port` or `http://host:port`) with an optional connection token.
+- **Bundled in-process** *(default, recommended)* — the SDK's native runtime loaded into Whim's main process, with no runtime subprocess. It shares the app's process, so a runtime crash can close Whim; if sessions hang or crash, switch to bundled native stdio. Changing native runtime builds requires an app restart.
+- **Bundled native stdio** — the same native runtime in a separate process, for crash isolation, without starting the full CLI.
+- **Auto-detect local CLI** — find and use a locally-installed CLI, preferring the newest self-updated version (under `~/.copilot/pkg/…`). Use this for terminal-resumable sessions that share state with your own `copilot` install. Requires Copilot CLI 1.0.113 or newer.
+- **Custom CLI path** — point at a specific `copilot` binary or entry point (Copilot CLI 1.0.113 or newer).
+- **Remote CLI server** — connect to an already-running runtime by address (`host:port` or `http://host:port`) with an optional connection token.
 
 Use **Test connection** to verify the selected runtime actually connects (it performs a real handshake), and the **Active** line shows the resolved source, version, and whether it meets the minimum supported version.
 

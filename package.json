@@ -45,6 +45,7 @@
       "node_modules/font-list/**",
       "node_modules/@github/copilot/**",
       "node_modules/@github/copilot-*/**",
+      "node_modules/@microsoft/copilot-sdk-*/**",
       "node_modules/koffi/**",
       "node_modules/@koromix/**"
     ],
@@ -114,8 +115,8 @@
   "type": "commonjs",
   "dependencies": {
     "@github/copilot": "1.0.78",
-    "@github/copilot-sdk": "1.0.13",
     "@huggingface/transformers": "^4.2.0",
+    "@microsoft/copilot-sdk": "2.0.0",
     "@milkdown/kit": "^7.21.3",
     "@milkdown/react": "^7.21.3",
     "@mozilla/readability": "^0.6.0",

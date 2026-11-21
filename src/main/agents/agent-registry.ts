@@ -1,4 +1,4 @@
-import type { CopilotSession } from '@github/copilot-sdk';
+import type { CopilotSession } from '@microsoft/copilot-sdk';
 import type { AgentAnchor } from '../../shared/types';
 import type { ResolvedPathPolicy } from './sandbox-policies';
 import type { SandboxConfigDirs } from '../ai';

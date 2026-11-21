@@ -75,7 +75,7 @@ export function getBundledSdkRuntimePaths(
   const variant = platform === 'linux' && linuxMusl ? 'linuxmusl' : platform;
   const target = `${variant}-${arch}`;
   const root = appPath.endsWith('.asar') ? `${appPath}.unpacked` : appPath;
-  const directory = pathApi.join(root, 'node_modules', '@github', `copilot-sdk-${target}`, 'prebuilds', target);
+  const directory = pathApi.join(root, 'node_modules', '@microsoft', `copilot-sdk-${target}`, 'prebuilds', target);
   return {
     executable: pathApi.join(directory, platform === 'win32' ? 'copilot-runtime.exe' : 'copilot-runtime'),
     library: pathApi.join(directory, 'runtime.node'),

@@ -87,9 +87,9 @@ export interface UserInputMessage {
 }
 
 // Re-export SDK elicitation schema types for convenience
-export type ElicitationSchemaField = import('@github/copilot-sdk').ElicitationSchemaField;
-export type ElicitationSchema = import('@github/copilot-sdk').ElicitationSchema;
-export type ElicitationFieldValue = import('@github/copilot-sdk').ElicitationFieldValue;
+export type ElicitationSchemaField = import('@microsoft/copilot-sdk').ElicitationSchemaField;
+export type ElicitationSchema = import('@microsoft/copilot-sdk').ElicitationSchema;
+export type ElicitationFieldValue = import('@microsoft/copilot-sdk').ElicitationFieldValue;
 
 export interface ElicitationMessage {
   id: string;

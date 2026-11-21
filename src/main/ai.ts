@@ -1,14 +1,13 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
-import { CopilotClient, CopilotSession, RuntimeConnection, type CopilotClientOptions } from '@github/copilot-sdk';
+import { CopilotClient, CopilotSession, RuntimeConnection, type CopilotClientOptions } from '@microsoft/copilot-sdk';
 import { getConfigValue, type CliSource } from './config';
 import {
   resolveAutoDetectedCliPath,
   resolveConfiguredCliPath,
   probeCliVersion,
   compareVersions,
-  MIN_CLI_VERSION,
 } from './session';
 import { getCliShimPath } from './cli-electron-shim';
 import { getBundledSdkRuntimePaths } from './copilot-runtime-path';
@@ -29,7 +28,7 @@ export interface SandboxConfigDirs {
 
 /**
  * Build the unwrapped runtime sandbox config (`{ enabled, userPolicy }` shape)
- * that the SDK's `session.rpc.options.update({ sandboxConfig })` expects.
+ * that the SDK's `session.rpc.options.update({ permissions: { sandbox } })` expects.
  *
  * The runtime's `SandboxConfig` (copilot-agent-runtime/src/core/sandbox/sandboxConfig.ts)
  * is the inner block of the settings-file shape — i.e. the contents of
@@ -229,7 +228,7 @@ async function createSession(systemMessage: string): Promise<CopilotSession | nu
     return await client.createSession({
       systemMessage: { content: systemMessage },
       model,
-      onPermissionRequest: async () => ({ kind: 'reject' as const }),
+      permissions: { onRequest: async () => ({ kind: 'reject' as const }) },
     });
   } catch (err) {
     console.error('[copilot-sdk] Failed to create session:', err);
@@ -253,21 +252,50 @@ async function getRecallSession(): Promise<CopilotSession | null> {
 }
 
 export interface ResolvedRuntime {
-  connection: RuntimeConnection;
+  /** Null when the configured server address is malformed; see `error`. */
+  connection: RuntimeConnection | null;
   kind: CliSource;
   /** Resolved path or URL, for logging and the settings UI. */
   target: string | null;
+  /** Why `connection` could not be built; reported when a client starts. */
+  error?: string;
+}
+
+/**
+ * SDK 2.0 negotiates only SDK protocol 4, which the Copilot CLI first reports
+ * in 1.0.113. Custom CLI runtimes need it; terminal sessions, which do not use
+ * the SDK protocol, keep their own `MIN_CLI_VERSION` gate.
+ */
+export const MIN_SDK_RUNTIME_VERSION = '1.0.113';
+
+/**
+ * Split a remote runtime address into the host and port that SDK 2.0's
+ * attached TCP connection takes. Accepts the forms SDK 1.x's URI connection
+ * did: `host:port`, `[ipv6]:port`, `http(s)://host:port`, or a bare port on
+ * localhost.
+ */
+export function parseRuntimeServerAddress(address: string): { host: string; port: number } {
+  const value = address.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+  const ipv6 = /^\[([^\]]+)\]:(\d+)$/.exec(value);
+  const parts = ipv6 ? [ipv6[1], ipv6[2]] : /^\d+$/.test(value) ? ['', value] : value.split(':');
+  const port = Number(parts[1]);
+  if (parts.length !== 2 || !/^\d+$/.test(parts[1]) || port < 1 || port > 65535) {
+    throw new Error(
+      `Invalid remote runtime address "${address}". Expected host:port, [ipv6]:port, http://host:port, or a port.`,
+    );
+  }
+  return { host: parts[0] || 'localhost', port };
 }
 
 /**
  * Resolve which Copilot runtime the SDK should connect to, honoring the
  * configured `cliSource`:
- *   - 'server'  → connect to an already-running runtime at `cliServerUrl`.
+ *   - 'server'  → attach to an already-running runtime at `cliServerUrl` over TCP.
  *   - 'path'    → spawn the user's explicit local CLI.
  *   - 'auto'    → spawn the best auto-detected local CLI (prefers self-update).
- *   - 'bundled' → spawn the SDK's native runtime (default).
- *   - 'inprocess' → host the bundled SDK runtime in this process (experimental).
- * Unavailable custom sources fall back to bundled stdio, never to in-process.
+ *   - 'bundled' → host the SDK's native runtime in this process (default).
+ *   - 'stdio'   → spawn the same native runtime as a child process.
+ * Unavailable custom sources fall back to the bundled in-process runtime.
  */
 export function resolveRuntimeConnection(): ResolvedRuntime {
   const source = (getConfigValue('cliSource') || 'bundled') as CliSource;
@@ -276,8 +304,15 @@ export function resolveRuntimeConnection(): ResolvedRuntime {
     const url = getConfigValue('cliServerUrl');
     if (url) {
       const token = getConfigValue('cliServerToken') || undefined;
-      const connection = RuntimeConnection.forUri(url, token ? { connectionToken: token } : undefined);
-      return { connection, kind: 'server', target: url };
+      try {
+        const { host, port } = parseRuntimeServerAddress(url);
+        const connection = RuntimeConnection.forTcp(host, port, token ? { connectionToken: token } : undefined);
+        return { connection, kind: 'server', target: url };
+      } catch (err) {
+        // Report a malformed address on start, as SDK 1.x did, rather than
+        // silently connecting to a different runtime.
+        return { connection: null, kind: 'server', target: url, error: err instanceof Error ? err.message : String(err) };
+      }
     }
     console.warn('[copilot-sdk] cliSource=server but no server URL configured; falling back to bundled SDK runtime');
   } else if (source === 'path' || source === 'auto') {
@@ -291,18 +326,26 @@ export function resolveRuntimeConnection(): ResolvedRuntime {
       if (effectivePath !== localPath) {
         console.log(`[copilot-sdk] Spawning via Electron shim: ${effectivePath}`);
       }
-      return { connection: RuntimeConnection.forStdio({ path: effectivePath }), kind: source, target: localPath };
+      return {
+        // Only custom CLI children need Electron's Node compatibility mode.
+        connection: RuntimeConnection.forSpawnedStdio({
+          path: effectivePath,
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+        }),
+        kind: source,
+        target: localPath,
+      };
     }
     console.warn(`[copilot-sdk] cliSource=${source} but no local CLI resolved; falling back to bundled SDK runtime`);
   }
 
   const bundled = getBundledSdkRuntimePaths(app.getAppPath());
-  const kind = source === 'inprocess' ? 'inprocess' : 'bundled';
+  const kind = source === 'stdio' ? 'stdio' : 'bundled';
   const present = fs.existsSync(bundled.executable) && fs.existsSync(bundled.library);
   return {
-    connection: kind === 'inprocess'
-      ? RuntimeConnection.forInProcess()
-      : RuntimeConnection.forStdio({ path: bundled.executable }),
+    connection: kind === 'stdio'
+      ? RuntimeConnection.forSpawnedStdio({ path: bundled.executable })
+      : RuntimeConnection.forInProcess(),
     kind,
     target: present ? bundled.executable : null,
   };
@@ -311,25 +354,23 @@ export function resolveRuntimeConnection(): ResolvedRuntime {
 const nativeRuntimeVersions = new Map<string, string>();
 
 function isBundledRuntime(runtime: ResolvedRuntime): boolean {
-  return runtime.kind === 'bundled' || runtime.kind === 'inprocess';
+  return runtime.kind === 'bundled' || runtime.kind === 'stdio';
 }
 
 function runtimeClientOptions(runtime: ResolvedRuntime): CopilotClientOptions {
+  if (!runtime.connection) {
+    throw new Error(runtime.error ?? 'Copilot runtime connection is not configured.');
+  }
   if (isBundledRuntime(runtime) && !runtime.target) {
     throw new Error('Bundled SDK runtime is missing. Reinstall Whim to restore its native runtime files.');
   }
-  return {
-    connection: runtime.connection,
-    enableRemoteSessions: true,
-    // Only legacy/custom CLI children need Electron's Node compatibility mode.
-    ...(runtime.kind === 'path' || runtime.kind === 'auto'
-      ? { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }
-      : {}),
-  };
+  // SDK 2.0 requires an explicit mode; 'coding-agent' keeps the CLI-equivalent
+  // defaults that SDK 1.x applied implicitly.
+  return { mode: 'coding-agent', runtime: runtime.connection };
 }
 
 async function startClient(started: CopilotClient, runtime: ResolvedRuntime): Promise<void> {
-  await startRuntimeClient(started, runtime.kind === 'inprocess' ? runtime.target ?? undefined : undefined);
+  await startRuntimeClient(started, runtime.connection?.kind === 'inprocess' ? runtime.target ?? undefined : undefined);
   if (isBundledRuntime(runtime) && runtime.target) {
     // The native wrapper has no --version command; ask the running server.
     const status = await started.getStatus();
@@ -347,7 +388,7 @@ export interface RuntimeStatus {
 
 function isVersionCompatible(version: string | null): boolean {
   // '0.0.1' is the dev/source build and is always treated as compatible.
-  return version != null && (version === '0.0.1' || compareVersions(version, MIN_CLI_VERSION) >= 0);
+  return version != null && (version === '0.0.1' || compareVersions(version, MIN_SDK_RUNTIME_VERSION) >= 0);
 }
 
 /**
@@ -355,7 +396,7 @@ function isVersionCompatible(version: string | null): boolean {
  * whether it meets the minimum. Native versions come from the SDK handshake;
  * custom CLI versions are probed from disk. A remote version is unknown (use
  * {@link testRuntimeConnection} for a live handshake), so `compatible` reflects
- * only that a URL is configured.
+ * only that a valid address is configured.
  */
 export function getRuntimeStatus(): RuntimeStatus {
   return runtimeStatus(resolveRuntimeConnection());
@@ -369,9 +410,9 @@ function runtimeStatus(runtime: ResolvedRuntime): RuntimeStatus {
     version = probeCliVersion(runtime.target);
   }
   const compatible = runtime.kind === 'server' || isBundledRuntime(runtime)
-    ? runtime.target != null
+    ? runtime.connection != null && runtime.target != null
     : isVersionCompatible(version);
-  return { source: runtime.kind, target: runtime.target, version, compatible, minVersion: MIN_CLI_VERSION };
+  return { source: runtime.kind, target: runtime.target, version, compatible, minVersion: MIN_SDK_RUNTIME_VERSION };
 }
 
 export interface RuntimeTestResult extends RuntimeStatus {
@@ -386,7 +427,7 @@ export interface RuntimeTestResult extends RuntimeStatus {
  * prompt when the CLI reads its stored token).
  */
 function runtimeKey(runtime: ResolvedRuntime): string {
-  const token = runtime.connection.kind === 'uri' ? (runtime.connection.connectionToken || '') : '';
+  const token = runtime.connection?.kind === 'tcp' ? (runtime.connection.connectionToken || '') : '';
   return `${runtime.kind}\u0000${runtime.target ?? ''}\u0000${token}`;
 }
 
@@ -465,9 +506,8 @@ async function doInitCopilot(): Promise<void> {
     const runtime = resolveRuntimeConnection();
     console.log(`[copilot-sdk] Runtime source: ${runtime.kind}${runtime.target ? ` → ${runtime.target}` : ' (runtime files missing)'}`);
 
-    // enableRemoteSessions allows per-session remote access to be toggled
-    // on demand via session.rpc.remote.enable(). It does NOT auto-enable
-    // remote on every session — that's controlled separately.
+    // Remote access is toggled per session via session.rpc.remote.enable();
+    // SDK 2.0 needs no client-level opt-in for it.
     client = new CopilotClient(runtimeClientOptions(runtime));
     await startClient(client, runtime);
     activeRuntimeKey = runtimeKey(runtime);

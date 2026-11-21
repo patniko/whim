@@ -350,5 +350,5 @@ not a production setting.
 - Upstream MXC policy spec: `../../mxc/docs/sandbox-policy/v1/policy.md`
 - Runtime sandbox spawn: `../../copilot-agent-runtime/src/core/sandbox/sandboxSpawn.ts`
 - SDK hook types:
-  `node_modules/@github/copilot-sdk/dist/types.d.ts` (`SessionHooks`,
+  `node_modules/@microsoft/copilot-sdk/dist/types.d.ts` (`SessionHooks`,
   `PreToolUseHookOutput`, `PermissionRequest`)

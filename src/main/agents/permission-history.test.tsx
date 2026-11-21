@@ -3,7 +3,7 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { CopilotSession, type PermissionHandler, type SessionEvent } from '@github/copilot-sdk';
+import { CopilotSession, type PermissionHandler, type SessionEvent } from '@microsoft/copilot-sdk';
 import { InteractionBroker } from './interaction-broker';
 import { AgentNotifier } from './agent-notifier';
 import { AgentPersistence } from './agent-persistence';

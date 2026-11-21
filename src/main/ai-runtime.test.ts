@@ -20,7 +20,7 @@ const spawned: { opts: Record<string, unknown>; started: number; stopped: number
 const startupBehavior = vi.hoisted(() => ({ start: vi.fn(async () => {}) }));
 
 // Identifiable connection stubs so tests can assert how the SDK was configured.
-vi.mock('@github/copilot-sdk', () => ({
+vi.mock('@microsoft/copilot-sdk', () => ({
   CopilotClient: class {
     private record: { opts: Record<string, unknown>; started: number; stopped: number };
     constructor(opts: Record<string, unknown>) {
@@ -35,9 +35,8 @@ vi.mock('@github/copilot-sdk', () => ({
   },
   CopilotSession: class {},
   RuntimeConnection: {
-    forStdio: (opts: { path?: string }) => ({ kind: 'stdio', path: opts?.path }),
-    forUri: (url: string, opts?: { connectionToken?: string }) => ({ kind: 'uri', url, connectionToken: opts?.connectionToken }),
-    forTcp: (opts: unknown) => ({ kind: 'tcp', opts }),
+    forSpawnedStdio: (opts?: Record<string, unknown>) => ({ kind: 'spawned-stdio', ...opts }),
+    forTcp: (host: string, port: number, opts?: { connectionToken?: string }) => ({ kind: 'tcp', host, port, connectionToken: opts?.connectionToken }),
     forInProcess: () => ({ kind: 'inprocess' }),
   },
 }));
@@ -71,6 +70,7 @@ vi.mock('./session', () => ({
 
 import {
   resolveRuntimeConnection,
+  parseRuntimeServerAddress,
   getRuntimeStatus,
   initCopilot,
   reinitCopilot,
@@ -80,6 +80,7 @@ import {
   getEphemeralCopilotClient,
   getCopilotClient,
   testRuntimeConnection,
+  MIN_SDK_RUNTIME_VERSION,
 } from './ai';
 import { getConfigValue } from './config';
 import { resolveAutoDetectedCliPath, resolveConfiguredCliPath, probeCliVersion } from './session';
@@ -107,42 +108,51 @@ describe('resolveRuntimeConnection', () => {
     resetSessionMocks();
   });
 
-  it('defaults to the unpacked native SDK runtime when cliSource is unset', () => {
+  it('hosts the unpacked native SDK runtime in-process when cliSource is unset', () => {
     withConfig({});
-    const r = resolveRuntimeConnection();
-    expect(r.kind).toBe('bundled');
-    expect(r.target).toBe(bundledRuntime.executable);
-    expect(r.connection).toEqual({ kind: 'stdio', path: bundledRuntime.executable });
-  });
-
-  it('only selects in-process when explicitly configured', () => {
-    withConfig({ cliSource: 'inprocess', cliPath: '/ignored/cli' });
     expect(resolveRuntimeConnection()).toEqual({
-      kind: 'inprocess',
+      kind: 'bundled',
       target: bundledRuntime.executable,
       connection: { kind: 'inprocess' },
     });
   });
 
-  it.each(['bundled', 'inprocess'])('reports missing native assets for %s without selecting another runtime', source => {
+  it('only spawns the bundled runtime over stdio when explicitly configured', () => {
+    withConfig({ cliSource: 'stdio', cliPath: '/ignored/cli' });
+    expect(resolveRuntimeConnection()).toEqual({
+      kind: 'stdio',
+      target: bundledRuntime.executable,
+      connection: { kind: 'spawned-stdio', path: bundledRuntime.executable },
+    });
+  });
+
+  it.each(['bundled', 'stdio'])('reports missing native assets for %s without selecting another runtime', source => {
     withConfig({ cliSource: source });
     vi.mocked(fs.existsSync).mockImplementation(p => String(p) !== bundledRuntime.library);
     expect(resolveRuntimeConnection().target).toBeNull();
     expect(getRuntimeStatus().compatible).toBe(false);
   });
 
-  it("connects to a remote server via forUri when cliSource='server'", () => {
+  it("attaches to a remote server over TCP when cliSource='server'", () => {
     withConfig({ cliSource: 'server', cliServerUrl: 'http://localhost:9001', cliServerToken: 'secret' });
     const r = resolveRuntimeConnection();
     expect(r.kind).toBe('server');
     expect(r.target).toBe('http://localhost:9001');
-    expect(r.connection).toEqual({ kind: 'uri', url: 'http://localhost:9001', connectionToken: 'secret' });
+    expect(r.connection).toEqual({ kind: 'tcp', host: 'localhost', port: 9001, connectionToken: 'secret' });
   });
 
   it('omits the token when none is configured for a server', () => {
     withConfig({ cliSource: 'server', cliServerUrl: 'localhost:9001' });
     const r = resolveRuntimeConnection();
-    expect(r.connection).toEqual({ kind: 'uri', url: 'localhost:9001', connectionToken: undefined });
+    expect(r.connection).toEqual({ kind: 'tcp', host: 'localhost', port: 9001, connectionToken: undefined });
+  });
+
+  it('keeps a malformed server address selected and reports why it cannot connect', () => {
+    withConfig({ cliSource: 'server', cliServerUrl: 'localhost' });
+    const r = resolveRuntimeConnection();
+    expect(r).toMatchObject({ kind: 'server', target: 'localhost', connection: null });
+    expect(r.error).toContain('Invalid remote runtime address');
+    expect(getRuntimeStatus().compatible).toBe(false);
   });
 
   it('falls back to bundled when server source has no URL', () => {
@@ -157,7 +167,11 @@ describe('resolveRuntimeConnection', () => {
     const r = resolveRuntimeConnection();
     expect(r.kind).toBe('path');
     expect(r.target).toBe('/usr/local/bin/copilot');
-    expect(r.connection).toEqual({ kind: 'stdio', path: '/usr/local/bin/copilot' });
+    expect(r.connection).toEqual({
+      kind: 'spawned-stdio',
+      path: '/usr/local/bin/copilot',
+      env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: '1' }),
+    });
   });
 
   it("auto-detects the local CLI when cliSource='auto'", () => {
@@ -176,6 +190,23 @@ describe('resolveRuntimeConnection', () => {
   });
 });
 
+describe('parseRuntimeServerAddress', () => {
+  it.each([
+    ['localhost:9001', 'localhost', 9001],
+    ['http://127.0.0.1:3000/', '127.0.0.1', 3000],
+    ['https://runtime.example:8443', 'runtime.example', 8443],
+    ['[::1]:9001', '::1', 9001],
+    ['9001', 'localhost', 9001],
+    [':9001', 'localhost', 9001],
+  ])('accepts the SDK 1.x address form %s', (address, host, port) => {
+    expect(parseRuntimeServerAddress(address)).toEqual({ host, port });
+  });
+
+  it.each(['localhost', 'localhost:0', 'localhost:65536', 'a:b:9001', 'localhost:port'])('rejects %s', address => {
+    expect(() => parseRuntimeServerAddress(address)).toThrow('Invalid remote runtime address');
+  });
+});
+
 describe('getRuntimeStatus', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -187,16 +218,16 @@ describe('getRuntimeStatus', () => {
     const s = getRuntimeStatus();
     expect(s.source).toBe('bundled');
     expect(s.compatible).toBe(true);
-    expect(s.minVersion).toBe('1.0.71');
+    expect(s.minVersion).toBe(MIN_SDK_RUNTIME_VERSION);
     expect(probeCliVersion).not.toHaveBeenCalled();
   });
 
-  it('marks an old local version as incompatible', () => {
-    vi.mocked(probeCliVersion).mockReturnValue('1.0.10');
+  it.each([['1.0.112', false], ['1.0.113', true]])('requires SDK protocol 4 from a local CLI (%s compatible=%s)', (version, compatible) => {
+    vi.mocked(probeCliVersion).mockReturnValue(version);
     withConfig({ cliSource: 'path', cliPath: '/old/copilot' });
     const s = getRuntimeStatus();
-    expect(s.version).toBe('1.0.10');
-    expect(s.compatible).toBe(false);
+    expect(s.version).toBe(version);
+    expect(s.compatible).toBe(compatible);
   });
 
   it('does not probe a version for a remote server but stays compatible when a URL is set', () => {
@@ -218,24 +249,37 @@ describe('client lifecycle', () => {
     spawned.length = 0;
   });
 
-  it('spawns exactly one runtime on init and does not start the ephemeral client', async () => {
+  it('starts exactly one in-process runtime on init and does not start the ephemeral client', async () => {
     await initCopilot();
     expect(spawned).toHaveLength(1);
     expect(getCopilotClient()).not.toBeNull();
     expect(getEphemeralCopilotClient()).toBeNull();
-    expect(spawned[0].opts.connection).toEqual({ kind: 'stdio', path: bundledRuntime.executable });
-    expect(spawned[0].opts.env).toBeUndefined();
+    expect(spawned[0].opts).toEqual({ mode: 'coding-agent', runtime: { kind: 'inprocess' } });
     expect(getRuntimeStatus().version).toBe('1.0.83');
   });
 
+  it('pins in-process startup to the unpacked bundled runtime, then restores the environment', async () => {
+    vi.stubEnv('COPILOT_CLI_PATH', '/user/copilot');
+    const seen: (string | undefined)[] = [];
+    startupBehavior.start.mockImplementation(async () => { seen.push(process.env.COPILOT_CLI_PATH); });
+    try {
+      await initCopilot();
+      await ensureEphemeralCopilotClient();
+      expect(seen).toEqual([bundledRuntime.executable, bundledRuntime.executable]);
+      expect(process.env.COPILOT_CLI_PATH).toBe('/user/copilot');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('uses in-process for primary and ephemeral clients without subprocess options', async () => {
-    withConfig({ cliSource: 'inprocess' });
     const originalEnv = { ...process.env };
     await initCopilot();
     await ensureEphemeralCopilotClient();
     expect(spawned).toHaveLength(2);
     for (const record of spawned) {
-      expect(record.opts.connection).toEqual({ kind: 'inprocess' });
+      expect(record.opts.mode).toBe('coding-agent');
+      expect(record.opts.runtime).toEqual({ kind: 'inprocess' });
       expect(record.opts.env).toBeUndefined();
       expect(record.opts.workingDirectory).toBeUndefined();
     }
@@ -246,7 +290,11 @@ describe('client lifecycle', () => {
   it('preserves Electron-as-Node for custom CLI children', async () => {
     withConfig({ cliSource: 'path', cliPath: '/custom/index.js' });
     await initCopilot();
-    expect(spawned[0].opts.env).toMatchObject({ ELECTRON_RUN_AS_NODE: '1' });
+    expect(spawned[0].opts.runtime).toMatchObject({
+      kind: 'spawned-stdio',
+      path: '/custom/index.js',
+      env: { ELECTRON_RUN_AS_NODE: '1' },
+    });
   });
 
   it('does not launch a runtime when its bundled library is missing', async () => {
@@ -254,6 +302,16 @@ describe('client lifecycle', () => {
     await initCopilot();
     expect(spawned).toHaveLength(0);
     expect(getCopilotClient()).toBeNull();
+  });
+
+  it('does not launch a client for a malformed server address', async () => {
+    withConfig({ cliSource: 'server', cliServerUrl: 'localhost' });
+    await initCopilot();
+    expect(spawned).toHaveLength(0);
+    expect(getCopilotClient()).toBeNull();
+    const result = await testRuntimeConnection(5_000);
+    expect(result).toMatchObject({ ok: false, source: 'server', compatible: false });
+    expect(result.error).toContain('Invalid remote runtime address');
   });
 
   it('coalesces concurrent initCopilot() calls into one spawn', async () => {
@@ -328,14 +386,13 @@ describe('client lifecycle', () => {
   });
 
   it('stops both clients when switching from in-process to stdio', async () => {
-    withConfig({ cliSource: 'inprocess' });
     await initCopilot();
     await ensureEphemeralCopilotClient();
-    withConfig({ cliSource: 'bundled' });
+    withConfig({ cliSource: 'stdio' });
     await reinitCopilot();
     expect(spawned).toHaveLength(3);
     expect(spawned.slice(0, 2).map(record => record.stopped)).toEqual([1, 1]);
-    expect(spawned[2].opts.connection).toEqual({ kind: 'stdio', path: bundledRuntime.executable });
+    expect(spawned[2].opts.runtime).toEqual({ kind: 'spawned-stdio', path: bundledRuntime.executable });
   });
 
   it('reinits when forced even if the runtime is unchanged', async () => {
@@ -357,20 +414,21 @@ describe('client lifecycle', () => {
     const result = await testRuntimeConnection(5_000);
     expect(result.ok).toBe(true);
     expect(spawned).toHaveLength(2);
-    expect(spawned[1].opts.env).toBeUndefined();
+    expect(spawned[1].opts).toEqual({
+      mode: 'coding-agent',
+      runtime: { kind: 'tcp', host: 'localhost', port: 9001, connectionToken: undefined },
+    });
     expect(spawned[1].stopped).toBe(1);
   });
 
   it('can test in-process without passing env or leaving its host running', async () => {
-    withConfig({ cliSource: 'inprocess' });
     const result = await testRuntimeConnection();
-    expect(result).toMatchObject({ ok: true, source: 'inprocess', version: '1.0.83' });
-    expect(spawned[0].opts.env).toBeUndefined();
+    expect(result).toMatchObject({ ok: true, source: 'bundled', version: '1.0.83' });
+    expect(spawned[0].opts).toEqual({ mode: 'coding-agent', runtime: { kind: 'inprocess' } });
     expect(spawned[0].stopped).toBe(1);
   });
 
   it('cleans up an in-process test that finishes startup after its timeout', async () => {
-    withConfig({ cliSource: 'inprocess' });
     let release!: () => void;
     startupBehavior.start.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
     const result = await testRuntimeConnection(5);

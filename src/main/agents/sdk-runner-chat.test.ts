@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { AgentRecord, AgentStatus } from './agent-registry';
-import { CopilotSession, type SessionEvent } from '@github/copilot-sdk';
+import { CopilotSession, type SessionEvent } from '@microsoft/copilot-sdk';
 
 const mocks = vi.hoisted(() => {
   const config = { workspace: '/mock/workspace' };

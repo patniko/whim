@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
-import type { MCPServerConfig } from '@github/copilot-sdk';
+import type { MCPServerConfig } from '@microsoft/copilot-sdk';
 import { getConfigValue, type CustomMcpServer } from './config';
 
 export interface DiscoveredMcpServer {

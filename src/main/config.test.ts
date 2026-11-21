@@ -127,14 +127,20 @@ describe('config', () => {
       expect(config.cliServerUrl).toBe('localhost:9001');
     });
 
-    it('persists the experimental in-process choice without changing custom connection settings', () => {
+    it('migrates the former experimental in-process opt-in to the bundled default', () => {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ cliSource: 'inprocess' }));
+      const config = loadConfig();
+      expect(config.cliSource).toBe('bundled');
+    });
+
+    it('persists the separate-process stdio choice without changing custom connection settings', () => {
       fs.writeFileSync(CONFIG_PATH, JSON.stringify({
         cliSource: 'path', cliPath: '/custom/copilot', cliServerUrl: 'localhost:9001',
       }));
       loadConfig();
-      setConfigValue('cliSource', 'inprocess');
+      setConfigValue('cliSource', 'stdio');
       const config = loadConfig();
-      expect(config.cliSource).toBe('inprocess');
+      expect(config.cliSource).toBe('stdio');
       expect(config.cliPath).toBe('/custom/copilot');
       expect(config.cliServerUrl).toBe('localhost:9001');
     });

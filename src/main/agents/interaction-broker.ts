@@ -1,5 +1,5 @@
-import { ElicitationContext, ElicitationResult } from '@github/copilot-sdk';
-import type { PermissionRequest } from '@github/copilot-sdk';
+import { ElicitationContext, ElicitationResult } from '@microsoft/copilot-sdk';
+import type { PermissionRequest } from '@microsoft/copilot-sdk';
 import * as crypto from 'crypto';
 import type { AgentNotifier } from './agent-notifier';
 import type { AgentPersistence } from './agent-persistence';

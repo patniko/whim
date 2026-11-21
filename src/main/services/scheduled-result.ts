@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { ipcMain, Notification } from 'electron';
-import type { PermissionRequest, PermissionRequestResult, Tool } from '@github/copilot-sdk';
+import type { PermissionRequest, PermissionRequestResult, Tool } from '@microsoft/copilot-sdk';
 import type { ScheduledInvocation, ScheduledRunStatus } from '../../shared/skill-schedule';
 import { scheduledRunLabels } from '../../shared/skill-schedule';
 import { merge3Async } from '../../shared/text-merge-node';

@@ -294,19 +294,23 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
     session = await client.createSession({
       workingDirectory: workingDir,
       ...(sandboxConfigs ? { configDir: sandboxConfigs.onDir } : {}),
-      mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-      tools: customTools,
+      mcp: { servers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined },
+      tools: { definitions: customTools },
       ...(persona.model ? { model: persona.model } : {}),
-      ...(hooks ? { hooks } : {}),
+      ...(hooks ? { hooks: { handlers: hooks } } : {}),
       ...(cloudOpts ? { cloud: cloudOpts } : {}),
       ...canvasConfig?.session,
-      onPermissionRequest: useHostPathAwareHandler
-        ? broker.createPathAwareSandboxPermissionHandler(findRecord)
-        : useMxcOnlyAutoApprove
-          ? broker.createMxcOnlyPermissionHandler(findRecord)
-          : broker.createPermissionHandler(findRecord),
-      onUserInputRequest: broker.createUserInputHandler(findRecord),
-      onElicitationRequest: broker.createElicitationHandler(findRecord),
+      permissions: {
+        onRequest: useHostPathAwareHandler
+          ? broker.createPathAwareSandboxPermissionHandler(findRecord)
+          : useMxcOnlyAutoApprove
+            ? broker.createMxcOnlyPermissionHandler(findRecord)
+            : broker.createPermissionHandler(findRecord),
+      },
+      interaction: {
+        onUserInputRequest: broker.createUserInputHandler(findRecord),
+        onElicitationRequest: broker.createElicitationHandler(findRecord),
+      },
       systemMessage: {
         mode: 'append',
         // In mxc-only mode the host-side guards are deliberately suppressed so
@@ -325,14 +329,14 @@ If you make changes to ${documentDisplayName}, clearly describe what you changed
     }
 
     // The runtime does NOT auto-load sandbox enforcement from configDir. We
-    // must explicitly push the sandboxConfig via options.update so MXC
+    // must explicitly push the sandbox config via options.update so MXC
     // wraps shell commands with sandbox-exec. This MUST resolve before
     // session.send so the first tool call is gated.
     // See cli/promptMode.ts:346 for the reference implementation.
     if (isSandboxed && sandboxSetup.runtimeSandboxConfig && !isCloudSandbox) {
       try {
         const result = await (session as any).rpc.options.update({
-          sandboxConfig: sandboxSetup.runtimeSandboxConfig,
+          permissions: { sandbox: sandboxSetup.runtimeSandboxConfig },
         });
         if (result?.success === false) {
           console.error(

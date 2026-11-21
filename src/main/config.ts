@@ -60,13 +60,13 @@ export interface AgentPersona {
 
 /**
  * Which Copilot runtime the SDK connects to:
- * - 'bundled': the SDK's native runtime over stdio; the default.
- * - 'inprocess': the bundled SDK runtime hosted in-process (experimental).
+ * - 'bundled': the SDK's native runtime hosted in-process; the default.
+ * - 'stdio':   the same bundled runtime in a separate process (crash isolation).
  * - 'auto':    auto-detect a local install, preferring the self-updated CLI.
  * - 'path':    an explicit local CLI path/command (`cliPath`).
  * - 'server':  an already-running runtime at `cliServerUrl` (remote).
  */
-export type CliSource = 'bundled' | 'inprocess' | 'auto' | 'path' | 'server';
+export type CliSource = 'bundled' | 'stdio' | 'auto' | 'path' | 'server';
 
 export interface CliRuntime {
   id: string;
@@ -461,9 +461,12 @@ export function loadConfig(): AppConfig {
       }
       // Runtime source: pre-source configs map an explicit cliPath to the
       // 'path' source; everything else (including auto-detect users) defaults
-      // to the bundled SDK runtime, which needs no local CLI install.
+      // to the bundled SDK runtime, which needs no local CLI install. The
+      // former experimental 'inprocess' opt-in is now the bundled default.
       if (parsed.cliSource === undefined) {
         config.cliSource = parsed.cliPath ? 'path' : 'bundled';
+      } else if (parsed.cliSource === 'inprocess') {
+        config.cliSource = 'bundled';
       }
       // Web remote: migrate the legacy address-list binding config to durable
       // interface selections. Runs only once — afterwards `webRemoteBindSelections`

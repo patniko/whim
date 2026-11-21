@@ -6,7 +6,7 @@
  * cannot provide canvases, this returns `null` and the run proceeds normally
  * without them rather than failing to launch.
  */
-import type { Canvas } from '@github/copilot-sdk';
+import type { Canvas } from '@microsoft/copilot-sdk';
 import { acknowledgeArtifactPublication, getArtifact } from '../storage';
 import type { CanvasArtifact } from './artifact-store';
 import type { CanvasArtifactPolicy } from './canvas-policy';
@@ -34,9 +34,11 @@ export interface CanvasSessionHooks {
 
 /** The canvas-related fields to spread into `createSession` / `resumeSession`. */
 export interface CanvasSessionConfig {
-  canvases: Canvas[];
-  requestCanvasRenderer: true;
-  canvasProvider: { id: string; name: string };
+  canvases: {
+    definitions: Canvas[];
+    requestRenderer: true;
+    provider: { id: string; name: string };
+  };
 }
 
 export interface CanvasSessionSetup {
@@ -87,10 +89,11 @@ async function deliverPublication(
  * Produce the canvas session fields for a run, or `null` when the run is not
  * allowed to produce artifacts.
  *
- * `requestCanvasRenderer` matters: without it the runtime never advertises the
- * canvas tools, so the agent cannot see a canvas we registered. `canvasProvider`
- * gives whim a stable identity so the runtime can re-attach a reconnecting
- * provider to the instances it already knows about, instead of orphaning them.
+ * `canvases.requestRenderer` matters: without it the runtime never advertises
+ * the canvas tools, so the agent cannot see a canvas we registered.
+ * `canvases.provider` gives whim a stable identity so the runtime can re-attach
+ * a reconnecting provider to the instances it already knows about, instead of
+ * orphaning them.
  */
 export function buildCanvasSessionConfig(
   run: CanvasRunContext,
@@ -136,9 +139,11 @@ export function buildCanvasSessionConfig(
 
     return {
       config: {
-        canvases: [canvas],
-        requestCanvasRenderer: true,
-        canvasProvider: { id: WHIM_CANVAS_PROVIDER_ID, name: WHIM_CANVAS_PROVIDER_NAME },
+        canvases: {
+          definitions: [canvas],
+          requestRenderer: true,
+          provider: { id: WHIM_CANVAS_PROVIDER_ID, name: WHIM_CANVAS_PROVIDER_NAME },
+        },
       },
       canvasId: definition?.canvasId ?? WHIM_REPORT_CANVAS_ID,
     };

@@ -428,7 +428,7 @@ export interface IpcCommands {
   'cli:runtime-status': {
     args: [];
     result: {
-      source: 'bundled' | 'inprocess' | 'auto' | 'path' | 'server';
+      source: 'bundled' | 'stdio' | 'auto' | 'path' | 'server';
       target: string | null;
       version: string | null;
       compatible: boolean;
@@ -439,7 +439,7 @@ export interface IpcCommands {
     args: [];
     result: {
       ok: boolean;
-      source: 'bundled' | 'inprocess' | 'auto' | 'path' | 'server';
+      source: 'bundled' | 'stdio' | 'auto' | 'path' | 'server';
       target: string | null;
       version: string | null;
       compatible: boolean;
