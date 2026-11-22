@@ -1,4 +1,4 @@
-import type { Tool } from '@github/copilot-sdk';
+import type { Tool } from '@microsoft/copilot-sdk';
 import { merge3Async } from '../../shared/text-merge-node';
 import { parseFrontmatter } from '../frontmatter';
 import {

@@ -25,7 +25,7 @@ vi.mock('../ai', () => ({
     offDir: path.join('/tmp', 'sandbox-config', agentId, 'off'),
   }),
   // Mirror the real shape: unwrapped { enabled, userPolicy: { filesystem, network } }
-  // ready for `session.rpc.options.update({ sandboxConfig })`.
+  // ready for `session.rpc.options.update({ permissions: { sandbox } })`.
   buildRuntimeSandboxConfig: (enabled: boolean, _workingDir: string, _policy: SandboxPolicy) => ({
     enabled,
     userPolicy: {

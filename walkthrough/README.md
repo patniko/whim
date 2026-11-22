@@ -7,7 +7,7 @@ on [Reveal.js](https://revealjs.com/).
 ## Sections
 
 1. Welcome / overview
-2. Setup process — install, global hotkey, choose a workspace
+2. Setup process — global hotkey, choose a workspace, sign in with GitHub
 3. Creating a Space — capture by typing/voice, AI refinement
 4. Built-in agents — the seeded personas (`@agent`, `@editor`, `@dev`, `@pr`, `@cloud`, `@secret-agent`, `@sandbox`)
 5. Commenting to agents — select text → comment → @mention → reply

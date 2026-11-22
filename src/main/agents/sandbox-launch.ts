@@ -34,9 +34,9 @@ export interface SandboxLaunchSetup {
   sandboxConfigs: SandboxConfigDirs | null;
   /**
    * Unwrapped runtime sandbox config to pass to
-   * `session.rpc.options.update({ sandboxConfig })` after createSession.
-   * The runtime does NOT auto-load sandbox enforcement from configDir; only
-   * options.update actually toggles MXC. Null when not sandboxed.
+   * `session.rpc.options.update({ permissions: { sandbox } })` after
+   * createSession. The runtime does NOT auto-load sandbox enforcement from
+   * configDir; only options.update actually toggles MXC. Null when not sandboxed.
    */
   runtimeSandboxConfig: { enabled: boolean; userPolicy: Record<string, unknown> } | null;
   /** Filtered MCP servers (empty object if MCP is denied). */
@@ -45,7 +45,7 @@ export interface SandboxLaunchSetup {
   customTools: ReturnType<typeof getCustomTools>;
   /** Runtime state to store on the AgentRecord. */
   sandboxState: SandboxRuntimeState | undefined;
-  /** SDK hooks (onPreToolUse, onPostToolUse) when sandboxed. */
+  /** SDK hook handlers (onPreToolUse, onPostToolUse) when sandboxed; passed as `hooks.handlers`. */
   hooks: Record<string, unknown> | undefined;
   /**
    * Resolved enforcement mode. `'both'` for non-sandboxed personas (the value

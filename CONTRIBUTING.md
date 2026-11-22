@@ -7,8 +7,7 @@ Thanks for your interest in contributing!
 Prerequisites:
 
 - Node.js 20+
-- GitHub Copilot CLI (`npm install -g @github/copilot`)
-- A GitHub account with Copilot access
+- A GitHub account with Copilot access (Copilot runs in-process and the Copilot CLI is bundled, so neither needs installing)
 
 ```bash
 git clone https://github.com/patniko/whim.git

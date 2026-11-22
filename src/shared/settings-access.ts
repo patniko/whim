@@ -2,7 +2,7 @@
  * Which settings a paired browser may read and write.
  *
  * `settings:get` and `settings:set` were withheld from the web entirely, and
- * for a defensible reason: settings hold the workspace location, the CLI
+ * for a defensible reason: settings hold the workspace location, the updater
  * configuration, and the remote-access controls themselves, so a blanket
  * allow would let anyone who reached the remote widen their own privileges.
  *
@@ -42,23 +42,17 @@ const READABLE_SETTINGS = new Set([
  *
  * Not because no key is safe — `theme` plainly is — but because the desktop
  * setter carries side effects that reach well past storing a value: it
- * respawns the CLI, reconfigures the updater, and moves panes in the desktop
- * window. Reaching that from a browser deserves its own design rather than
- * being tacked onto the work that made the interface load.
+ * changes the model live sessions use, reconfigures the updater, and moves
+ * panes in the desktop window. Reaching that from a browser deserves its own
+ * design rather than being tacked onto the work that made the interface load.
  */
 
 /**
  * Never readable, and listed explicitly rather than left to the default.
- *
- * `cli_server_token` is a credential; the rest describe or select what the
- * host machine executes. A test asserts these stay out of the allowlists, so
- * a careless addition fails loudly.
+ * A test asserts these stay out of the allowlists, so a careless addition
+ * fails loudly.
  */
 export const SECRET_SETTINGS = [
-  'cli_server_token',
-  'cli_server_url',
-  'cli_path',
-  'cli_source',
   'auto_download_updates',
 ];
 

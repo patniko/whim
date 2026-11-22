@@ -741,7 +741,7 @@ export function createSandboxShellDenialHook(args: {
  * Failure-side companion to `createSandboxShellDenialHook`.
  *
  * The SDK splits post-tool dispatch into two callbacks
- * (`@github/copilot-sdk/dist/types.d.ts`):
+ * (`@microsoft/copilot-sdk/dist/types.d.ts`):
  *   - `onPostToolUse`        — fires only for SUCCESS results
  *   - `onPostToolUseFailure` — fires only for FAILURE results
  *

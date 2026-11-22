@@ -1,4 +1,4 @@
-import { CopilotSession } from '@github/copilot-sdk';
+import { CopilotSession } from '@microsoft/copilot-sdk';
 import { v4 as uuid } from 'uuid';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -478,8 +478,8 @@ export function buildCliToolsPrompt(): string {
 
 /**
  * Resolve skill config for a canvas-based session.
- * Reads the canvas frontmatter `skills` array and computes the
- * `skillDirectories` + `disabledSkills` config for createSession.
+ * Reads the canvas frontmatter `skills` array and computes the skill
+ * directories and disabled skills for createSession's `skills` options.
  * Returns undefined if no skills are linked (avoids auto-loading).
  */
 export async function resolveLinkedSkillConfig(
@@ -535,13 +535,15 @@ export async function launchAgent(
 
     const session = await client.createSession({
       workingDirectory: workingDir,
-      streaming: true,
-      mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-      tools: getCustomTools(createCustomToolsContext(agentId)),
-      onPermissionRequest: broker.createPermissionHandler(findRecord),
-      onUserInputRequest: broker.createUserInputHandler(findRecord),
-      onElicitationRequest: broker.createElicitationHandler(findRecord),
-      ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
+      events: { streaming: true },
+      mcp: { servers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined },
+      tools: { definitions: getCustomTools(createCustomToolsContext(agentId)) },
+      permissions: { onRequest: broker.createPermissionHandler(findRecord) },
+      interaction: {
+        onUserInputRequest: broker.createUserInputHandler(findRecord),
+        onElicitationRequest: broker.createElicitationHandler(findRecord),
+      },
+      ...(skillConfig ? { skills: { directories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } } : {}),
       systemMessage: {
         mode: 'append',
         content: `\nThe user selected the following text from their canvas document and wants you to work on it:\n\n---\n${selectedText}\n---\n\nThe full canvas document is available as canvas.md in the working directory.${cliToolsPrompt}`,
@@ -691,33 +693,37 @@ export async function launchQuickAgent(
 
     const sessionConfig = {
       workingDirectory: workspaceRoot,
-      streaming: true,
+      events: { streaming: true },
       ...(sandboxConfigs ? { configDir: sandboxConfigs.onDir } : {}),
-      mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-      tools: customTools,
+      mcp: { servers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined },
+      tools: { definitions: customTools },
       ...(persona?.model ? { model: persona.model } : {}),
-      ...(hooks ? { hooks } : {}),
+      ...(hooks ? { hooks: { handlers: hooks } } : {}),
       ...(systemContent ? {
         systemMessage: {
           mode: 'append' as const,
           content: `\n${systemContent}`,
         },
       } : {}),
-      ...((isEphemeral && !isCloudSandbox) ? { createSessionFsProvider: () => new InMemoryFsProvider() } : {}),
+      ...((isEphemeral && !isCloudSandbox) ? { state: { createSessionFsProvider: () => new InMemoryFsProvider() } } : {}),
       ...(cloudOpts ? { cloud: cloudOpts } : {}),
-      onPermissionRequest: useHostPathAwareHandler
-        ? broker.createPathAwareSandboxPermissionHandler(findRecord)
-        : useMxcOnlyAutoApprove
-          ? broker.createMxcOnlyPermissionHandler(findRecord)
-          : broker.createPermissionHandler(findRecord),
-      onUserInputRequest: broker.createUserInputHandler(findRecord),
-      onElicitationRequest: broker.createElicitationHandler(findRecord),
+      permissions: {
+        onRequest: useHostPathAwareHandler
+          ? broker.createPathAwareSandboxPermissionHandler(findRecord)
+          : useMxcOnlyAutoApprove
+            ? broker.createMxcOnlyPermissionHandler(findRecord)
+            : broker.createPermissionHandler(findRecord),
+      },
+      interaction: {
+        onUserInputRequest: broker.createUserInputHandler(findRecord),
+        onElicitationRequest: broker.createElicitationHandler(findRecord),
+      },
     };
 
     const session = await client.createSession(sessionConfig);
 
     // The runtime does NOT auto-load sandbox enforcement from configDir. We
-    // must explicitly push the sandboxConfig via options.update so MXC
+    // must explicitly push the sandbox config via options.update so MXC
     // wraps shell commands with sandbox-exec. This MUST resolve before
     // session.send so the first tool call is gated.
     // See cli/promptMode.ts:346 for the reference implementation; the
@@ -725,7 +731,7 @@ export async function launchQuickAgent(
     if (isSandboxed && sandboxSetup?.runtimeSandboxConfig && !isCloudSandbox) {
       try {
         const result = await (session as any).rpc.options.update({
-          sandboxConfig: sandboxSetup.runtimeSandboxConfig,
+          permissions: { sandbox: sandboxSetup.runtimeSandboxConfig },
         });
         if (result?.success === false) {
           console.error(
@@ -957,43 +963,49 @@ ${scheduledContext ? '' : cliToolsPrompt}`;
     const normalElicitationHandler = broker.createElicitationHandler(findRecord);
     const session = await client.createSession({
       workingDirectory: workingDir,
-      streaming: true,
+      events: { streaming: true },
       ...(sandboxConfigs ? { configDir: sandboxConfigs.onDir } : {}),
-      mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-      tools: customTools,
-      ...(scheduledContext ? {
-        availableTools: [...RESULT_TOOLS, 'custom:publish_scheduled_result'],
-      } : {}),
+      mcp: { servers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined },
+      tools: {
+        definitions: customTools,
+        ...(scheduledContext ? {
+          availableTools: [...RESULT_TOOLS, 'custom:publish_scheduled_result'],
+        } : {}),
+      },
       ...(persona?.model ? { model: persona.model } : {}),
-      ...(hooks ? { hooks } : {}),
+      ...(hooks ? { hooks: { handlers: hooks } } : {}),
       ...(cloudOpts ? { cloud: cloudOpts } : {}),
-      onPermissionRequest: async (request, invocation) => {
-        const livingRecord = findRecord(invocation.sessionId);
-        const active = livingRecord?.scheduledResult ?? (!livingRecord ? scheduledContext : undefined);
-        if (active && livingRecord?.sandbox && request.kind === 'read'
-          && checkPathScope(path.resolve(workingDir, request.path), livingRecord.sandbox.policy, false).decision === 'deny') {
-          markScheduledInteractionBlocked(active, `Sandbox denied read: ${request.path}`);
-          return { kind: 'reject' };
-        }
-        return active
-          ? scheduledPermissionDecision(active, request)
-          : (await normalPermissionHandler(request, invocation));
+      permissions: {
+        onRequest: async (request, invocation) => {
+          const livingRecord = findRecord(invocation.sessionId);
+          const active = livingRecord?.scheduledResult ?? (!livingRecord ? scheduledContext : undefined);
+          if (active && livingRecord?.sandbox && request.kind === 'read'
+            && checkPathScope(path.resolve(workingDir, request.path), livingRecord.sandbox.policy, false).decision === 'deny') {
+            markScheduledInteractionBlocked(active, `Sandbox denied read: ${request.path}`);
+            return { kind: 'reject' };
+          }
+          return active
+            ? scheduledPermissionDecision(active, request)
+            : (await normalPermissionHandler(request, invocation));
+        },
       },
-      onUserInputRequest: (request, invocation) => {
-        const livingRecord = findRecord(invocation.sessionId);
-        const active = livingRecord?.scheduledResult ?? (!livingRecord ? scheduledContext : undefined);
-        if (!active) return normalUserInputHandler(request, invocation);
-        markScheduledInteractionBlocked(active, `Input required: ${request.question}`);
-        return { answer: 'The user is unavailable. Save a partial result explaining what is missing.', wasFreeform: true };
+      interaction: {
+        onUserInputRequest: (request, invocation) => {
+          const livingRecord = findRecord(invocation.sessionId);
+          const active = livingRecord?.scheduledResult ?? (!livingRecord ? scheduledContext : undefined);
+          if (!active) return normalUserInputHandler(request, invocation);
+          markScheduledInteractionBlocked(active, `Input required: ${request.question}`);
+          return { answer: 'The user is unavailable. Save a partial result explaining what is missing.', wasFreeform: true };
+        },
+        onElicitationRequest: (context) => {
+          const livingRecord = findRecord(context.sessionId);
+          const active = livingRecord?.scheduledResult ?? (!livingRecord ? scheduledContext : undefined);
+          if (!active) return normalElicitationHandler(context);
+          markScheduledInteractionBlocked(active, `Connection or input required: ${context.message}`);
+          return { action: 'cancel' };
+        },
       },
-      onElicitationRequest: (context) => {
-        const livingRecord = findRecord(context.sessionId);
-        const active = livingRecord?.scheduledResult ?? (!livingRecord ? scheduledContext : undefined);
-        if (!active) return normalElicitationHandler(context);
-        markScheduledInteractionBlocked(active, `Connection or input required: ${context.message}`);
-        return { action: 'cancel' };
-      },
-      ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
+      ...(skillConfig ? { skills: { directories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } } : {}),
       ...(canvasConfig?.session ?? {}),
       systemMessage: {
         mode: 'append',
@@ -1004,7 +1016,7 @@ ${scheduledContext ? '' : cliToolsPrompt}`;
     if (isSandboxed && sandboxSetup?.runtimeSandboxConfig && !isCloudSandbox) {
       try {
         const result = await (session as any).rpc.options.update({
-          sandboxConfig: sandboxSetup.runtimeSandboxConfig,
+          permissions: { sandbox: sandboxSetup.runtimeSandboxConfig },
         });
         if (result?.success === false) {
           try { await (session as any).abort?.(); } catch { /* best-effort */ }
@@ -1113,14 +1125,16 @@ ${scheduledContext ? '' : cliToolsPrompt}`;
   }
 }
 
-/** Send a follow-up message to an active agent session (multi-turn chat). */
-export async function sendChatMessage(
-  agentId: string,
-  prompt: string,
-  attachments?: Array<{ type: 'file'; path: string; displayName?: string }>,
-): Promise<{ error?: string; restarted?: boolean; messageId?: string }> {
+/**
+ * The live record for an agent, bringing back one the user stopped or one that
+ * is no longer in memory because the app restarted. `rebuilt` reports whether a
+ * session had to be resumed (or restarted from its transcript). Resolves null
+ * when the session could not be brought back; a stopped record stays in place.
+ */
+export async function reviveAgent(agentId: string): Promise<
+  { record: AgentRecord; rebuilt: boolean; restarted: boolean } | { error: string } | null
+> {
   let record = registry.get(agentId);
-  let restarted = false;
 
   // Stopping an agent is not the same as one failing, but `abortAgent` records
   // it as a failure: it tears the session down and marks the record failed, so
@@ -1139,25 +1153,37 @@ export async function sendChatMessage(
     registry.delete(agentId);
     record = undefined;
   }
+  if (record) return { record, rebuilt: false, restarted: false };
 
-  if (!record) {
-    // Agent not in memory — might be historical (app restarted), or just
-    // stopped by the user. Try to re-create a session for it.
-    let result: Awaited<ReturnType<typeof resumeAgentSession>>;
-    try {
-      result = await resumeAgentSession(agentId);
-    } catch (error) {
-      if (stoppedRecord) registry.set(agentId, stoppedRecord);
-      return { error: error instanceof Error ? error.message : 'Failed to resume the agent session' };
-    }
-    if (!result) {
-      // Put the stopped record back rather than leaving the agent missing from
-      // the registry entirely — the send failed, the agent should not.
-      if (stoppedRecord) registry.set(agentId, stoppedRecord);
-      return { error: 'Agent session expired — open in CLI to resume' };
-    }
-    restarted = result === 'restarted';
-    record = registry.get(agentId)!;
+  // Agent not in memory — might be historical (app restarted), or just
+  // stopped by the user. Try to re-create a session for it.
+  let result: Awaited<ReturnType<typeof resumeAgentSession>>;
+  try {
+    result = await resumeAgentSession(agentId);
+  } catch (error) {
+    if (stoppedRecord) registry.set(agentId, stoppedRecord);
+    return { error: error instanceof Error ? error.message : 'Failed to resume the agent session' };
+  }
+  if (!result) {
+    // Put the stopped record back rather than leaving the agent missing from
+    // the registry entirely — the caller failed, the agent should not.
+    if (stoppedRecord) registry.set(agentId, stoppedRecord);
+    return null;
+  }
+  return { record: registry.get(agentId)!, rebuilt: true, restarted: result === 'restarted' };
+}
+
+/** Send a follow-up message to an active agent session (multi-turn chat). */
+export async function sendChatMessage(
+  agentId: string,
+  prompt: string,
+  attachments?: Array<{ type: 'file'; path: string; displayName?: string }>,
+): Promise<{ error?: string; restarted?: boolean; messageId?: string }> {
+  const revived = await reviveAgent(agentId);
+  if (!revived) return { error: 'Agent session expired — open in CLI to resume' };
+  if ('error' in revived) return { error: revived.error };
+  const { record, restarted } = revived;
+  if (revived.rebuilt) {
     // A session we just rebuilt is live regardless of the status it was
     // persisted with; the guard below is about records we did not rebuild.
     record.status = 'running';
@@ -1236,10 +1262,10 @@ async function sendChatTurn(
 
 /**
  * Disable the sandbox for the rest of an agent's session.  Calls
- * `session.rpc.options.update({ sandboxConfig: { enabled: false } })` on the
- * existing session — no session swap needed. The runtime drops its sandboxed
- * shell context and restarts MCP stdio servers in response, so subsequent
- * tool calls run unsandboxed.
+ * `session.rpc.options.update({ permissions: { sandbox: { enabled: false } } })`
+ * on the existing session — no session swap needed. The runtime drops its
+ * sandboxed shell context and restarts MCP stdio servers in response, so
+ * subsequent tool calls run unsandboxed.
  *
  * Idempotent: returns silently when the agent is unknown, already disabled,
  * or non-sandboxed.
@@ -1265,7 +1291,7 @@ export async function disableSandboxForSession(agentId: string): Promise<void> {
 
   try {
     const result = await (record.session as any).rpc.options.update({
-      sandboxConfig: { enabled: false },
+      permissions: { sandbox: { enabled: false } },
     });
     if (result?.success === false) {
       throw new Error('runtime rejected sandbox disable');
@@ -1403,13 +1429,17 @@ export async function resumeAgentSession(
     });
     const session = await client.resumeSession(persisted.session_id, {
       workingDirectory: workingDir,
-      mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-      tools: scheduledResultEditor ? [scheduledResultEditor.tool] : getCustomTools(customToolsContext),
-      ...(scheduledResultEditor ? { availableTools: RESULT_TOOLS } : {}),
+      mcp: { servers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined },
+      tools: {
+        definitions: scheduledResultEditor ? [scheduledResultEditor.tool] : getCustomTools(customToolsContext),
+        ...(scheduledResultEditor ? { availableTools: RESULT_TOOLS } : {}),
+      },
       ...(scheduledResultEditor ? { systemMessage: { mode: 'append' as const, content: SCHEDULED_EDIT_PROMPT } } : {}),
-      onPermissionRequest: broker.createPermissionHandler(findRecord),
-      onUserInputRequest: broker.createUserInputHandler(findRecord),
-      onElicitationRequest: broker.createElicitationHandler(findRecord),
+      permissions: { onRequest: broker.createPermissionHandler(findRecord) },
+      interaction: {
+        onUserInputRequest: broker.createUserInputHandler(findRecord),
+        onElicitationRequest: broker.createElicitationHandler(findRecord),
+      },
       ...(canvasConfig?.session ?? {}),
     });
 
@@ -1707,14 +1737,18 @@ async function restartExpiredSession(
 
     const session = await client.createSession({
       workingDirectory: workingDir,
-      streaming: true,
-      mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-      tools: scheduledResultEditor ? [scheduledResultEditor.tool] : getCustomTools(customToolsContext),
-      ...(scheduledResultEditor ? { availableTools: RESULT_TOOLS } : {}),
-      onPermissionRequest: broker.createPermissionHandler(findRecord),
-      onUserInputRequest: broker.createUserInputHandler(findRecord),
-      onElicitationRequest: broker.createElicitationHandler(findRecord),
-      ...(skillConfig ? { skillDirectories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } : {}),
+      events: { streaming: true },
+      mcp: { servers: Object.keys(mcpServers).length > 0 ? mcpServers : undefined },
+      tools: {
+        definitions: scheduledResultEditor ? [scheduledResultEditor.tool] : getCustomTools(customToolsContext),
+        ...(scheduledResultEditor ? { availableTools: RESULT_TOOLS } : {}),
+      },
+      permissions: { onRequest: broker.createPermissionHandler(findRecord) },
+      interaction: {
+        onUserInputRequest: broker.createUserInputHandler(findRecord),
+        onElicitationRequest: broker.createElicitationHandler(findRecord),
+      },
+      ...(skillConfig ? { skills: { directories: skillConfig.skillDirectories, disabledSkills: skillConfig.disabledSkills } } : {}),
       ...(canvasConfig?.session ?? {}),
       systemMessage: { mode: 'append', content: scheduledResultEditor ? `${systemContent}\n\n${SCHEDULED_EDIT_PROMPT}` : systemContent },
     });

@@ -1,4 +1,4 @@
-import type { CopilotSession } from "@github/copilot-sdk";
+import type { CopilotSession } from "@microsoft/copilot-sdk";
 import type { PageRequest } from "../../shared/paging";
 import {
   openRuntimeHistory,

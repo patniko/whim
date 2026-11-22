@@ -18,8 +18,13 @@ This guide walks you through everything you can do with whim — from first laun
      immediately (and you can change it later under **Settings → Hotkeys**).
    - **The tray icon** — clicking the whim icon in the menu bar / system tray always brings the
      pane back, so you can never lose the window.
-4. After the tour you'll be prompted to **select a workspace directory** — this is where all your
-   intent data will be stored
+4. After the tour, setup asks for three things:
+   - **A workspace directory** — where all your intent data will be stored
+   - **Your GitHub account** — Copilot runs inside whim, so there is no Copilot CLI to install.
+     If you're already signed in to the Copilot CLI or the GitHub CLI (`gh`), whim uses that
+     account automatically. Otherwise click **Sign in with GitHub** and approve whim in your
+     browser, or choose **Use a code instead** to enter a one-time code on github.com.
+   - **A default model** — loaded once your account is signed in
 
 You can replay the tour any time from the **?** button in the header → **Replay quick start**.
 
@@ -222,6 +227,13 @@ Click any agent (in Spaces mini-cards or Workers tab) to open the **chat view**:
 - View tool executions with details
 - Approve or deny permission requests
 - See sub-agent activity
+- Click **⌨️** to continue the session in the **Copilot CLI**. whim opens a terminal running the
+  CLI that ships with the app, attached to the agent's live session: the session keeps running in
+  whim, both show the same conversation, and a permission request can be answered from either.
+  A stopped or finished agent is reopened first and stays available for follow-ups from whim.
+  Cloud agents and sessions started from the CLI are resumed
+  by the CLI directly; ephemeral agents can't be opened in the CLI because nothing about them is
+  saved.
 
 ### Approval Workflow
 
@@ -350,18 +362,16 @@ Keep separate repos — for example **work** and **personal** — and switch bet
 
 The active profile's name appears next to the whim logo at the bottom of the panel.
 
-### Copilot Runtime
-whim ships with the Copilot SDK's **native runtime** and uses it over stdio by default — nothing to install. In Settings → **Copilot Runtime** you can choose where the runtime comes from:
+### GitHub Account
+whim ships with the Copilot SDK's **native runtime** and hosts it inside the app, so there is nothing to install or configure. The only thing Copilot needs is your GitHub account. **Settings → Environment → GitHub Account** shows who you're signed in as and where the credential comes from:
 
-- **Bundled native stdio** *(default, recommended)* — the SDK's native runtime in a separate process, without starting the full CLI.
-- **Bundled in-process** *(experimental, opt-in)* — the same native runtime loaded into Whim's main process. Avoids the runtime subprocess but shares its crash and resource-lifecycle risks with the app. If sessions hang, switch back to bundled native stdio; restart Whim if needed. Changing native runtime builds requires an app restart.
-- **Auto-detect local CLI** — find and use a locally-installed CLI, preferring the newest self-updated version (under `~/.copilot/pkg/…`). Use this for terminal-resumable sessions that share state with your own `copilot` install.
-- **Custom CLI path** — point at a specific `copilot` binary or entry point.
-- **Remote CLI server** — connect to an already-running runtime by URL (`host:port` or `http://host:port`) with an optional connection token.
+- **Signed in as @you** — a GitHub sign-in stored on this computer. It's shared with the Copilot CLI, so signing in either place signs in both. **Sign Out** here also signs out the CLI.
+- **(from the GitHub CLI)** — whim found your `gh` login. Run `gh auth logout` to remove it.
+- **(from an environment token)** — a `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN` variable. Remove the variable to sign out.
 
-Use **Test connection** to verify the selected runtime actually connects (it performs a real handshake), and the **Active** line shows the resolved source, version, and whether it meets the minimum supported version.
+When you're signed out, **Sign In** opens your browser to approve whim on github.com, and **Use a Code** shows a one-time code to enter at github.com/login/device instead. Agents and AI features need a signed-in account that has Copilot access.
 
-The native runtime's version appears after it connects; it is not probed by launching a CLI. The full bundled CLI remains available for terminal sessions. Choosing a bundled SDK transport does not erase saved custom CLI paths or server settings. Persistent and ephemeral agents still use separate, reused clients; the ephemeral client starts only when needed.
+The runtime shares Whim's process, so a runtime crash can close the app. Persistent and ephemeral agents use separate, reused clients; the ephemeral client starts only when needed.
 
 ### MCP Servers
 Model Context Protocol servers extend what agents can do. whim auto-discovers servers from `~/.copilot/mcp-config.json` and installed plugins. You can also add custom servers:
@@ -379,7 +389,7 @@ Create @mentionable personas:
 - **Run location** — 💻 Local, ☁️ Cloud, or 🤖 Copilot Cloud Agent
 
 ### Where settings are stored
-Everything on this screen — theme, model, workspace and **profiles**, Copilot CLI path, MCP servers, CLI tools, keyboard shortcuts, and **agent personas** (including a persona's 🔥 yolo flag) — is saved to a single file that persists across restarts and updates:
+Everything on this screen — theme, model, workspace and **profiles**, MCP servers, CLI tools, keyboard shortcuts, and **agent personas** (including a persona's 🔥 yolo flag) — is saved to a single file that persists across restarts and updates:
 
 | OS | Location |
 |---|---|
@@ -387,7 +397,7 @@ Everything on this screen — theme, model, workspace and **profiles**, Copilot 
 | Windows | `%APPDATA%\whim\config.json` |
 | Linux | `~/.config/whim/config.json` |
 
-This path is fixed for every build (development and installed), so your settings always load from the same place.
+This path is fixed for every build (development and installed), so your settings always load from the same place. Your GitHub sign-in is not in this file: the Copilot runtime keeps it in your system's credential store, shared with the Copilot CLI.
 
 ---
 

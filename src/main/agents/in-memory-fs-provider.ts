@@ -1,5 +1,5 @@
 import * as posixPath from 'path/posix';
-import type { SessionFsProvider, SessionFsFileInfo } from '@github/copilot-sdk';
+import type { SessionFsProvider, SessionFsFileInfo } from '@microsoft/copilot-sdk';
 
 interface FsEntry {
   content: string;

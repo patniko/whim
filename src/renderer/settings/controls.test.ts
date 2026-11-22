@@ -2,11 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SettingsHost } from '../app';
 import { FormDrafts, trackSettingWrites } from '../save-lifecycle';
-import { DebouncedSave } from '../debounced-save';
 import { mountSettings } from './controls';
 
 const forms = [
-  { name: 'runtime', add: 'runtime-add-btn', list: 'runtimes-list', method: 'saveRuntimes' },
   { name: 'export destination', add: 'export-dest-add-btn', list: 'export-destinations-list', method: 'saveExportDestinations' },
   { name: 'MCP server', add: 'mcp-add-btn', list: 'mcp-custom-list', method: 'saveCustomMcp' },
   { name: 'CLI tool', add: 'cli-tool-add-btn', list: 'cli-tools-list', method: 'saveCliTools' },
@@ -15,7 +13,7 @@ const forms = [
 function fixture() {
   const fail = () => vi.fn().mockResolvedValue({ error: 'disk full' });
   const raw = {
-    saveRuntimes: fail(), saveExportDestinations: fail(), saveCustomMcp: fail(), saveCliTools: fail(),
+    saveExportDestinations: fail(), saveCustomMcp: fail(), saveCliTools: fail(),
     setSetting: fail(),
     getSetting: vi.fn().mockResolvedValue(null),
     listExportDestinations: vi.fn().mockResolvedValue([]),
@@ -45,7 +43,6 @@ function fixture() {
     closeSettings: vi.fn(), hideSettings: vi.fn(), showStatus: vi.fn(),
     updateWorkspaceDisplay: vi.fn(), loadThemeSetting: vi.fn().mockResolvedValue(undefined),
     refreshProfiles: vi.fn().mockResolvedValue(undefined), loadHotkeys: vi.fn().mockResolvedValue(undefined),
-    DebouncedSave,
   };
   const controller = mountSettings(host as SettingsHost);
   return { raw, tracked, settingsDrafts, controller };
@@ -93,7 +90,6 @@ describe.each(forms)('mounted $name cancellation', config => {
     await expect(tracked.flush()).rejects.toThrow('failed');
     cancel(form);
     expect(() => settingsDrafts.assertClean()).not.toThrow();
-    await controller.flush();
     await expect(tracked.flush()).resolves.toBeUndefined();
 
     // A discarded optimistic addition must not leak into a later save.

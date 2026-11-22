@@ -1,4 +1,4 @@
-import type { Tool } from '@github/copilot-sdk';
+import type { Tool } from '@microsoft/copilot-sdk';
 import type { InteractionBroker } from '../agents/interaction-broker';
 import { createApproveAgentTool } from './approve-agent';
 import { createAskUserTool } from './ask-user';

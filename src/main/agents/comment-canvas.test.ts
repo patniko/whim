@@ -134,7 +134,7 @@ let spaceDir = '';
 
 /** Stand in for the agent: open the canvas, write a report, publish it. */
 async function publishReport(html: string, input: Record<string, unknown> = {}): Promise<any> {
-  const canvas: any = createSessionOptions.canvases[0];
+  const canvas: any = createSessionOptions.canvases.definitions[0];
   await canvas.open({
     sessionId: 'session-1',
     extensionId: 'whim',
@@ -195,9 +195,9 @@ describe('comment-launched reports', () => {
   it('gives a canvas persona the tools and the obligation to publish', async () => {
     await launch(artifactPersona, 'space-1', 'thread-1');
 
-    expect(createSessionOptions.canvases).toHaveLength(1);
-    // Without requestCanvasRenderer the runtime never advertises the tools.
-    expect(createSessionOptions.requestCanvasRenderer).toBe(true);
+    expect(createSessionOptions.canvases.definitions).toHaveLength(1);
+    // Without canvases.requestRenderer the runtime never advertises the tools.
+    expect(createSessionOptions.canvases.requestRenderer).toBe(true);
     expect(createSessionOptions.systemMessage.content).toContain('## Report artifact (required)');
   });
 
@@ -205,7 +205,7 @@ describe('comment-launched reports', () => {
     await launch(editorPersona, 'space-1', 'thread-1');
 
     expect(createSessionOptions.canvases).toBeUndefined();
-    expect(createSessionOptions.requestCanvasRenderer).toBeUndefined();
+    expect(createSessionOptions.canvases?.requestRenderer).toBeUndefined();
     expect(createSessionOptions.systemMessage.content).not.toContain('## Report artifact (required)');
   });
 

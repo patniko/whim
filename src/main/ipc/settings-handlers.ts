@@ -2,12 +2,12 @@ import { registerIpcHandler } from './registry';
 import { globalShortcut } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
-import { setAIModel, listAvailableModels, listModelsDetailed, scheduleCopilotReinit, previewSandboxConfig, getRuntimeStatus, testRuntimeConnection } from '../ai';
-import { resolveCopilotCliPath, invalidateCliPath, checkCliCompatibility, resolveCommandOnPath, resolveCmdToJs, isCliMxcCapable, discoverCopilotClis } from '../session';
+import { setAIModel, listAvailableModels, listModelsDetailed, previewSandboxConfig } from '../ai';
+import { getCopilotAuthState, signInToGitHub, cancelGitHubSignIn, signOutOfGitHub } from '../copilot-auth';
 // `normalizeWebRemoteBindAddresses` and `listWebRemoteInterfaces` no longer
 // live in config: bind selections are durable intent resolved at bind time,
 // so both moved to ../web/interfaces (imported below).
-import { getConfigValue, setConfigValue, getConfig, getResolvedHotkeys, DEFAULT_PERSONAS, DEFAULT_HOTKEYS, HOTKEY_LABELS, rotateWebRemoteToken, normalizeWebRemotePort, type AgentPersona, type CliRuntime, type CliSource, type HotkeyConfig } from '../config';
+import { getConfigValue, setConfigValue, getConfig, getResolvedHotkeys, DEFAULT_PERSONAS, DEFAULT_HOTKEYS, HOTKEY_LABELS, rotateWebRemoteToken, normalizeWebRemotePort, type AgentPersona, type HotkeyConfig } from '../config';
 import { listDiscoveredMcpServers } from '../mcp';
 import { validateMcpServers, validateCliTools, validateSandboxPolicy } from '../validators';
 import { onAutoHideSidePaneChanged, broadcastHotkeysChanged } from '../window-manager';
@@ -39,35 +39,6 @@ export function registerSettingsHandlers(): void {
     } else if (key === 'model') {
       setConfigValue('model', value);
       await setAIModel(value);
-    } else if (key === 'cli_path') {
-      let resolved = value || null;
-      if (resolved && !fs.existsSync(resolved)) {
-        // Bare command name — try to resolve to full path
-        const found = resolveCommandOnPath(resolved);
-        if (found) resolved = resolveCmdToJs(found);
-      }
-      setConfigValue('cliPath', resolved);
-      invalidateCliPath();
-      // Reinitialize the SDK so it picks up the new CLI. Deliberately not
-      // awaited: the settings UI writes cliPath and cliSource back to back, and
-      // awaiting here would defeat the debounce and respawn the CLI twice.
-      void scheduleCopilotReinit();
-      return resolved;
-    } else if (key === 'cli_source') {
-      const allowed: CliSource[] = ['bundled', 'inprocess', 'auto', 'path', 'server'];
-      const next = (allowed as string[]).includes(value) ? (value as CliSource) : 'bundled';
-      setConfigValue('cliSource', next);
-      invalidateCliPath();
-      void scheduleCopilotReinit();
-      return next;
-    } else if (key === 'cli_server_url') {
-      const url = (value || '').trim() || null;
-      setConfigValue('cliServerUrl', url);
-      void scheduleCopilotReinit();
-      return url;
-    } else if (key === 'cli_server_token') {
-      setConfigValue('cliServerToken', (value || '').trim() || null);
-      void scheduleCopilotReinit();
     } else if (key === 'auto_hide_side_pane') {
       const enabled = value === 'true';
       setConfigValue('autoHideSidePane', enabled);
@@ -178,29 +149,20 @@ export function registerSettingsHandlers(): void {
     return listWebRemoteInterfaces();
   });
 
-  registerIpcHandler('cli:resolve-path', () => {
-    return resolveCopilotCliPath();
+  // ── GitHub account ───────────────────────────────────────
+  registerIpcHandler('auth:get-state', () => getCopilotAuthState());
+
+  registerIpcHandler('auth:sign-in', (_event, method: unknown) =>
+    signInToGitHub(method === 'device-code' ? 'device-code' : 'web', (progress) => {
+      sendToAllWindows('auth:sign-in-progress', progress);
+    }));
+
+  registerIpcHandler('auth:cancel-sign-in', async () => {
+    await cancelGitHubSignIn();
+    return { ok: true as const };
   });
 
-  registerIpcHandler('cli:check-version', () => {
-    return checkCliCompatibility();
-  });
-
-  registerIpcHandler('cli:check-mxc-capable', () => {
-    return { mxcCapable: isCliMxcCapable() };
-  });
-
-  registerIpcHandler('cli:runtime-status', () => {
-    return getRuntimeStatus();
-  });
-
-  registerIpcHandler('cli:test-connection', async () => {
-    return testRuntimeConnection();
-  });
-
-  registerIpcHandler('cli:discover', async () => {
-    return discoverCopilotClis();
-  });
+  registerIpcHandler('auth:sign-out', () => signOutOfGitHub());
 
   registerIpcHandler('models:list', async () => {
     return listAvailableModels();
@@ -330,7 +292,6 @@ export function registerSettingsHandlers(): void {
         : 'local' as const;
 
       const emoji = typeof raw.emoji === 'string' ? raw.emoji.trim().slice(0, 8) : '';
-      const cliRuntime = typeof raw.cliRuntime === 'string' ? raw.cliRuntime.trim() : '';
       // `canvas` is a boolean or a canvas id, mirroring the `canvas_artifacts`
       // frontmatter field. An id is length-capped rather than pattern-checked:
       // an unknown id falls back to the built-in report canvas at launch, so a
@@ -349,7 +310,6 @@ export function registerSettingsHandlers(): void {
         id, handle, instructions, model, runLocation,
         ...(raw.sandboxed === true ? { sandboxed: true } : {}),
         ...(emoji ? { emoji } : {}),
-        ...(cliRuntime ? { cliRuntime } : {}),
         ...(raw.sandboxed === true && raw.sandboxPolicyOverride !== undefined
           ? (() => {
               const override = validateSandboxPolicy(raw.sandboxPolicyOverride);
@@ -376,43 +336,6 @@ export function registerSettingsHandlers(): void {
 
     setConfigValue('personas', validated);
     return { ok: true };
-  });
-
-  // ── CLI Runtimes ─────────────────────────────────────────
-  registerIpcHandler('runtimes:list', () => {
-    return getConfigValue('cliRuntimes') || [];
-  });
-
-  registerIpcHandler('runtimes:save', (_event, runtimes: unknown) => {
-    if (!Array.isArray(runtimes)) return { error: 'invalid payload' };
-
-    const seen = new Set<string>();
-    const validated: CliRuntime[] = [];
-
-    for (const r of runtimes) {
-      if (!r || typeof r !== 'object') continue;
-      const raw = r as Record<string, unknown>;
-
-      const id = typeof raw.id === 'string' ? raw.id.trim() : '';
-      const label = typeof raw.label === 'string' ? raw.label.trim().slice(0, 50) : '';
-      const rPath = typeof raw.path === 'string' ? raw.path.trim() : '';
-
-      if (!id || !label || !rPath) continue;
-      if (seen.has(id)) continue;
-      seen.add(id);
-
-      // Resolve bare command names to full paths
-      let resolvedPath = rPath;
-      if (!fs.existsSync(rPath)) {
-        const found = resolveCommandOnPath(rPath);
-        if (found) resolvedPath = resolveCmdToJs(found);
-      }
-
-      validated.push({ id, label, path: resolvedPath });
-    }
-
-    setConfigValue('cliRuntimes', validated);
-    return { ok: true, runtimes: validated };
   });
 
   // ── MCP Servers ──────────────────────────────────────────

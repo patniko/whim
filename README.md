@@ -95,7 +95,7 @@ Agents can run **locally** via the Copilot SDK, or in the **cloud** via GitHub's
 - **AI model selection** — choose from available Copilot models
 - **Workspace directory** — select where intent data is stored
 - **Profiles** — keep separate repos (e.g. work and personal); each has an optional name (defaults to the git repo name) and a tap-to-generate color tint; switch via the logo or the `Switch Profile` hotkey
-- **Copilot runtime** — uses a **bundled** Copilot CLI by default; optionally auto-detect a local CLI, set a custom path, or connect to a remote CLI server, with a **Test connection** check
+- **GitHub account** — Copilot runs in-process with the **bundled** Copilot SDK runtime, so there is nothing to install; sign in with GitHub (browser or one-time code), shared with the Copilot CLI on the same machine
 - **Agent personas** — define @mentionable personas with custom instructions and local/cloud execution
 - **MCP servers** — auto-discovered from `~/.copilot/` + user-added custom servers
 - **CLI tools** — define CLI tools available in the environment so agents know when to use them
@@ -114,7 +114,9 @@ src/
 ├── main/                      # Electron main process
 │   ├── main.ts                # App lifecycle, tray, window, hotkeys
 │   ├── database.ts            # SQLite (intents, agents, events)
-│   ├── ai.ts                  # Copilot SDK client (parse, recurrence, recall)
+│   ├── ai.ts                  # In-process Copilot SDK client (parse, recurrence, recall)
+│   ├── copilot-auth.ts        # GitHub sign-in through the runtime's built-in login
+│   ├── ahp-host.ts            # AHP host that lets the Copilot CLI attach to live sessions
 │   ├── agent-service.ts       # Local agent lifecycle management
 │   ├── cloud-agent.ts         # Cloud agent API (Copilot CCA)
 │   ├── cloud-agent-poller.ts  # Cloud job status polling
@@ -122,7 +124,7 @@ src/
 │   ├── ipc.ts                 # IPC handlers bridging renderer ↔ main
 │   ├── workspace.ts           # Workspace folders, canvas I/O, git auto-commit
 │   ├── eventlog.ts            # Append-only event log (.whim/events.jsonl)
-│   ├── session.ts             # Copilot CLI discovery, terminal launch
+│   ├── session.ts             # Bundled Copilot CLI terminal launch
 │   ├── voice.ts               # Local Whisper model (speech-to-text)
 │   ├── config.ts              # User config (theme, model, personas, profiles)
 │   ├── mcp.ts                 # MCP server discovery & management
@@ -161,12 +163,11 @@ See [docs/architecture.md](./docs/architecture.md) for detailed component descri
 - A GitHub account with Copilot access
 - For cloud agents: `gh` CLI authenticated (`gh auth login`)
 
-> The GitHub Copilot CLI is **bundled** with the app — no separate install is
-> required. To use a self-updating CLI with terminal-resumable sessions,
-> optionally install it locally (`npm install -g @github/copilot`, Homebrew, or
-> `curl -fsSL https://gh.io/copilot-install | bash`) and select **Auto-detect**
-> or **Custom path** in Settings → Copilot Runtime. You can also connect to a
-> remote runtime via **Remote CLI server**.
+> Copilot runs **inside** whim and the GitHub Copilot CLI is **bundled** with
+> it, so there is nothing else to install. On first launch, sign in with GitHub;
+> if you're already signed in to the Copilot CLI or the GitHub CLI, whim uses
+> that account. Use **⌨️** in an agent's chat to continue its live session in
+> the bundled CLI, which attaches to whim over the Agent Host Protocol (AHP).
 
 ### Install & Run
 

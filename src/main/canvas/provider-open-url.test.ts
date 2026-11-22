@@ -15,7 +15,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Canvas } from '@github/copilot-sdk';
+import type { Canvas } from '@microsoft/copilot-sdk';
 vi.mock('../storage', async () => await import('./artifact-store'));
 
 vi.mock('electron', () => ({

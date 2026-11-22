@@ -1,4 +1,4 @@
-import type { CopilotSession, SessionEventType } from '@github/copilot-sdk';
+import type { CopilotSession, SessionEventType } from '@microsoft/copilot-sdk';
 import { getStorageGeneration, withStorageGeneration } from '../storage';
 import { observeProducer } from '../producer-tasks';
 

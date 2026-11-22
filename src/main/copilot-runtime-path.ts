@@ -26,7 +26,8 @@ export function getCopilotPlatformEntrypoints(
   const variants = platform === 'linux'
     ? (linuxMusl ? ['linuxmusl', 'linux'] : ['linux', 'linuxmusl'])
     : [platform];
-  const executableName = 'index.js';
+  // Since 1.0.113 each platform package is a single native CLI executable.
+  const executableName = platform === 'win32' ? 'copilot.exe' : 'copilot';
 
   return variants.map((variant) => {
     const packageName = `copilot-${variant}-${arch}`;
@@ -40,6 +41,11 @@ export function getCopilotPlatformEntrypoints(
   });
 }
 
+/**
+ * Where the bundled Copilot CLI executable can live, best match first. In
+ * packaged builds it is unpacked from the ASAR archive (see `build.asarUnpack`),
+ * because the OS cannot execute a file inside it.
+ */
 export function getBundledCopilotCandidates(
   appPath: string,
   platform = process.platform,
@@ -47,22 +53,9 @@ export function getBundledCopilotCandidates(
   linuxMusl = isLinuxMuslRuntime(),
 ): string[] {
   const pathApi = platform === 'win32' ? path.win32 : path.posix;
-  const nativeRelativePaths = getCopilotPlatformEntrypoints(platform, arch, linuxMusl)
-    .map((entrypoint) => entrypoint.appRelativePath);
-  const legacyRelativePath = pathApi.join('node_modules', '@github', 'copilot', 'index.js');
-
-  if (appPath.endsWith('.asar')) {
-    return [
-      ...nativeRelativePaths.map((relativePath) => pathApi.join(`${appPath}.unpacked`, relativePath)),
-      pathApi.join(`${appPath}.unpacked`, legacyRelativePath),
-      pathApi.join(appPath, legacyRelativePath),
-    ];
-  }
-
-  return [
-    ...nativeRelativePaths.map((relativePath) => pathApi.join(appPath, relativePath)),
-    pathApi.join(appPath, legacyRelativePath),
-  ];
+  const root = appPath.endsWith('.asar') ? `${appPath}.unpacked` : appPath;
+  return getCopilotPlatformEntrypoints(platform, arch, linuxMusl)
+    .map((entrypoint) => pathApi.join(root, entrypoint.appRelativePath));
 }
 
 export function getBundledSdkRuntimePaths(
@@ -75,7 +68,7 @@ export function getBundledSdkRuntimePaths(
   const variant = platform === 'linux' && linuxMusl ? 'linuxmusl' : platform;
   const target = `${variant}-${arch}`;
   const root = appPath.endsWith('.asar') ? `${appPath}.unpacked` : appPath;
-  const directory = pathApi.join(root, 'node_modules', '@github', `copilot-sdk-${target}`, 'prebuilds', target);
+  const directory = pathApi.join(root, 'node_modules', '@microsoft', `copilot-sdk-${target}`, 'prebuilds', target);
   return {
     executable: pathApi.join(directory, platform === 'win32' ? 'copilot-runtime.exe' : 'copilot-runtime'),
     library: pathApi.join(directory, 'runtime.node'),

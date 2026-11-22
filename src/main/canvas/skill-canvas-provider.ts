@@ -14,7 +14,7 @@
  * events and replays it on reconnect.
  */
 import * as fs from 'fs';
-import { createCanvas, type Canvas } from '@github/copilot-sdk';
+import { createCanvas, type Canvas } from '@microsoft/copilot-sdk';
 import { ARTIFACT_FILE, CANVASES_DIR, MAX_DATA_BYTES, resolveArtifactDir, resolveInsideSpace, toArtifactId, isValidArtifactId, CanvasArtifactError } from './artifact-store';
 import { bindArtifact, getArtifact, publishArtifact, writeArtifactFile } from '../storage';
 import { renderSkillCanvas, type SkillCanvasDefinition } from './skill-canvas-template';

@@ -126,7 +126,6 @@ export interface AgentPersona {
   runLocation: 'local' | 'cca' | 'cloud';
   sandboxed?: boolean;  // enable runtime sandbox for this persona
   emoji?: string;
-  cliRuntime?: string;
   /** Optional per-persona override of the global sandbox policy. */
   sandboxPolicyOverride?: SandboxPolicy;
   /** When true, agents launched with this persona automatically enable yolo mode (auto-approve all permissions). */
@@ -195,11 +194,33 @@ export type SandboxLayer =
   | 'mxc:shell-denial-medium'
   | 'mxc:shell-denial-network';
 
-export interface CliRuntime {
-  id: string;
-  label: string;
-  path: string;
+/** Where the Copilot runtime found the GitHub credential it is using. */
+export type CopilotAuthSource =
+  | 'sign-in'       // stored by a GitHub sign-in (Whim's or the Copilot CLI's); shared with the CLI
+  | 'github-cli'    // the GitHub CLI's (`gh`) login
+  | 'environment'   // a token in the environment (COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN)
+  | 'other';
+
+export interface CopilotAuthState {
+  signedIn: boolean;
+  login: string | null;
+  /** GitHub host URL, e.g. https://github.com */
+  host: string | null;
+  source: CopilotAuthSource | null;
+  /** Why the account could not be read or changed. */
+  error?: string;
 }
+
+/** `web` signs in through the browser; `device-code` shows a code to enter on github.com. */
+export type GitHubSignInMethod = 'web' | 'device-code';
+
+export type GitHubSignInProgress =
+  | { kind: 'browser' }
+  | { kind: 'device-code'; userCode: string; verificationUri: string; expiresIn: number };
+
+export type GitHubSignInResult =
+  | { ok: true; state: CopilotAuthState }
+  | { ok: false; cancelled?: boolean; error?: string };
 
 export interface CliToolDefinition {
   name: string;
@@ -421,42 +442,11 @@ export interface IpcCommands {
   'hotkeys:reset': { args: [key?: string]; result: { ok: true; hotkeys: HotkeyConfig } };
   'hotkeys:toggle-status': { args: []; result: { accelerator: string; registered: boolean } };
 
-  // ── CLI / Models ─────────────────────────────────────────
-  'cli:resolve-path': { args: []; result: string | null };
-  'cli:check-version': { args: []; result: { path: string | null; version: string | null; compatible: boolean; minVersion: string } };
-  'cli:check-mxc-capable': { args: []; result: { mxcCapable: boolean } };
-  'cli:runtime-status': {
-    args: [];
-    result: {
-      source: 'bundled' | 'inprocess' | 'auto' | 'path' | 'server';
-      target: string | null;
-      version: string | null;
-      compatible: boolean;
-      minVersion: string;
-    };
-  };
-  'cli:test-connection': {
-    args: [];
-    result: {
-      ok: boolean;
-      source: 'bundled' | 'inprocess' | 'auto' | 'path' | 'server';
-      target: string | null;
-      version: string | null;
-      compatible: boolean;
-      minVersion: string;
-      error?: string;
-    };
-  };
-  'cli:discover': {
-    args: [];
-    result: Array<{
-      path: string;
-      version: string | null;
-      source: 'bundled' | 'path';
-      origin: string;
-      compatible: boolean;
-    }>;
-  };
+  // ── GitHub account / Models ──────────────────────────────
+  'auth:get-state': { args: []; result: CopilotAuthState };
+  'auth:sign-in': { args: [method: GitHubSignInMethod]; result: GitHubSignInResult };
+  'auth:cancel-sign-in': { args: []; result: { ok: true } };
+  'auth:sign-out': { args: []; result: CopilotAuthState };
   'models:list': { args: []; result: Array<{ id: string; name: string }> };
   'models:list-detailed': {
     args: [];
@@ -738,6 +728,8 @@ export interface IpcEvents {
   'space:recall': { spaceId: string; match: RecallMatch };
   'skills:changed': void;
   'update:state-changed': UpdateState;
+  'auth:changed': CopilotAuthState;
+  'auth:sign-in-progress': GitHubSignInProgress;
 }
 
 // ---------------------------------------------------------------------------

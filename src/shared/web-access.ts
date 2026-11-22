@@ -25,12 +25,12 @@ export type WebAccess = 'allow' | 'deny' | 'desktop-only';
  * Commands that are registered but absent from `ipc-contract.ts`.
  *
  * "Exhaustive by construction" was only true of channels the contract knows
- * about, and nine handlers had been added without one. `webAccessFor` returns
+ * about, and several handlers had been added without one. `webAccessFor` returns
  * `null` for anything it has never heard of, which the gateway treats as
  * denied — so these were refused with no decision ever having been made, and
  * the browser reported them as forbidden rather than as an oversight. Serving
- * the real renderer made that visible: it calls `runtimes:list` on boot and
- * got an unhandled rejection.
+ * the real renderer made that visible: it called one on boot and got an
+ * unhandled rejection.
  *
  * These are classified here rather than quietly allowed, and
  * `registry.test.ts` fails if a registered channel appears in neither map, so
@@ -44,12 +44,9 @@ const UNTYPED_CHANNEL_ACCESS: Record<string, WebAccess> = {
   'canvas:read-activity-log': 'allow',
   'canvas:get-agent-state': 'allow',
   'subagent:list-persisted': 'allow',
-  'runtimes:list': 'allow',
 
   // Lowers the sandbox around an agent with shell access on the host.
   'agent:disable-sandbox': 'deny',
-  // Rewrites which runtimes the host will execute against.
-  'runtimes:save': 'deny',
 
   // Native surfaces with no browser meaning.
   'canvas:open-folder': 'desktop-only',
@@ -108,20 +105,13 @@ export const WEB_ACCESS: Record<IpcCommandChannel, WebAccess> = {
   // such concept.
   'hotkeys:toggle-status': 'desktop-only',
 
-  // Probe and configure the local CLI installation — host-machine concerns.
-  'cli:resolve-path': 'deny',
-  'cli:check-version': 'deny',
-  'cli:check-mxc-capable': 'deny',
-  // The reply names an absolute path on the host, which is why this was
-  // denied. But the renderer's boot reads it to choose between the setup flow
-  // and the real interface, so denying it did not hide a path — it stopped
-  // the browser interface from starting. web-redaction.ts replaces the path
-  // and passes the rest through, which is the part a paired device needs.
-  'cli:runtime-status': 'allow',
-  'cli:test-connection': 'deny',
-  // Enumerates CLI installs by absolute path on the host filesystem, and only
-  // feeds the Settings window, which is itself denied.
-  'cli:discover': 'deny',
+  // Who the host is signed in as; the welcome view shows it.
+  'auth:get-state': 'allow',
+  // Signing in opens a browser on the host and changes the credential the
+  // host's Copilot CLI shares; signing out removes it.
+  'auth:sign-in': 'deny',
+  'auth:cancel-sign-in': 'deny',
+  'auth:sign-out': 'deny',
 
   'models:list': 'allow',
   'models:list-detailed': 'allow',

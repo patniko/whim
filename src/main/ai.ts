@@ -1,18 +1,11 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
-import { CopilotClient, CopilotSession, RuntimeConnection, type CopilotClientOptions } from '@github/copilot-sdk';
-import { getConfigValue, type CliSource } from './config';
-import {
-  resolveAutoDetectedCliPath,
-  resolveConfiguredCliPath,
-  probeCliVersion,
-  compareVersions,
-  MIN_CLI_VERSION,
-} from './session';
-import { getCliShimPath } from './cli-electron-shim';
+import { CopilotClient, CopilotSession, RuntimeConnection, type CopilotClientOptions } from '@microsoft/copilot-sdk';
+import { getConfigValue } from './config';
 import { getBundledSdkRuntimePaths } from './copilot-runtime-path';
 import { startRuntimeClient } from './sdk-runtime-start';
+import { disposeAhpHost } from './ahp-host';
 import { RecurrenceResult, RecallMatch, Space } from '../shared/types';
 import type { SandboxPolicy } from '../shared/ipc-contract';
 
@@ -29,7 +22,7 @@ export interface SandboxConfigDirs {
 
 /**
  * Build the unwrapped runtime sandbox config (`{ enabled, userPolicy }` shape)
- * that the SDK's `session.rpc.options.update({ sandboxConfig })` expects.
+ * that the SDK's `session.rpc.options.update({ permissions: { sandbox } })` expects.
  *
  * The runtime's `SandboxConfig` (copilot-agent-runtime/src/core/sandbox/sandboxConfig.ts)
  * is the inner block of the settings-file shape — i.e. the contents of
@@ -229,7 +222,7 @@ async function createSession(systemMessage: string): Promise<CopilotSession | nu
     return await client.createSession({
       systemMessage: { content: systemMessage },
       model,
-      onPermissionRequest: async () => ({ kind: 'reject' as const }),
+      permissions: { onRequest: async () => ({ kind: 'reject' as const }) },
     });
   } catch (err) {
     console.error('[copilot-sdk] Failed to create session:', err);
@@ -252,202 +245,36 @@ async function getRecallSession(): Promise<CopilotSession | null> {
   return recallSession;
 }
 
-export interface ResolvedRuntime {
-  connection: RuntimeConnection;
-  kind: CliSource;
-  /** Resolved path or URL, for logging and the settings UI. */
-  target: string | null;
-}
-
 /**
- * Resolve which Copilot runtime the SDK should connect to, honoring the
- * configured `cliSource`:
- *   - 'server'  → connect to an already-running runtime at `cliServerUrl`.
- *   - 'path'    → spawn the user's explicit local CLI.
- *   - 'auto'    → spawn the best auto-detected local CLI (prefers self-update).
- *   - 'bundled' → spawn the SDK's native runtime (default).
- *   - 'inprocess' → host the bundled SDK runtime in this process (experimental).
- * Unavailable custom sources fall back to bundled stdio, never to in-process.
+ * The bundled native runtime, always hosted in Whim's own process. Its files
+ * ship with the app, so there is no Copilot CLI to install or select.
  */
-export function resolveRuntimeConnection(): ResolvedRuntime {
-  const source = (getConfigValue('cliSource') || 'bundled') as CliSource;
+interface BundledRuntime {
+  connection: RuntimeConnection;
+  /** Unpacked runtime entrypoint; null when the app's runtime files are missing. */
+  executable: string | null;
+}
 
-  if (source === 'server') {
-    const url = getConfigValue('cliServerUrl');
-    if (url) {
-      const token = getConfigValue('cliServerToken') || undefined;
-      const connection = RuntimeConnection.forUri(url, token ? { connectionToken: token } : undefined);
-      return { connection, kind: 'server', target: url };
-    }
-    console.warn('[copilot-sdk] cliSource=server but no server URL configured; falling back to bundled SDK runtime');
-  } else if (source === 'path' || source === 'auto') {
-    const localPath = source === 'auto'
-      ? resolveAutoDetectedCliPath()
-      : resolveConfiguredCliPath(getConfigValue('cliPath'));
-    if (localPath) {
-      // JavaScript CLI entrypoints need a shim that strips Electron runtime
-      // markers — otherwise the CLI mis-parses argv and exits.
-      const effectivePath = getCliShimPath(localPath) ?? localPath;
-      if (effectivePath !== localPath) {
-        console.log(`[copilot-sdk] Spawning via Electron shim: ${effectivePath}`);
-      }
-      return { connection: RuntimeConnection.forStdio({ path: effectivePath }), kind: source, target: localPath };
-    }
-    console.warn(`[copilot-sdk] cliSource=${source} but no local CLI resolved; falling back to bundled SDK runtime`);
-  }
-
+function bundledRuntime(): BundledRuntime {
   const bundled = getBundledSdkRuntimePaths(app.getAppPath());
-  const kind = source === 'inprocess' ? 'inprocess' : 'bundled';
   const present = fs.existsSync(bundled.executable) && fs.existsSync(bundled.library);
-  return {
-    connection: kind === 'inprocess'
-      ? RuntimeConnection.forInProcess()
-      : RuntimeConnection.forStdio({ path: bundled.executable }),
-    kind,
-    target: present ? bundled.executable : null,
-  };
+  return { connection: RuntimeConnection.forInProcess(), executable: present ? bundled.executable : null };
 }
 
-const nativeRuntimeVersions = new Map<string, string>();
-
-function isBundledRuntime(runtime: ResolvedRuntime): boolean {
-  return runtime.kind === 'bundled' || runtime.kind === 'inprocess';
-}
-
-function runtimeClientOptions(runtime: ResolvedRuntime): CopilotClientOptions {
-  if (isBundledRuntime(runtime) && !runtime.target) {
+function runtimeClientOptions(runtime: BundledRuntime): CopilotClientOptions {
+  if (!runtime.executable) {
     throw new Error('Bundled SDK runtime is missing. Reinstall Whim to restore its native runtime files.');
   }
-  return {
-    connection: runtime.connection,
-    enableRemoteSessions: true,
-    // Only legacy/custom CLI children need Electron's Node compatibility mode.
-    ...(runtime.kind === 'path' || runtime.kind === 'auto'
-      ? { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }
-      : {}),
-  };
+  // SDK 2.0 requires an explicit mode; 'coding-agent' keeps the CLI-equivalent
+  // defaults that SDK 1.x applied implicitly.
+  return { mode: 'coding-agent', runtime: runtime.connection };
 }
 
-async function startClient(started: CopilotClient, runtime: ResolvedRuntime): Promise<void> {
-  await startRuntimeClient(started, runtime.kind === 'inprocess' ? runtime.target ?? undefined : undefined);
-  if (isBundledRuntime(runtime) && runtime.target) {
-    // The native wrapper has no --version command; ask the running server.
-    const status = await started.getStatus();
-    nativeRuntimeVersions.set(runtime.target, status.version);
-  }
+function startClient(started: CopilotClient, runtime: BundledRuntime): Promise<void> {
+  return startRuntimeClient(started, runtime.executable ?? undefined);
 }
 
-export interface RuntimeStatus {
-  source: CliSource;
-  target: string | null;
-  version: string | null;
-  compatible: boolean;
-  minVersion: string;
-}
-
-function isVersionCompatible(version: string | null): boolean {
-  // '0.0.1' is the dev/source build and is always treated as compatible.
-  return version != null && (version === '0.0.1' || compareVersions(version, MIN_CLI_VERSION) >= 0);
-}
-
-/**
- * Report the effective runtime: its source, target (path or URL), version, and
- * whether it meets the minimum. Native versions come from the SDK handshake;
- * custom CLI versions are probed from disk. A remote version is unknown (use
- * {@link testRuntimeConnection} for a live handshake), so `compatible` reflects
- * only that a URL is configured.
- */
-export function getRuntimeStatus(): RuntimeStatus {
-  return runtimeStatus(resolveRuntimeConnection());
-}
-
-function runtimeStatus(runtime: ResolvedRuntime): RuntimeStatus {
-  let version: string | null = null;
-  if (isBundledRuntime(runtime) && runtime.target) {
-    version = nativeRuntimeVersions.get(runtime.target) ?? null;
-  } else if (runtime.kind !== 'server' && runtime.target) {
-    version = probeCliVersion(runtime.target);
-  }
-  const compatible = runtime.kind === 'server' || isBundledRuntime(runtime)
-    ? runtime.target != null
-    : isVersionCompatible(version);
-  return { source: runtime.kind, target: runtime.target, version, compatible, minVersion: MIN_CLI_VERSION };
-}
-
-export interface RuntimeTestResult extends RuntimeStatus {
-  ok: boolean;
-  error?: string;
-}
-
-/**
- * Stable identity of a resolved runtime. Two resolutions with the same key
- * would spawn an identical runtime process, so a reinit between them is a
- * no-op that only costs an extra CLI spawn (and, on macOS, an extra keychain
- * prompt when the CLI reads its stored token).
- */
-function runtimeKey(runtime: ResolvedRuntime): string {
-  const token = runtime.connection.kind === 'uri' ? (runtime.connection.connectionToken || '') : '';
-  return `${runtime.kind}\u0000${runtime.target ?? ''}\u0000${token}`;
-}
-
-/** Runtime key the live `client` was started against; null when not started. */
-let activeRuntimeKey: string | null = null;
-
-/**
- * Live-test the configured runtime by performing a real handshake
- * (`listModels`). When the configured runtime is the one the primary client is
- * already connected to, the test reuses that client rather than spawning a
- * throwaway one — every extra spawn is another CLI process reading credentials
- * (and on macOS, another keychain prompt). Bounded by a timeout so the UI never
- * hangs on a misconfigured runtime.
- */
-export async function testRuntimeConnection(timeoutMs = 25_000): Promise<RuntimeTestResult> {
-  const runtime = resolveRuntimeConnection();
-  const status = runtimeStatus(runtime);
-  const reusable = client && activeRuntimeKey === runtimeKey(runtime) ? client : null;
-
-  let testClient: CopilotClient | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let startup: Promise<void> | null = null;
-  let startupSettled = false;
-  try {
-    let target: CopilotClient;
-    if (reusable) {
-      target = reusable;
-    } else {
-      testClient = new CopilotClient(runtimeClientOptions(runtime));
-      target = testClient;
-      startup = startClient(testClient, runtime).finally(() => { startupSettled = true; });
-    }
-    const handshake = (async () => {
-      await startup;
-      // Listing models proves the runtime responds over the connection.
-      await target.listModels();
-    })();
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`Connection test timed out after ${timeoutMs}ms`)), timeoutMs);
-    });
-    await Promise.race([handshake, timeout]);
-    return { ...runtimeStatus(runtime), ok: true, compatible: runtime.kind === 'server' ? true : status.compatible };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    return { ...status, ok: false, error };
-  } finally {
-    if (timer) clearTimeout(timer);
-    if (testClient) {
-      const stopping = testClient;
-      if (startup && !startupSettled) {
-        // Native startup may finish after the UI timeout. Stopping before it
-        // finishes can leave a newly opened FFI host behind.
-        void startup.then(() => stopClient(stopping), () => stopClient(stopping));
-      } else {
-        await stopClient(stopping);
-      }
-    }
-  }
-}
-
-/** In-flight primary init, so concurrent callers share one CLI spawn. */
+/** In-flight primary init, so concurrent callers share one runtime start. */
 let initInFlight: Promise<void> | null = null;
 
 /** Failure reason from the last init attempt; null once one succeeds. */
@@ -462,15 +289,13 @@ export function initCopilot(): Promise<void> {
 
 async function doInitCopilot(): Promise<void> {
   try {
-    const runtime = resolveRuntimeConnection();
-    console.log(`[copilot-sdk] Runtime source: ${runtime.kind}${runtime.target ? ` → ${runtime.target}` : ' (runtime files missing)'}`);
+    const runtime = bundledRuntime();
+    console.log(`[copilot-sdk] In-process runtime: ${runtime.executable ?? '(runtime files missing)'}`);
 
-    // enableRemoteSessions allows per-session remote access to be toggled
-    // on demand via session.rpc.remote.enable(). It does NOT auto-enable
-    // remote on every session — that's controlled separately.
+    // Remote access is toggled per session via session.rpc.remote.enable();
+    // SDK 2.0 needs no client-level opt-in for it.
     client = new CopilotClient(runtimeClientOptions(runtime));
     await startClient(client, runtime);
-    activeRuntimeKey = runtimeKey(runtime);
     lastInitError = null;
     // Eagerly init the parse session (most commonly used)
     await getParseSession();
@@ -480,19 +305,21 @@ async function doInitCopilot(): Promise<void> {
     lastInitError = err instanceof Error ? err.message : String(err);
     if (client) await stopClient(client);
     client = null;
-    activeRuntimeKey = null;
-    // If the primary client failed (e.g. CLI exited), don't attempt the
-    // ephemeral client — it shares the same CLI and will fail identically.
+    // The ephemeral client loads the same runtime and would fail identically.
     ephemeralClient = null;
   }
-  // The ephemeral client is NOT started here. It's a second CLI process that
-  // most sessions never need, and every process start re-reads credentials
-  // (on macOS that means another keychain prompt). It's spun up lazily by
-  // ensureEphemeralCopilotClient() on the first ephemeral agent launch.
+  // The ephemeral client is NOT started here. Most sessions never need it, and
+  // every runtime host re-reads credentials (on macOS that can mean another
+  // keychain prompt). ensureEphemeralCopilotClient() starts it on first use.
 }
 
 export function getCopilotClient(): CopilotClient | null {
   return client;
+}
+
+/** Why the runtime failed to start, if it did. */
+export function getCopilotInitError(): string | null {
+  return lastInitError;
 }
 
 /** In-flight ephemeral init, so concurrent ephemeral launches share one spawn. */
@@ -515,7 +342,7 @@ export function ensureEphemeralCopilotClient(): Promise<CopilotClient | null> {
 async function startEphemeralClient(): Promise<CopilotClient | null> {
   let started: CopilotClient | null = null;
   try {
-    const runtime = resolveRuntimeConnection();
+    const runtime = bundledRuntime();
     const ephemeralOpts: CopilotClientOptions = {
       ...runtimeClientOptions(runtime),
       sessionFs: {
@@ -543,57 +370,21 @@ export function getEphemeralCopilotClient(): CopilotClient | null {
 }
 
 /**
- * Shut down and re-initialize the Copilot SDK client (e.g. after a CLI path
- * change). Skipped when the newly-resolved runtime is identical to the running
- * one — a pointless respawn otherwise. Pass `force` to reinit regardless.
+ * Drop runtime state tied to the previous GitHub account after a sign-in or
+ * sign-out. Each in-process client has its own auth manager, so the ephemeral
+ * client restarts on next use to read the new credentials; the AHP host admits
+ * only the account it started with; and the helper sessions are recreated on
+ * demand. The primary client picked up the change itself.
  */
-export async function reinitCopilot(force = false): Promise<void> {
-  // Wait for a start that's already underway. Otherwise shutdownCopilot() sees
-  // a null `client` and tears down nothing, initCopilot() returns the same
-  // in-flight promise, and the app ends up pinned to the *old* runtime the
-  // in-flight init was resolved against.
-  if (initInFlight) {
-    try { await initInFlight; } catch { /* handled below by re-init */ }
-  }
-  const key = runtimeKey(resolveRuntimeConnection());
-  if (!force && client && activeRuntimeKey === key) {
-    console.log('[copilot-sdk] Runtime unchanged; skipping reinit');
-    return;
-  }
-  await shutdownCopilot();
-  await initCopilot();
-}
-
-/**
- * Debounce window for {@link scheduleCopilotReinit}. Settings writes arrive in
- * bursts (the CLI settings UI writes cliPath then cliSource back to back), and
- * each immediate reinit would tear down and respawn the CLI.
- */
-const REINIT_DEBOUNCE_MS = 500;
-let reinitTimer: ReturnType<typeof setTimeout> | null = null;
-let reinitPending: Promise<void> | null = null;
-let reinitResolve: (() => void) | null = null;
-
-/**
- * Coalesce a burst of runtime-config changes into a single reinit. Returns a
- * promise that resolves once the reinit has run — but callers handling IPC
- * should NOT await it, or sequential settings writes won't coalesce.
- */
-export function scheduleCopilotReinit(): Promise<void> {
-  if (!reinitPending) {
-    reinitPending = new Promise<void>(resolve => { reinitResolve = resolve; });
-  }
-  if (reinitTimer) clearTimeout(reinitTimer);
-  reinitTimer = setTimeout(() => {
-    reinitTimer = null;
-    const done = reinitResolve;
-    reinitPending = null;
-    reinitResolve = null;
-    void reinitCopilot().catch(err => {
-      console.error('[copilot-sdk] Scheduled reinit failed:', err);
-    }).finally(() => done?.());
-  }, REINIT_DEBOUNCE_MS);
-  return reinitPending;
+export async function resetAfterAuthChange(): Promise<void> {
+  await ephemeralInFlight;
+  const ephemeral = ephemeralClient;
+  ephemeralClient = null;
+  const helpers = [parseSession, recurrenceSession, recallSession];
+  parseSession = recurrenceSession = recallSession = null;
+  await disposeAhpHost();
+  await Promise.all(helpers.map(session => session?.disconnect().catch(() => {})));
+  if (ephemeral) await stopClient(ephemeral);
 }
 
 export async function setAIModel(model: string): Promise<void> {
@@ -616,7 +407,7 @@ export async function listAvailableModels(): Promise<{ id: string; name?: string
  * List models, reporting *why* the list is empty when it is. The plain
  * {@link listAvailableModels} swallows every failure into `[]`, which left the
  * onboarding screen showing a bare "No models available" with no way to tell a
- * still-starting runtime from an unauthenticated CLI.
+ * still-starting runtime from a signed-out one.
  *
  * Also self-heals the common startup race: a call that lands before (or during)
  * the first `initCopilot()` waits for it rather than seeing a null client.
@@ -625,13 +416,6 @@ export async function listModelsDetailed(): Promise<{ models: { id: string; name
   if (initInFlight) {
     try { await initInFlight; } catch { /* error surfaced via lastInitError */ }
   }
-  // A CLI change only *schedules* a debounced reinit, so a client may still be
-  // connected to the previous runtime. Listing its models here would report the
-  // old CLI's capabilities under the new CLI's name — exactly the mismatch this
-  // is meant to surface — so re-point at the configured runtime first.
-  if (client && activeRuntimeKey !== runtimeKey(resolveRuntimeConnection())) {
-    try { await reinitCopilot(); } catch { /* error surfaced via lastInitError */ }
-  }
   if (!client) {
     try { await initCopilot(); } catch { /* error surfaced via lastInitError */ }
   }
@@ -639,13 +423,17 @@ export async function listModelsDetailed(): Promise<{ models: { id: string; name
     return { models: [], error: lastInitError || 'Copilot runtime is not running.' };
   }
   try {
-    const models = await client.listModels();
+    // Bypass `client.listModels()`: it caches the first answer for the life of
+    // the connection, so it would keep listing the previous account's models
+    // after a sign-out or account switch.
+    const { models } = await client.rpc.models.list({});
     if (models.length === 0) {
-      return { models: [], error: 'The Copilot CLI returned no models. Run `copilot` once in a terminal to sign in.' };
+      return { models: [], error: 'Copilot returned no models for this GitHub account.' };
     }
     return { models: models.map(m => ({ id: m.id, name: m.name })), error: null };
   } catch (err) {
-    return { models: [], error: err instanceof Error ? err.message : String(err) };
+    const message = err instanceof Error ? err.message : String(err);
+    return { models: [], error: /not authenticated/i.test(message) ? 'Sign in to GitHub to load models.' : message };
   }
 }
 
@@ -659,17 +447,11 @@ async function stopClient(stopping: CopilotClient): Promise<void> {
 }
 
 export async function shutdownCopilot(): Promise<void> {
-  if (reinitTimer) {
-    clearTimeout(reinitTimer);
-    reinitTimer = null;
-    reinitResolve?.();
-    reinitPending = null;
-    reinitResolve = null;
-    console.info('[copilot-sdk] Cancelled pending reinitialization during shutdown');
-  }
   await initInFlight;
   await ephemeralInFlight;
-  activeRuntimeKey = null;
+  // The host would stop with its client anyway; disposing first clears our
+  // reference and lets attached CLIs disconnect cleanly.
+  await disposeAhpHost();
   // stop() owns session cancellation/disconnection, including the FFI SQLite
   // cleanup workaround. Do not detach sessions before it can abort them.
   const stopping = [client, ephemeralClient];

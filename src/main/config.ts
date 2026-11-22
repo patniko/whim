@@ -36,7 +36,6 @@ export interface AgentPersona {
   runLocation: 'local' | 'cca' | 'cloud';  // where to execute the agent
   sandboxed?: boolean;  // enable runtime sandbox for this persona
   emoji?: string;       // emoji avatar for presence and worker tabs
-  cliRuntime?: string;  // id of a CliRuntime; null/empty = use default cliPath
   /**
    * Optional per-persona override of the global sandbox policy.
    * When `sandboxed` is true and this is undefined, the persona inherits
@@ -56,22 +55,6 @@ export interface AgentPersona {
    * invocation frontmatter to read it from.
    */
   canvas?: boolean | string;
-}
-
-/**
- * Which Copilot runtime the SDK connects to:
- * - 'bundled': the SDK's native runtime over stdio; the default.
- * - 'inprocess': the bundled SDK runtime hosted in-process (experimental).
- * - 'auto':    auto-detect a local install, preferring the self-updated CLI.
- * - 'path':    an explicit local CLI path/command (`cliPath`).
- * - 'server':  an already-running runtime at `cliServerUrl` (remote).
- */
-export type CliSource = 'bundled' | 'inprocess' | 'auto' | 'path' | 'server';
-
-export interface CliRuntime {
-  id: string;
-  label: string;        // user-friendly name, e.g. "Copilot Dev"
-  path: string;         // bare command or full path, resolved like cliPath
 }
 
 export interface CliToolDefinition {
@@ -149,10 +132,7 @@ export interface AppConfig {
   theme: 'light' | 'dark' | 'system';
   font: FontChoice;
   model: string | null;
-  cliPath: string | null;          // user override for Copilot CLI path; null = auto-detect
-  cliSource: CliSource;            // which Copilot runtime to use (default: 'bundled')
-  cliServerUrl: string | null;     // remote runtime URL when cliSource === 'server'
-  cliServerToken: string | null;   // optional shared secret for the remote runtime
+  ahpComputeId: string | null;     // catalog identity of Whim's AHP host; created on first CLI attach
   sessions: Record<string, string>; // spaceId → copilot CLI sessionId
   pinned: boolean;
   autoHideSidePane: boolean;       // when true, side pane auto-hides on blur & stays alwaysOnTop
@@ -163,7 +143,6 @@ export interface AppConfig {
   personasMigratedV2: boolean;      // true after legacy runLocation rename (cloud→cca) has run
   personasSandboxSeeded: boolean;   // true after @sandbox demo persona has been topped up once for existing installs
   personasArtifactSeeded: boolean;  // true after @artifact persona has been topped up once for existing installs
-  cliRuntimes: CliRuntime[];
   cliTools: CliToolDefinition[];
   mcpServers: CustomMcpServer[];   // user-added MCP servers
   sandboxDefaultPolicy: SandboxPolicy;  // default policy for sandboxed personas
@@ -191,6 +170,9 @@ export interface AppConfig {
 
 const CONFIG_PATH = path.join(app.getPath('userData'), 'config.json');
 export const DEFAULT_WEB_REMOTE_PORT = 37373;
+
+/** Runtime-selection settings from before Copilot always ran in-process. */
+const LEGACY_RUNTIME_KEYS = ['cliPath', 'cliSource', 'cliServerUrl', 'cliServerToken', 'cliRuntimes'];
 
 /**
  * Built-in personas seeded on first launch. Users can modify or remove
@@ -366,10 +348,7 @@ const DEFAULT_CONFIG: AppConfig = {
   theme: 'system',
   font: 'default',
   model: null,
-  cliPath: null,
-  cliSource: 'bundled',
-  cliServerUrl: null,
-  cliServerToken: null,
+  ahpComputeId: null,
   sessions: {},
   pinned: false,
   autoHideSidePane: true,
@@ -380,7 +359,6 @@ const DEFAULT_CONFIG: AppConfig = {
   personasMigratedV2: false,
   personasSandboxSeeded: false,
   personasArtifactSeeded: false,
-  cliRuntimes: [],
   cliTools: [],
   mcpServers: [],
   sandboxDefaultPolicy: { ...DEFAULT_SANDBOX_POLICY },
@@ -436,6 +414,7 @@ export function rotateWebRemoteToken(): string {
 
 export function loadConfig(): AppConfig {
   let preserveInactiveProfileState = false;
+  let scrubbedLegacyRuntime = false;
   try {
     if (fs.existsSync(CONFIG_PATH)) {
       const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
@@ -459,11 +438,22 @@ export function loadConfig(): AppConfig {
       if (parsed.personasMigratedV2 === undefined && parsed.personasSeeded === true) {
         config.personasMigratedV2 = true;
       }
-      // Runtime source: pre-source configs map an explicit cliPath to the
-      // 'path' source; everything else (including auto-detect users) defaults
-      // to the bundled SDK runtime, which needs no local CLI install.
-      if (parsed.cliSource === undefined) {
-        config.cliSource = parsed.cliPath ? 'path' : 'bundled';
+      // Copilot always runs in-process now, so the old runtime selection is
+      // dropped rather than carried forward. Save right away: `cliServerToken`
+      // was a credential and should not linger on disk.
+      for (const key of LEGACY_RUNTIME_KEYS) {
+        if (key in parsed) {
+          delete (config as unknown as Record<string, unknown>)[key];
+          scrubbedLegacyRuntime = true;
+        }
+      }
+      if (Array.isArray(config.personas)) {
+        config.personas = config.personas.map((persona) => {
+          if (!('cliRuntime' in persona)) return persona;
+          scrubbedLegacyRuntime = true;
+          const { cliRuntime: _legacy, ...rest } = persona as AgentPersona & { cliRuntime?: unknown };
+          return rest;
+        });
       }
       // Web remote: migrate the legacy address-list binding config to durable
       // interface selections. Runs only once — afterwards `webRemoteBindSelections`
@@ -484,6 +474,7 @@ export function loadConfig(): AppConfig {
   config.webRemoteBindSelections = normalizeBindSelections(config.webRemoteBindSelections);
   ensureWebRemoteToken();
   migrateProfiles(preserveInactiveProfileState);
+  if (scrubbedLegacyRuntime) saveConfig();
   return config;
 }
 

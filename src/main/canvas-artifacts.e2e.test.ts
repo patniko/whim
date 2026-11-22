@@ -143,7 +143,7 @@ describe('scheduled skill to opened artifact', () => {
     });
     expect(setup).not.toBeNull();
 
-    const result = await runAgent(setup!.session.canvases[0] as any, spaceDir, '<h1>3 open questions</h1>');
+    const result = await runAgent(setup!.session.canvases.definitions[0] as any, spaceDir, '<h1>3 open questions</h1>');
     expect(result.ok).toBe(true);
 
     // The artifact outlives the session because disk is what makes "open it
@@ -178,13 +178,13 @@ describe('scheduled skill to opened artifact', () => {
     const first = resolveRunCanvasConfig({
       workspaceRoot: workspace, workingDir: spaceDir, spaceId: invocation.space.id, agentId: 'agent-1',
     })!;
-    await runAgent(first.session.canvases[0] as any, spaceDir, '<h1>3 open questions</h1>');
+    await runAgent(first.session.canvases.definitions[0] as any, spaceDir, '<h1>3 open questions</h1>');
 
     // A later occurrence: same space, new session, new canvas object.
     const second = resolveRunCanvasConfig({
       workspaceRoot: workspace, workingDir: spaceDir, spaceId: invocation.space.id, agentId: 'agent-2',
     })!;
-    const result = await runAgent(second.session.canvases[0] as any, spaceDir, '<h1>5 open questions</h1>');
+    const result = await runAgent(second.session.canvases.definitions[0] as any, spaceDir, '<h1>5 open questions</h1>');
 
     expect(result.changed).toBe(true);
     expect(listArtifacts(workspace, invocation.space.folder)).toHaveLength(1);
@@ -237,7 +237,7 @@ describe('runs that produce nothing', () => {
       workspaceRoot: workspace, workingDir: spaceDir, spaceId: invocation.space.id, agentId: 'agent-1',
     })!;
 
-    await (setup.session.canvases[0] as any).open({
+    await (setup.session.canvases.definitions[0] as any).open({
       sessionId: 'session-1', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID,
       instanceId: 'inst-1', input: { title: 'Open questions' },
     });
@@ -258,7 +258,7 @@ describe('failed publication', () => {
     const setup = resolveRunCanvasConfig({
       workspaceRoot: workspace, workingDir: spaceDir, spaceId: invocation.space.id, agentId: 'agent-1',
     })!;
-    const canvas: any = setup.session.canvases[0];
+    const canvas: any = setup.session.canvases.definitions[0];
 
     await canvas.open({
       sessionId: 'session-1', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID,
@@ -284,7 +284,7 @@ describe('failed publication', () => {
     const setup = resolveRunCanvasConfig({
       workspaceRoot: workspace, workingDir: spaceDir, spaceId: invocation.space.id, agentId: 'agent-1',
     })!;
-    const canvas: any = setup.session.canvases[0];
+    const canvas: any = setup.session.canvases.definitions[0];
 
     await canvas.open({
       sessionId: 'session-1', extensionId: 'whim', canvasId: WHIM_REPORT_CANVAS_ID,

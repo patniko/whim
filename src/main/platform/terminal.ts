@@ -1,14 +1,13 @@
 /**
  * Cross-platform terminal launcher.
- * Consolidates terminal launching logic from session.ts and canvas-agent.ts.
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync, execFileSync } from 'child_process';
 
 export interface TerminalLaunchOptions {
-  /** Full command string to execute (e.g. the CLI path) */
+  /** Executable to run (e.g. the CLI path) */
   command: string;
-  /** Arguments to pass to the command */
+  /** Arguments to pass to the command; each is quoted for the target shell */
   args?: string[];
   /** Working directory for the terminal */
   cwd: string;
@@ -47,47 +46,46 @@ export function shellEscape(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
-/**
- * Escape a string for use inside a double-quoted shell context
- * (backslash, double-quote, backtick, dollar)
- */
-export function shellEscapeDouble(s: string): string {
-  return s
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/`/g, '\\`')
-    .replace(/\$/g, '\\$');
-}
-
 /** Escape a string for use inside PowerShell single-quoted strings (double the quotes) */
 export function powershellEscape(s: string): string {
   return s.replace(/'/g, "''");
 }
 
-// ── Build the full command string from options ──────────
+/**
+ * Quote one argument for a cmd.exe command line. Plain tokens stay readable;
+ * anything else (spaces in an install path, `?` and `&` in a URL) is wrapped in
+ * double quotes, inside which cmd treats its operators as literal text.
+ */
+export function cmdQuote(arg: string): string {
+  if (arg.includes('"')) throw new Error('Terminal arguments cannot contain double quotes');
+  return /^[A-Za-z0-9_\-+=.,:/\\@]+$/.test(arg) ? arg : `"${arg}"`;
+}
 
-function buildCommandString(options: TerminalLaunchOptions): string {
-  const parts = [options.command, ...(options.args || [])];
-  return parts.join(' ');
+/** Quote a string as an AppleScript string literal. */
+function appleScriptString(s: string): string {
+  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function posixCommand(options: TerminalLaunchOptions): string {
+  return [options.command, ...(options.args || [])].map(shellEscape).join(' ');
+}
+
+function windowsCommand(options: TerminalLaunchOptions): string {
+  return [options.command, ...(options.args || [])].map(cmdQuote).join(' ');
 }
 
 // ── macOS: AppleScript + Terminal.app ───────────────────
 
 function launchMacOS(options: TerminalLaunchOptions): TerminalLaunchResult {
-  const escapedCwd = options.cwd.replace(/'/g, "'\\''");
-  const fullCmd = buildCommandString(options);
-  const escapedCmd = fullCmd.replace(/'/g, "'\\''");
-  const exitSignal = options.signalPath
-    ? ` ; touch '${options.signalPath.replace(/'/g, "'\\''")}'`
-    : '';
-
+  const exitSignal = options.signalPath ? ` ; touch ${shellEscape(options.signalPath)}` : '';
+  const shellCommand = `cd ${shellEscape(options.cwd)} && ${posixCommand(options)}${exitSignal}`;
   const script = `tell application "Terminal"
-    do script "cd '${escapedCwd}' && ${escapedCmd}${exitSignal}"
+    do script ${appleScriptString(shellCommand)}
     activate
   end tell`;
 
   try {
-    execSync(`osascript -e '${script}'`, { timeout: 10_000 });
+    execFileSync('osascript', ['-e', script], { timeout: 10_000 });
   } catch (err) {
     console.error('[platform/terminal] macOS launch failed:', err);
     return {};
@@ -102,19 +100,22 @@ function launchMacOS(options: TerminalLaunchOptions): TerminalLaunchResult {
 // ── Windows: PowerShell + cmd.exe ───────────────────────
 
 function launchWindows(options: TerminalLaunchOptions): TerminalLaunchResult {
-  const fullCmd = buildCommandString(options);
-  const exitSignal = options.signalPath
-    ? ` & echo.>"${options.signalPath.replace(/\\/g, '\\\\')}"`
-    : '';
-  const cmdArg = fullCmd + exitSignal;
-
-  const safeCwd = powershellEscape(options.cwd);
-  const safeCmdArg = powershellEscape(cmdArg);
+  const exitSignal = options.signalPath ? ` & echo.>${cmdQuote(options.signalPath)}` : '';
+  // `/s` strips only the outermost quotes, so every quoted argument survives.
+  const cmdArgs = `/s /k "${windowsCommand(options)}${exitSignal}"`;
+  // Stop makes a failed Start-Process exit non-zero, so its error is reported;
+  // progress records would otherwise reach stderr as CLIXML noise.
+  const script = `$ProgressPreference = 'SilentlyContinue'; $ErrorActionPreference = 'Stop'; $p = Start-Process -FilePath 'cmd.exe' -ArgumentList '${powershellEscape(cmdArgs)}' -WorkingDirectory '${powershellEscape(options.cwd)}' -PassThru; $p.Id`;
+  // Passed as UTF-16 base64, the script keeps non-ASCII paths intact (stdin
+  // would be read in the console's code page) and its text never meets another
+  // command line's quoting rules.
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
 
   try {
-    const output = execSync(
-      `powershell -NoProfile -Command "$p = Start-Process cmd.exe -ArgumentList '/k ${safeCmdArg}' -WorkingDirectory '${safeCwd}' -PassThru; $p.Id"`,
-      { windowsHide: true, timeout: 10_000 },
+    const output = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+      { windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] },
     )
       .toString()
       .trim();
@@ -160,12 +161,10 @@ const LINUX_LAUNCHERS: LinuxLauncher[] = [
 ];
 
 function launchLinux(options: TerminalLaunchOptions): TerminalLaunchResult {
-  const escapedCwd = shellEscape(options.cwd);
-  const fullCmd = buildCommandString(options);
   const exitSignal = options.signalPath
     ? ` ; touch ${shellEscape(options.signalPath)}`
     : '';
-  const command = `cd ${escapedCwd} && ${fullCmd}${exitSignal}`;
+  const command = `cd ${shellEscape(options.cwd)} && ${posixCommand(options)}${exitSignal}`;
 
   for (const launcher of LINUX_LAUNCHERS) {
     try {

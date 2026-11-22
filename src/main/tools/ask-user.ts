@@ -1,4 +1,4 @@
-import { defineTool } from '@github/copilot-sdk';
+import { defineTool } from '@microsoft/copilot-sdk';
 import type { InteractionBroker } from '../agents/interaction-broker';
 
 interface AskUserRegistryRecord {

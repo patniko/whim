@@ -3,7 +3,6 @@ import type {
   ThemeChoice,
   AgentPersona,
   SandboxPolicy,
-  CliRuntime,
   ExportDestination,
   ExportFormat,
   CustomMcpServer,
@@ -19,6 +18,7 @@ import type {
 import { startSettings } from "./start";
 import { initFontSetting } from "../font-setting";
 import { isWebRemote } from "../transport-mode";
+import { mountGitHubAccount } from "../github-account";
 import { SETTINGS_HTML } from "./template";
 
 export function mountSettings(host: SettingsHost) {
@@ -544,30 +544,6 @@ export function mountSettings(host: SettingsHost) {
     sandboxCheck.addEventListener("change", updateSandboxOverrideVisibility);
     if (sandboxCheck.checked) updateSandboxOverrideVisibility();
 
-    // CLI Runtime dropdown
-    const runtimeRow = document.createElement("div");
-    runtimeRow.className = "persona-form-row";
-    const runtimeLabel = document.createElement("label");
-    runtimeLabel.textContent = "CLI Runtime";
-    runtimeLabel.className = "persona-form-label";
-    const runtimeSelect = document.createElement("select");
-    runtimeSelect.className = "persona-form-select";
-    const defaultRtOpt = document.createElement("option");
-    defaultRtOpt.value = "";
-    defaultRtOpt.textContent = "Default";
-    runtimeSelect.appendChild(defaultRtOpt);
-    host.whimAPI.listRuntimes().then((runtimes) => {
-      for (const rt of runtimes) {
-        const opt = document.createElement("option");
-        opt.value = rt.id;
-        opt.textContent = rt.label;
-        if (rt.id === persona.cliRuntime) opt.selected = true;
-        runtimeSelect.appendChild(opt);
-      }
-    });
-    runtimeRow.appendChild(runtimeLabel);
-    runtimeRow.appendChild(runtimeSelect);
-
     // Yolo mode checkbox
     const yoloRow = document.createElement("div");
     yoloRow.className = "persona-form-row persona-yolo-row";
@@ -632,7 +608,6 @@ export function mountSettings(host: SettingsHost) {
       const runLocation = locationSelect.value as "local" | "cca" | "cloud";
       const sandboxed = sandboxCheck.checked && runLocation === "local";
       const emoji = selectedEmoji;
-      const cliRuntime = runtimeSelect.value;
 
       // For @agent, save sandbox policy to global default as well.
       // ensurePolicyForm() is materialized lazily (and its callers don't await
@@ -688,7 +663,6 @@ export function mountSettings(host: SettingsHost) {
               model,
               runLocation,
               emoji: emoji || undefined,
-              cliRuntime: cliRuntime || undefined,
               ...(sandboxed ? { sandboxed: true } : { sandboxed: undefined }),
               ...(sandboxOverride
                 ? { sandboxPolicyOverride: sandboxOverride }
@@ -822,7 +796,6 @@ export function mountSettings(host: SettingsHost) {
     form.appendChild(locationRow);
     form.appendChild(sandboxRow);
     form.appendChild(sandboxOverrideRow);
-    form.appendChild(runtimeRow);
     form.appendChild(yoloRow);
     form.appendChild(ephemeralRow);
     form.appendChild(errorEl);
@@ -845,155 +818,6 @@ export function mountSettings(host: SettingsHost) {
     renderAgentsSidebar();
     selectAgent(newId);
   });
-
-  // ── CLI Runtimes ────────────────────────────────────────
-  const runtimesList = document.getElementById("runtimes-list") as HTMLDivElement;
-  const runtimeAddBtn = document.getElementById("runtime-add-btn") as HTMLButtonElement;
-  let cliRuntimes: CliRuntime[] = [];
-
-  async function loadRuntimes(): Promise<void> {
-    cliRuntimes = (await host.whimAPI.listRuntimes()) || [];
-    renderRuntimes();
-  }
-
-  function renderRuntimes(): void {
-    const openForm = runtimesList.querySelector(".persona-form");
-    runtimesList.innerHTML = "";
-    for (const rt of cliRuntimes) {
-      runtimesList.appendChild(createRuntimeCard(rt));
-    }
-    if (openForm) runtimesList.appendChild(openForm);
-  }
-
-  function createRuntimeCard(rt: CliRuntime): HTMLElement {
-    const card = document.createElement("div");
-    card.className = "persona-card";
-
-    const info = document.createElement("div");
-    info.className = "persona-card-info";
-
-    const label = document.createElement("div");
-    label.className = "persona-card-handle";
-    label.textContent = rt.label;
-
-    const pathEl = document.createElement("div");
-    pathEl.className = "persona-card-instructions";
-    pathEl.textContent = rt.path;
-
-    info.appendChild(label);
-    info.appendChild(pathEl);
-
-    const actions = document.createElement("div");
-    actions.className = "persona-card-actions";
-
-    const editBtn = document.createElement("button");
-    editBtn.className = "persona-action-btn";
-    editBtn.textContent = "✎";
-    editBtn.title = "Edit";
-    editBtn.addEventListener("click", () => showRuntimeForm(rt));
-
-    const delBtn = document.createElement("button");
-    delBtn.className = "persona-action-btn danger";
-    delBtn.textContent = "✕";
-    delBtn.title = "Delete";
-    delBtn.addEventListener("click", async () => {
-      cliRuntimes = cliRuntimes.filter((r) => r.id !== rt.id);
-      await host.whimAPI.saveRuntimes(cliRuntimes);
-      renderRuntimes();
-    });
-
-    actions.appendChild(editBtn);
-    actions.appendChild(delBtn);
-
-    card.appendChild(info);
-    card.appendChild(actions);
-    return card;
-  }
-
-  function showRuntimeForm(existing?: CliRuntime): void {
-    const prev = runtimesList.querySelector(".persona-form");
-    if (prev) prev.remove();
-
-    const form = document.createElement("div");
-    form.className = "persona-form";
-
-    const labelRow = document.createElement("div");
-    labelRow.className = "persona-form-row";
-    const labelInput = document.createElement("input");
-    labelInput.type = "text";
-    labelInput.className = "persona-form-input";
-    labelInput.placeholder = "Label (e.g. Copilot Dev)";
-    labelInput.value = existing?.label || "";
-    labelInput.maxLength = 50;
-    labelRow.appendChild(labelInput);
-
-    const pathRow = document.createElement("div");
-    pathRow.className = "persona-form-row";
-    const pathInput = document.createElement("input");
-    pathInput.type = "text";
-    pathInput.className = "persona-form-input";
-    pathInput.placeholder = "Path or command (e.g. copilot-dev)";
-    pathInput.value = existing?.path || "";
-    pathInput.spellcheck = false;
-    pathRow.appendChild(pathInput);
-
-    const errorEl = document.createElement("div");
-    errorEl.className = "persona-form-error hidden";
-    const writes = formWrites(form, errorEl, "saveRuntimes");
-    const id = existing?.id ?? crypto.randomUUID();
-
-    const btnRow = document.createElement("div");
-    btnRow.className = "persona-form-actions";
-
-    const saveBtn = document.createElement("button");
-    saveBtn.className = "persona-form-save";
-    saveBtn.textContent = existing ? "Save" : "Add";
-    saveBtn.addEventListener("click", async () => {
-      const label = labelInput.value.trim();
-      const rPath = pathInput.value.trim();
-      const formRevision = host.settingsDrafts.revision(form);
-      if (!label) {
-        errorEl.textContent = "Label is required.";
-        errorEl.classList.remove("hidden");
-        return;
-      }
-      if (!rPath) {
-        errorEl.textContent = "Path is required.";
-        errorEl.classList.remove("hidden");
-        return;
-      }
-
-      const entry = { id, label, path: rPath };
-      const next = cliRuntimes.some(r => r.id === id)
-        ? cliRuntimes.map(r => r.id === id ? entry : r)
-        : [...cliRuntimes, entry];
-      const result = await writes.save(() => host.whimAPI.saveRuntimes(next));
-      if (!result) return;
-      // Update local state with resolved paths from the backend
-      cliRuntimes = result.runtimes ?? next;
-      if (!host.settingsDrafts.saved(form, formRevision)) return;
-      form.remove();
-      renderRuntimes();
-    });
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "persona-form-cancel";
-    cancelBtn.textContent = "Cancel";
-    cancelBtn.addEventListener("click", writes.cancel);
-
-    btnRow.appendChild(saveBtn);
-    btnRow.appendChild(cancelBtn);
-
-    form.appendChild(labelRow);
-    form.appendChild(pathRow);
-    form.appendChild(errorEl);
-    form.appendChild(btnRow);
-
-    runtimesList.appendChild(form);
-    labelInput.focus();
-  }
-
-  runtimeAddBtn.addEventListener("click", () => showRuntimeForm());
 
   // ── Export Destinations ─────────────────────────────────
   const exportDestinationsList = document.getElementById(
@@ -1686,248 +1510,27 @@ export function mountSettings(host: SettingsHost) {
     });
   }
 
-  // ── CLI Path setting ────────────────────────────────────
-  const cliPathInput = document.getElementById("cli-path-input") as HTMLInputElement;
-  const cliPathClear = document.getElementById("cli-path-clear") as HTMLButtonElement;
-  const cliPathDetected = document.getElementById("cli-path-detected") as HTMLSpanElement;
+  // ── GitHub account ──────────────────────────────────────
+  // Copilot runs in-process, so the account is the only runtime setting.
+  let githubAccount: ReturnType<typeof mountGitHubAccount> | null = null;
+  let githubSignedIn: boolean | null = null;
 
-  /**
-   * Synchronous-ish part of CLI path setup — just sets the input value and
-   * paints a "checking…" detected-label placeholder. Cheap enough to run
-   * eagerly on settings-window init so the General tab renders without
-   * waiting on the CLI binary.
-   */
-  async function loadCliPathInputSync(): Promise<void> {
-    const override = await host.whimAPI.getSetting("cli_path");
-    cliPathInput.value = override || "";
-    cliPathClear.classList.toggle("hidden", !override);
-    cliPathDetected.textContent = "Checking…";
-    cliPathDetected.title = "";
-    cliPathDetected.style.color = "";
-    if (cliMxcIndicator) {
-      cliMxcIndicator.textContent = "checking…";
-      cliMxcIndicator.className = "cli-mxc-indicator";
-    }
-  }
-
-  /**
-   * Run the slow CLI subprocess probes (version check + MXC capability
-   * check). Each spawns the CLI binary, so these can take ~200ms each on
-   * cold disk caches. Settings-window init defers these to idle so the
-   * General tab is interactive immediately.
-   */
-  async function runCliPathChecks(): Promise<void> {
-    await updateCliPathDetected();
-    await updateCliMxcIndicator();
-  }
-
-  function cliSourceLabel(source: string): string {
-    switch (source) {
-      case "bundled":
-        return "Bundled native stdio";
-      case "inprocess":
-        return "Bundled in-process (experimental)";
-      case "auto":
-        return "Auto-detected";
-      case "path":
-        return "Custom path";
-      case "server":
-        return "Remote server";
-      default:
-        return source;
-    }
-  }
-
-  async function updateCliPathDetected(): Promise<void> {
-    const info = await host.whimAPI.getCliRuntimeStatus();
-    cliPathDetected.style.color = "";
-
-    if (info.source === "server") {
-      cliPathDetected.textContent = info.target
-        ? `Remote server — ${info.target}`
-        : "Remote server (no URL set)";
-      cliPathDetected.title = info.target || "";
-      if (!info.target) cliPathDetected.style.color = "var(--color-warning, #d29922)";
-      return;
-    }
-
-    if (!info.target) {
-      cliPathDetected.textContent = "Not found";
-      cliPathDetected.title = "";
-      return;
-    }
-
-    cliPathDetected.title = info.target;
-    if (!info.compatible) {
-      cliPathDetected.textContent = `${cliSourceLabel(info.source)} (v${info.version || "?"} — update to ${info.minVersion}+) — ${info.target}`;
-      cliPathDetected.style.color = "var(--color-warning, #d29922)";
-    } else {
-      const v = info.version ? ` (v${info.version})` : "";
-      cliPathDetected.textContent = `${cliSourceLabel(info.source)}${v} — ${info.target}`;
-    }
-  }
-
-  const reportSettingsSaveError = (error: unknown) =>
-    host.showStatus(error instanceof Error ? error.message : "Settings save failed", true);
-  const cliPathSave = new host.DebouncedSave(async () => {
-    const val = cliPathInput.value.trim();
-    const resolved = await host.whimAPI.setSetting("cli_path", val);
-    // Update input to show the resolved full path if it changed
-    if (resolved && resolved !== val && cliPathInput.value.trim() === val) {
-      cliPathInput.value = resolved;
-    }
-    cliPathClear.classList.toggle("hidden", !cliPathInput.value);
-    void runCliPathChecks().catch(reportSettingsSaveError);
-  }, reportSettingsSaveError);
-  cliPathInput.addEventListener("input", () => cliPathSave.schedule());
-
-  cliPathClear.addEventListener("click", async () => {
-    cliPathInput.value = "";
-    await host.whimAPI.setSetting("cli_path", "");
-    cliPathClear.classList.add("hidden");
-    await updateCliPathDetected();
-    await updateCliMxcIndicator();
-  });
-
-  // ── Runtime source selector ─────────────────────────────
-  const cliSourceSelect = document.getElementById("cli-source-select") as HTMLSelectElement | null;
-  const cliPathField = document.getElementById("cli-path-field") as HTMLElement | null;
-  const cliPathCustomRow = document.getElementById("cli-path-custom-row") as HTMLElement | null;
-  const cliDiscoveredSelect = document.getElementById(
-    "cli-discovered-select",
-  ) as HTMLSelectElement | null;
-  const cliServerFields = document.getElementById("cli-server-fields") as HTMLElement | null;
-  const cliInProcessWarning = document.getElementById(
-    "cli-inprocess-warning",
-  ) as HTMLElement | null;
-  const cliServerUrlInput = document.getElementById(
-    "cli-server-url-input",
-  ) as HTMLInputElement | null;
-  const cliServerTokenInput = document.getElementById(
-    "cli-server-token-input",
-  ) as HTMLInputElement | null;
-  const cliTestBtn = document.getElementById("cli-test-btn") as HTMLButtonElement | null;
-  const cliRuntimeStatus = document.getElementById("cli-runtime-status") as HTMLSpanElement | null;
-
-  function applyCliSourceVisibility(source: string): void {
-    if (cliPathField) cliPathField.hidden = source !== "path";
-    if (cliPathCustomRow) {
-      cliPathCustomRow.hidden =
-        source !== "path" || cliDiscoveredSelect?.value !== host.CLI_CUSTOM_OPTION;
-    }
-    if (cliServerFields) cliServerFields.hidden = source !== "server";
-    if (cliInProcessWarning) cliInProcessWarning.hidden = source !== "inprocess";
-  }
-
-  async function loadRuntimeSourceSettings(): Promise<void> {
-    if (!cliSourceSelect) return;
-    const source = (await host.whimAPI.getSetting("cli_source")) || "bundled";
-    cliSourceSelect.value = source;
-    if (cliServerUrlInput)
-      cliServerUrlInput.value = (await host.whimAPI.getSetting("cli_server_url")) || "";
-    if (cliServerTokenInput)
-      cliServerTokenInput.value = (await host.whimAPI.getSetting("cli_server_token")) || "";
-    // Discovery version-probes candidate binaries, so only run it when the
-    // custom-path picker is actually visible.
-    if (cliDiscoveredSelect && source === "path") {
-      await host.populateCliSelect(cliDiscoveredSelect, cliPathInput.value.trim(), true);
-    }
-    applyCliSourceVisibility(source);
-  }
-
-  cliDiscoveredSelect?.addEventListener("change", async () => {
-    const value = cliDiscoveredSelect.value;
-    if (cliPathCustomRow) cliPathCustomRow.hidden = value !== host.CLI_CUSTOM_OPTION;
-    if (value === host.CLI_CUSTOM_OPTION) {
-      cliPathInput.focus();
-      return;
-    }
-    cliPathInput.value = value;
-    cliPathClear.classList.toggle("hidden", !value);
-    await host.whimAPI.setSetting("cli_path", value);
-    await updateCliPathDetected();
-    await updateCliMxcIndicator();
-  });
-
-  cliSourceSelect?.addEventListener("change", async () => {
-    const source = cliSourceSelect.value;
-    if (source === "path" && cliDiscoveredSelect) {
-      await host.populateCliSelect(cliDiscoveredSelect, cliPathInput.value.trim(), true);
-    }
-    applyCliSourceVisibility(source);
-    if (cliRuntimeStatus) cliRuntimeStatus.textContent = "—";
-    await host.whimAPI.setSetting("cli_source", source);
-    await updateCliPathDetected();
-    await updateCliMxcIndicator();
-  });
-
-  const cliServerUrlSave = new host.DebouncedSave(async () => {
-    if (cliServerUrlInput)
-      await host.whimAPI.setSetting("cli_server_url", cliServerUrlInput.value.trim());
-  }, reportSettingsSaveError);
-  cliServerUrlInput?.addEventListener("input", () => cliServerUrlSave.schedule());
-
-  const cliServerTokenSave = new host.DebouncedSave(async () => {
-    if (cliServerTokenInput)
-      await host.whimAPI.setSetting("cli_server_token", cliServerTokenInput.value);
-  }, reportSettingsSaveError);
-  cliServerTokenInput?.addEventListener("input", () => cliServerTokenSave.schedule());
-
-  cliTestBtn?.addEventListener("click", async () => {
-    if (!cliRuntimeStatus) return;
-    cliTestBtn.disabled = true;
-    cliRuntimeStatus.textContent = "Testing…";
-    cliRuntimeStatus.style.color = "";
-    try {
-      const res = await host.whimAPI.testCliConnection();
-      if (res.ok) {
-        const v = res.version ? ` v${res.version}` : "";
-        cliRuntimeStatus.textContent = `✓ Connected — ${cliSourceLabel(res.source)}${v}`;
-        cliRuntimeStatus.style.color = "var(--color-success, #3fb950)";
-      } else {
-        cliRuntimeStatus.textContent = `✗ ${res.error || "Connection failed"}`;
-        cliRuntimeStatus.style.color = "var(--color-danger, #f85149)";
-      }
-    } catch {
-      cliRuntimeStatus.textContent = "✗ Connection failed";
-      cliRuntimeStatus.style.color = "var(--color-danger, #f85149)";
-    } finally {
-      cliTestBtn.disabled = false;
-    }
-  });
-
-  // ── MXC capability indicator ────────────────────────────
-  const cliMxcIndicator = document.getElementById("cli-mxc-indicator") as HTMLSpanElement | null;
-
-  async function updateCliMxcIndicator(): Promise<void> {
-    if (!cliMxcIndicator) return;
-    try {
-      const runtime = await host.whimAPI.getCliRuntimeStatus();
-      if (
-        runtime.source === "bundled" ||
-        runtime.source === "inprocess" ||
-        runtime.source === "server"
-      ) {
-        cliMxcIndicator.textContent =
-          runtime.source === "server"
-            ? "managed by the remote runtime"
-            : "native SDK sandbox; CLI MXC probe does not apply";
-        cliMxcIndicator.className = "cli-mxc-indicator";
-        return;
-      }
-      const r = await host.whimAPI.checkCliMxcCapable();
-      if (r.mxcCapable) {
-        cliMxcIndicator.textContent = "✓ runtime sandbox supported";
-        cliMxcIndicator.className = "cli-mxc-indicator ok";
-      } else {
-        cliMxcIndicator.textContent =
-          "⚠ not detected — sandboxed personas will fall back to host-side path enforcement only";
-        cliMxcIndicator.className = "cli-mxc-indicator warn";
-      }
-    } catch {
-      cliMxcIndicator.textContent = "?";
-      cliMxcIndicator.className = "cli-mxc-indicator";
-    }
+  async function loadGitHubAccount(): Promise<void> {
+    githubAccount ??= mountGitHubAccount(host.whimAPI, {
+      status: document.getElementById("github-account-status") as HTMLElement,
+      signIn: document.getElementById("github-signin-btn") as HTMLButtonElement,
+      useCode: document.getElementById("github-signin-code-btn") as HTMLButtonElement,
+      cancel: document.getElementById("github-signin-cancel") as HTMLButtonElement,
+      signOut: document.getElementById("github-signout-btn") as HTMLButtonElement,
+      code: document.getElementById("github-signin-code") as HTMLElement,
+      codeValue: document.getElementById("github-signin-code-value") as HTMLElement,
+      copyCode: document.getElementById("github-signin-code-copy") as HTMLButtonElement,
+    }, (state) => {
+      // The model list depends on the account, so reload it when that changes.
+      if (githubSignedIn !== null && state.signedIn !== githubSignedIn) void loadModels();
+      githubSignedIn = state.signedIn;
+    });
+    await githubAccount.refresh();
   }
 
   // ── Auto-hide side pane setting ──────────────────────────
@@ -2993,13 +2596,7 @@ export function mountSettings(host: SettingsHost) {
         host.refreshProfiles,
         loadExportDestinations,
       ],
-      environment: [
-        loadModels,
-        loadRuntimes,
-        loadCliPathInputSync,
-        loadRuntimeSourceSettings,
-        runCliPathChecks,
-      ],
+      environment: [loadModels, loadGitHubAccount],
       remote: [loadAutoRemoteSetting, loadWebRemoteSetting],
       tools: [loadMcpServers, loadCliTools],
       personas: [loadPersonas, loadCommentTriggerSetting],
@@ -3015,9 +2612,5 @@ export function mountSettings(host: SettingsHost) {
     selectAgent,
     loadPersonas,
     updateWorkspaceDisplay,
-    flush: () =>
-      Promise.all([cliPathSave.flush(), cliServerUrlSave.flush(), cliServerTokenSave.flush()]),
-    hasDirty: () =>
-      cliPathSave.hasDirty() || cliServerUrlSave.hasDirty() || cliServerTokenSave.hasDirty(),
   };
 }

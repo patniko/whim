@@ -11,7 +11,7 @@ vi.mock('electron', () => ({
 // The SDK is imported as values (CopilotClient etc.) at module top level.
 // We never call them in these tests — provide stubs that satisfy the imports
 // without dragging the real SDK into the test process.
-vi.mock('@github/copilot-sdk', () => ({
+vi.mock('@microsoft/copilot-sdk', () => ({
   CopilotClient: class {},
   CopilotSession: class {},
   RuntimeConnection: class {},

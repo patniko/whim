@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PermissionRequest } from '@github/copilot-sdk';
+import type { PermissionRequest } from '@microsoft/copilot-sdk';
 import type { ScheduledInvocation } from '../../shared/skill-schedule';
 
 vi.mock('fs', async importOriginal => {

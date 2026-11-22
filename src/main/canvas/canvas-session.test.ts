@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import type { Canvas, CanvasAction } from '@github/copilot-sdk';
+import type { Canvas, CanvasAction } from '@microsoft/copilot-sdk';
 
 vi.mock('../notify', () => ({ notifyAllWindows: vi.fn() }));
 vi.mock('../canvas-watcher', () => ({ markSelfWrite: vi.fn(), clearSelfWrite: vi.fn() }));
@@ -59,7 +59,7 @@ function setup(template: boolean, hooks: CanvasSessionHooks) {
   };
   return buildCanvasSessionConfig(run, {
     enabled: true, scheduled: false, canvasId: template ? 'digest' : WHIM_REPORT_CANVAS_ID,
-  }, hooks)!.config.canvases[0];
+  }, hooks)!.config.canvases.definitions[0];
 }
 
 function publish(canvas: Canvas, template: boolean): Promise<unknown> {

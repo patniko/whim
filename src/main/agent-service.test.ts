@@ -24,8 +24,8 @@ const mockSession = {
       enable: vi.fn().mockResolvedValue({ remoteSteerable: true, url: 'https://mock-remote.example/initial' }),
       disable: vi.fn().mockResolvedValue(undefined),
     },
-    // Sandboxed sessions call rpc.options.update({ sandboxConfig }) right
-    // after createSession so MXC actually enforces. The runner aborts the
+    // Sandboxed sessions call rpc.options.update({ permissions: { sandbox } })
+    // right after createSession so MXC actually enforces. The runner aborts the
     // session if this call rejects or returns success:false — provide a
     // happy-path stub by default; specific tests can override via
     // mockSession.rpc.options.update.mockResolvedValueOnce(...).
@@ -212,6 +212,7 @@ import {
   resetRemoteControl,
   reconcileStaleAgents,
   getCanvasAgentState,
+  disableSandboxForSession,
   __resetAppRemoteForTests,
 } from './agent-service';
 import { getCopilotClient, ensureEphemeralCopilotClient } from './ai';
@@ -511,7 +512,7 @@ describe('launchQuickAgent', () => {
     expect(result).toEqual({ agentId: 'quick-agent-1', sessionId: 'mock-session-id' });
     expect(ensureEphemeralCopilotClient).toHaveBeenCalledOnce();
     const options = mockClient.createSession.mock.calls[0][0];
-    expect(options.createSessionFsProvider()).toBeInstanceOf(InMemoryFsProvider);
+    expect(options.state.createSessionFsProvider()).toBeInstanceOf(InMemoryFsProvider);
     expect(options.createSessionFsHandler).toBeUndefined();
     expect(createAgentSession).not.toHaveBeenCalled();
   });
@@ -621,9 +622,29 @@ describe('launchQuickAgent', () => {
     const sessionOpts = mockClient.createSession.mock.calls[0][0];
     // Sandbox is now cross-platform — configDir and hooks should be present
     expect(sessionOpts.configDir).toBeDefined();
-    expect(sessionOpts.hooks).toBeDefined();
+    expect(sessionOpts.hooks.handlers).toBeDefined();
+    // SDK 2.0 nests the sandbox under permissions; a flat sandboxConfig
+    // would leave the session unenforced.
+    expect(mockSession.rpc.options.update).toHaveBeenCalledWith({
+      permissions: { sandbox: expect.objectContaining({ enabled: true }) },
+    });
     // Persona instructions still applied.
     expect(sessionOpts.systemMessage.content).toContain('sandboxed');
+  });
+
+  it('disables runtime sandbox enforcement with the SDK 2.0 permissions patch', async () => {
+    enableMockClient();
+    const persona = {
+      id: 'p2', handle: 'jail', instructions: 'sandboxed',
+      model: 'gpt-4o', runLocation: 'local' as const, sandboxed: true,
+    };
+    const result = await launchQuickAgent('do something', '/ws', persona as any);
+    if ('error' in result) throw new Error(result.error);
+    mockSession.rpc.options.update.mockClear();
+    await disableSandboxForSession(result.agentId);
+    expect(mockSession.rpc.options.update).toHaveBeenCalledExactlyOnceWith({
+      permissions: { sandbox: { enabled: false } },
+    });
   });
 
   it('appends [SANDBOX MODE] system prompt when enforcementMode=both', async () => {
@@ -715,7 +736,7 @@ describe('launchQuickAgent', () => {
         const sessionOpts = mockClient.createSession.mock.calls[0][0];
         // Invoke the wired handler with a write request — it must approve
         // without prompting the user (no agent:approval-needed notification).
-        const decision = await sessionOpts.onPermissionRequest(
+        const decision = await sessionOpts.permissions.onRequest(
           { kind: 'write', toolCallId: 'tc-mxc-write', fileName: '/ws/out.txt' },
           { sessionId: uniqueSessionId },
         );
@@ -787,22 +808,22 @@ describe('launchDocumentAgent', () => {
     };
     await launchDocumentAgent('space-1', '/ws', 'folder', { scheduledRun });
     const config = mockClient.createSession.mock.calls[0][0];
-    expect(Object.keys(config.mcpServers)).toEqual(['chat']);
-    expect(config.tools).toEqual([scheduledMocks.publishTool, scheduledMocks.editTool]);
-    expect(config.availableTools).toContain('custom:publish_scheduled_result');
-    expect(config.availableTools).toContain('custom:edit_scheduled_result');
-    expect(config.availableTools).not.toContain('builtin:*');
-    expect(config.availableTools).not.toContain('builtin:bash');
+    expect(Object.keys(config.mcp.servers)).toEqual(['chat']);
+    expect(config.tools.definitions).toEqual([scheduledMocks.publishTool, scheduledMocks.editTool]);
+    expect(config.tools.availableTools).toContain('custom:publish_scheduled_result');
+    expect(config.tools.availableTools).toContain('custom:edit_scheduled_result');
+    expect(config.tools.availableTools).not.toContain('builtin:*');
+    expect(config.tools.availableTools).not.toContain('builtin:bash');
     expect(config.systemMessage.content).toContain('unattended scheduled task');
     expect(config.systemMessage.content).not.toContain('The user has pressed "Run"');
 
     const invocation = { sessionId: 'mock-session-id' };
-    expect(await config.onPermissionRequest({ kind: 'shell' }, invocation)).toEqual({ kind: 'reject' });
+    expect(await config.permissions.onRequest({ kind: 'shell' }, invocation)).toEqual({ kind: 'reject' });
     expect(scheduledMocks.permission).toHaveBeenCalledWith(scheduledMocks.context, { kind: 'shell' });
-    const response = await config.onUserInputRequest({ question: 'Which chat?' }, invocation);
+    const response = await config.interaction.onUserInputRequest({ question: 'Which chat?' }, invocation);
     expect(response.answer).toContain('unavailable');
     expect(scheduledMocks.blocked).toHaveBeenCalled();
-    expect(await config.onElicitationRequest({ ...invocation, message: 'Sign in' })).toEqual({ action: 'cancel' });
+    expect(await config.interaction.onElicitationRequest({ ...invocation, message: 'Sign in' })).toEqual({ action: 'cancel' });
   });
 
   it('records the scheduled outcome at completion, not at launch', async () => {
@@ -937,7 +958,7 @@ describe('launchDocumentAgent', () => {
     await idle();
     await sendChatMessage('document-agent-1', 'Check this thread again');
     const config = mockClient.createSession.mock.calls[0][0];
-    const permission = config.onPermissionRequest({
+    const permission = config.permissions.onRequest({
       kind: 'mcp', serverName: 'chat', toolName: 'search', readOnly: true, toolCallId: 'follow-up-search',
     }, { sessionId: 'mock-session-id' });
     await vi.waitFor(() => expect(updateAgentSessionStatus).toHaveBeenCalledWith(
@@ -1993,7 +2014,7 @@ describe('getAgentHistoryPage routing', () => {
       expect(notify).toHaveBeenCalledWith('chat:event:preserved-cloud', expect.objectContaining({
         type: 'assistant.message_delta', delta: 'Still working',
       }));
-      const permission = mockClient.resumeSession.mock.calls[0][1].onPermissionRequest({
+      const permission = mockClient.resumeSession.mock.calls[0][1].permissions.onRequest({
         kind: 'write', toolCallId: 'live-permission', intention: 'Update file',
         fileName: '/ws/file', diff: '', canOfferSessionApproval: false,
       }, { sessionId: mockSession.sessionId });
@@ -2337,9 +2358,9 @@ describe('getAgentHistory', () => {
     });
     expect(await getAgentHistory(agentId)).toHaveProperty('events');
     const config = expired ? mockClient.createSession.mock.calls[0][0] : mockClient.resumeSession.mock.calls[0][1];
-    expect(config.tools).toEqual([scheduledMocks.editTool]);
-    expect(config.availableTools).toContain('custom:edit_scheduled_result');
-    expect(config.availableTools).not.toContain('custom:publish_scheduled_result');
+    expect(config.tools.definitions).toEqual([scheduledMocks.editTool]);
+    expect(config.tools.availableTools).toContain('custom:edit_scheduled_result');
+    expect(config.tools.availableTools).not.toContain('custom:publish_scheduled_result');
     expect(config.systemMessage.content).toContain('not another scheduled run');
     expect(scheduledMocks.editorBegin).not.toHaveBeenCalled();
     expect(await sendChatMessage(agentId, 'Remove this item')).not.toHaveProperty('error');

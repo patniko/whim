@@ -1,11 +1,13 @@
-import type { CopilotClient } from '@github/copilot-sdk';
+import type { CopilotClient } from '@microsoft/copilot-sdk';
 
 let inProcessStartup: Promise<void> = Promise.resolve();
 
 /**
- * SDK 1.0.13 accepts an FFI library location only through the host environment.
- * Pin it to our physical, unpacked runtime, not an inherited CLI override or an
- * ASAR path that native dlopen cannot read. Serialize startups and restore the
+ * SDK 2.0's in-process connection has no library-path option: `start()` reads
+ * `COPILOT_CLI_PATH` from the live host environment, otherwise it resolves the
+ * platform package next to the SDK, which is an ASAR path that native dlopen
+ * cannot read in packaged builds. Pin it to our physical, unpacked runtime
+ * rather than an inherited CLI override. Serialize startups and restore the
  * host environment before letting the next caller start.
  */
 export function startRuntimeClient(client: CopilotClient, inProcessEntrypoint?: string): Promise<void> {

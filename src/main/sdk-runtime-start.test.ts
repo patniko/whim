@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CopilotClient, RuntimeConnection } from '@github/copilot-sdk';
+import { CopilotClient, RuntimeConnection } from '@microsoft/copilot-sdk';
 import { startRuntimeClient } from './sdk-runtime-start';
 
 afterEach(() => {
@@ -8,7 +8,7 @@ afterEach(() => {
 
 describe('startRuntimeClient', () => {
   it('leaves the host environment untouched for stdio', async () => {
-    const client = new CopilotClient();
+    const client = new CopilotClient({ mode: 'coding-agent', runtime: RuntimeConnection.forSpawnedStdio() });
     vi.stubEnv('COPILOT_CLI_PATH', '/custom/cli');
     const start = vi.spyOn(client, 'start').mockResolvedValue();
     await startRuntimeClient(client);
@@ -17,7 +17,7 @@ describe('startRuntimeClient', () => {
   });
 
   it('pins FFI to the physical bundled runtime, then restores the environment', async () => {
-    const client = new CopilotClient({ connection: RuntimeConnection.forInProcess() });
+    const client = new CopilotClient({ mode: 'coding-agent', runtime: RuntimeConnection.forInProcess() });
     vi.stubEnv('COPILOT_CLI_PATH', '/custom/cli');
     const electronMode = process.env.ELECTRON_RUN_AS_NODE;
     vi.spyOn(client, 'start').mockImplementation(async () => {
@@ -30,7 +30,7 @@ describe('startRuntimeClient', () => {
 
   it('restores an unset environment variable after a failed start', async () => {
     vi.stubEnv('COPILOT_CLI_PATH', undefined);
-    const client = new CopilotClient({ connection: RuntimeConnection.forInProcess() });
+    const client = new CopilotClient({ mode: 'coding-agent', runtime: RuntimeConnection.forInProcess() });
     vi.spyOn(client, 'start').mockRejectedValue(new Error('native load failed'));
     await expect(startRuntimeClient(client, '/bundled/runtime')).rejects.toThrow('native load failed');
     expect(process.env.COPILOT_CLI_PATH).toBeUndefined();
@@ -40,8 +40,8 @@ describe('startRuntimeClient', () => {
     vi.stubEnv('COPILOT_CLI_PATH', '/original');
     let release!: () => void;
     const waiting = new Promise<void>(resolve => { release = resolve; });
-    const first = new CopilotClient({ connection: RuntimeConnection.forInProcess() });
-    const second = new CopilotClient({ connection: RuntimeConnection.forInProcess() });
+    const first = new CopilotClient({ mode: 'coding-agent', runtime: RuntimeConnection.forInProcess() });
+    const second = new CopilotClient({ mode: 'coding-agent', runtime: RuntimeConnection.forInProcess() });
     vi.spyOn(first, 'start').mockImplementation(async () => {
       await waiting;
       expect(process.env.COPILOT_CLI_PATH).toBe('/first');

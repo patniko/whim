@@ -38,6 +38,7 @@ import {
   assignSpaceFolder,
   searchSpaces,
   syncCanvasContent,
+  invalidateCanvasMetadata,
   updateCanvasContent,
   mergeSessionIds,
   logSpaceEvent,
@@ -387,6 +388,25 @@ describe('database', () => {
 
       // Should not throw
       expect(() => syncCanvasContent('/fake/workspace')).not.toThrow();
+    });
+
+    it('writes nothing when a full rescan finds the stored content', () => {
+      assignSpaceFolder(makeIntent().id, 'test-folder');
+      assignSpaceFolder(makeIntent().id, 'missing-folder');
+      vi.mocked(readCanvas).mockReturnValue('# Same\nBody');
+      fs.mkdirSync(path.join(testDir, 'test-folder'));
+      fs.writeFileSync(path.join(testDir, 'test-folder', 'canvas.md'), '# Same\nBody');
+      syncCanvasContent(testDir);
+      const changes = () => (getDatabase().prepare('SELECT total_changes() AS n').get() as { n: number }).n;
+      const before = changes();
+
+      // What the canvas watcher does after losing events. Rewriting every row
+      // overflowed its buffer again on Windows, so the rescans never stopped.
+      invalidateCanvasMetadata();
+      syncCanvasContent(testDir);
+
+      expect(readCanvas).toHaveBeenCalledTimes(2);
+      expect(changes()).toBe(before);
     });
   });
 

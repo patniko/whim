@@ -30,7 +30,7 @@
  * during a cold resume, when the provider may reconnect before whim has
  * reconstructed its agent records.
  */
-import { createCanvas, type Canvas } from '@github/copilot-sdk';
+import { createCanvas, type Canvas } from '@microsoft/copilot-sdk';
 import { toArtifactId, isValidArtifactId, CanvasArtifactError, type CanvasArtifact } from './artifact-store';
 import { bindArtifact, getArtifact, publishArtifact, setArtifactStatus } from '../storage';
 

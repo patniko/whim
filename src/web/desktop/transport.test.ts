@@ -112,8 +112,8 @@ describe('web transport', () => {
      */
     it('sends the CLI runtime status to the server rather than refusing it', async () => {
       const { transport } = createWebTransport();
-      await transport.invoke('cli:runtime-status');
-      expect(JSON.parse(fetchMock.mock.calls[0][1].body).channel).toBe('cli:runtime-status');
+      await transport.invoke('auth:get-state');
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body).channel).toBe('auth:get-state');
     });
   });
 

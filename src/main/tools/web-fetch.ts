@@ -1,4 +1,4 @@
-import { defineTool } from '@github/copilot-sdk';
+import { defineTool } from '@microsoft/copilot-sdk';
 import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
 
