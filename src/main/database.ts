@@ -588,23 +588,37 @@ export function syncCanvasContent(workspaceRoot: string): void {
 export function syncCanvasBatch(workspaceRoot: string, cursor = ''): { cursor?: string } {
   const rows = db.prepare('SELECT id, folder FROM spaces WHERE folder IS NOT NULL AND id > ? ORDER BY id LIMIT 16')
     .all(cursor) as { id: string; folder: string }[];
-  const stmt = db.prepare('UPDATE spaces SET canvas_content = ? WHERE id = ?');
-  for (const row of rows) {
-    const file = path.join(resolveSpaceFolder(workspaceRoot, row.folder), 'canvas.md');
-    try {
-      const stat = fs.statSync(file);
-      const previous = canvasMetadata.get(file);
-      if (previous?.size === stat.size && previous.mtimeMs === stat.mtimeMs) continue;
-      const content = readCanvas(workspaceRoot, row.folder);
-      stmt.run(content, row.id);
-      if (content.trim()) syncDerivedSpaceTitle(row.id, content);
-      canvasMetadata.set(file, { size: stat.size, mtimeMs: stat.mtimeMs });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      canvasMetadata.delete(file);
-      stmt.run('', row.id);
+  // A rescan must not rewrite what is already stored. The canvas watcher
+  // rescans everything when its event buffer overflows, and on Windows the
+  // journal churn of rewriting every row in the watched workspace overflowed
+  // it again, so scans never stopped. One commit per batch keeps churn small.
+  const stmt = db.prepare('UPDATE spaces SET canvas_content = ? WHERE id = ? AND canvas_content IS NOT ?');
+  const scanned = new Map<string, { size: number; mtimeMs: number } | null>();
+  let failure: unknown;
+  db.transaction(() => {
+    for (const row of rows) {
+      const file = path.join(resolveSpaceFolder(workspaceRoot, row.folder), 'canvas.md');
+      try {
+        const stat = fs.statSync(file);
+        const previous = canvasMetadata.get(file);
+        if (previous?.size === stat.size && previous.mtimeMs === stat.mtimeMs) continue;
+        const content = readCanvas(workspaceRoot, row.folder);
+        stmt.run(content, row.id, content);
+        if (content.trim()) syncDerivedSpaceTitle(row.id, content);
+        scanned.set(file, { size: stat.size, mtimeMs: stat.mtimeMs });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { failure = error; return; }
+        scanned.set(file, null);
+        stmt.run('', row.id, '');
+      }
     }
+  })();
+  // Cache only committed rows; rows before a failure stay synced, as before.
+  for (const [file, metadata] of scanned) {
+    if (metadata) canvasMetadata.set(file, metadata);
+    else canvasMetadata.delete(file);
   }
+  if (failure !== undefined) throw failure;
   return rows.length === 16 ? { cursor: rows[rows.length - 1].id } : {};
 }
 
