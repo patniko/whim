@@ -15,25 +15,6 @@
  */
 
 /**
- * What the renderer assumes when it cannot see the host's CLI runtime.
- *
- * `source` claims 'auto' only because the contract's union has no member for
- * "we could not ask" — nothing on the boot path reads it, and inventing a
- * value outside the union would hand a future `switch` a case it does not
- * know exists. The fields boot actually branches on carry the real meaning:
- * `target: null` and `compatible: false` route to the setup flow, which is
- * the safe direction to be wrong in — it prompts rather than silently
- * launching against a runtime that may not be there.
- */
-export const UNKNOWN_CLI_RUNTIME = {
-  source: 'auto' as const,
-  target: null as string | null,
-  version: null as string | null,
-  compatible: false,
-  minVersion: '',
-};
-
-/**
  * Read one boot input, substituting `fallback` if it is unavailable.
  *
  * The fallback must be an honest description of not knowing, not a cheerful

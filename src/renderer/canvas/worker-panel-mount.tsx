@@ -6,14 +6,10 @@ const ChatView = lazy(() => import('../chat/ChatView').then(module => ({ default
 
 // ── Types ──────────────────────────────────────────────────
 
-declare const whimAPI: {
-  openAgentCli(agentId: string): Promise<any>;
-  [key: string]: any;
-};
-
 export interface CanvasWorkerPanelOptions {
   spaceId: string;
   onChatPaneToggle: (open: boolean) => void;
+  onOpenCli: (agentId: string) => void;
 }
 
 // ── Module state ───────────────────────────────────────────
@@ -48,7 +44,7 @@ function renderChat() {
       agentStatus="running"
       spaceId={currentOptions.spaceId}
       onClose={closeChatPane}
-      onOpenCli={(id: string) => whimAPI.openAgentCli(id)}
+      onOpenCli={currentOptions.onOpenCli}
     />
     </Suspense></FeatureBoundary>
   );

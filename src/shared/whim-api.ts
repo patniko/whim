@@ -107,23 +107,19 @@ export interface WhimAPI {
   resetHotkeys(key?: string): Promise<IpcCommandResult<'hotkeys:reset'>>;
   getToggleShortcutStatus(): Promise<IpcCommandResult<'hotkeys:toggle-status'>>;
 
-  // ── CLI / Models ─────────────────────────────────────────
-  resolveCliPath(): Promise<IpcCommandResult<'cli:resolve-path'>>;
-  checkCliVersion(): Promise<IpcCommandResult<'cli:check-version'>>;
-  checkCliMxcCapable(): Promise<IpcCommandResult<'cli:check-mxc-capable'>>;
-  getCliRuntimeStatus(): Promise<IpcCommandResult<'cli:runtime-status'>>;
-  testCliConnection(): Promise<IpcCommandResult<'cli:test-connection'>>;
-  discoverClis(): Promise<IpcCommandResult<'cli:discover'>>;
+  // ── GitHub account / Models ──────────────────────────────
+  getAuthState(): Promise<IpcCommandResult<'auth:get-state'>>;
+  signInToGitHub(method: IpcCommandArgs<'auth:sign-in'>[0]): Promise<IpcCommandResult<'auth:sign-in'>>;
+  cancelGitHubSignIn(): Promise<IpcCommandResult<'auth:cancel-sign-in'>>;
+  signOutOfGitHub(): Promise<IpcCommandResult<'auth:sign-out'>>;
+  onAuthChanged(callback: (state: IpcEventPayload<'auth:changed'>) => void): () => void;
+  onSignInProgress(callback: (progress: IpcEventPayload<'auth:sign-in-progress'>) => void): () => void;
   listModels(): Promise<IpcCommandResult<'models:list'>>;
   listModelsDetailed(): Promise<IpcCommandResult<'models:list-detailed'>>;
 
   // ── Personas ─────────────────────────────────────────────
   listPersonas(): Promise<IpcCommandResult<'personas:list'>>;
   savePersonas(personas: AgentPersona[]): Promise<IpcCommandResult<'personas:save'>>;
-
-  // ── CLI Runtimes ─────────────────────────────────────────
-  listRuntimes(): Promise<{ id: string; label: string; path: string }[]>;
-  saveRuntimes(runtimes: { id: string; label: string; path: string }[]): Promise<{ ok?: boolean; error?: string; runtimes?: { id: string; label: string; path: string }[] }>;
 
   // ── MCP servers ──────────────────────────────────────────
   listDiscoveredMcp(): Promise<IpcCommandResult<'mcp:list-discovered'>>;
@@ -427,23 +423,27 @@ export function createWhimAPI(transport: IpcTransport): WhimAPI {
     resetHotkeys: (key) => ipcRenderer.invoke('hotkeys:reset', key),
     getToggleShortcutStatus: () => ipcRenderer.invoke('hotkeys:toggle-status'),
 
-    // ── CLI / Models ─────────────────────────────────────────
-    resolveCliPath: () => ipcRenderer.invoke('cli:resolve-path'),
-    checkCliVersion: () => ipcRenderer.invoke('cli:check-version'),
-    checkCliMxcCapable: () => ipcRenderer.invoke('cli:check-mxc-capable'),
-    getCliRuntimeStatus: () => ipcRenderer.invoke('cli:runtime-status'),
-    testCliConnection: () => ipcRenderer.invoke('cli:test-connection'),
-    discoverClis: () => ipcRenderer.invoke('cli:discover'),
+    // ── GitHub account / Models ──────────────────────────────
+    getAuthState: () => ipcRenderer.invoke('auth:get-state'),
+    signInToGitHub: (method) => ipcRenderer.invoke('auth:sign-in', method),
+    cancelGitHubSignIn: () => ipcRenderer.invoke('auth:cancel-sign-in'),
+    signOutOfGitHub: () => ipcRenderer.invoke('auth:sign-out'),
+    onAuthChanged: (callback) => {
+      const handler = (_event: unknown, state: IpcEventPayload<'auth:changed'>) => callback(state);
+      ipcRenderer.on('auth:changed', handler);
+      return () => { ipcRenderer.removeListener('auth:changed', handler); };
+    },
+    onSignInProgress: (callback) => {
+      const handler = (_event: unknown, progress: IpcEventPayload<'auth:sign-in-progress'>) => callback(progress);
+      ipcRenderer.on('auth:sign-in-progress', handler);
+      return () => { ipcRenderer.removeListener('auth:sign-in-progress', handler); };
+    },
     listModels: () => ipcRenderer.invoke('models:list'),
     listModelsDetailed: () => ipcRenderer.invoke('models:list-detailed'),
 
     // ── Personas ─────────────────────────────────────────────
     listPersonas: () => ipcRenderer.invoke('personas:list'),
     savePersonas: (personas) => ipcRenderer.invoke('personas:save', personas),
-
-    // ── CLI Runtimes ─────────────────────────────────────────
-    listRuntimes: () => ipcRenderer.invoke('runtimes:list'),
-    saveRuntimes: (runtimes) => ipcRenderer.invoke('runtimes:save', runtimes),
 
     // ── MCP servers ──────────────────────────────────────────
     listDiscoveredMcp: () => ipcRenderer.invoke('mcp:list-discovered'),

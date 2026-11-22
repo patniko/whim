@@ -2,21 +2,23 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Hoisted mocks ───────────────────────────────────────
 
-const { mockExecSync, mockSpawn } = vi.hoisted(() => ({
+const { mockExecSync, mockExecFileSync, mockSpawn } = vi.hoisted(() => ({
   mockExecSync: vi.fn(),
+  mockExecFileSync: vi.fn(),
   mockSpawn: vi.fn(),
 }));
 
 vi.mock('child_process', () => ({
   execSync: mockExecSync,
+  execFileSync: mockExecFileSync,
   spawn: mockSpawn,
 }));
 
 import {
   launchInTerminal,
   shellEscape,
-  shellEscapeDouble,
   powershellEscape,
+  cmdQuote,
   type TerminalLaunchOptions,
 } from './terminal';
 
@@ -54,17 +56,19 @@ describe('shellEscape', () => {
   });
 });
 
-describe('shellEscapeDouble', () => {
-  it('escapes backslashes', () => {
-    expect(shellEscapeDouble('a\\b')).toBe('a\\\\b');
+describe('cmdQuote', () => {
+  it('leaves plain tokens readable', () => {
+    expect(cmdQuote('--resume=abc-123')).toBe('--resume=abc-123');
+    expect(cmdQuote('C:\\Whim\\copilot.exe')).toBe('C:\\Whim\\copilot.exe');
   });
 
-  it('escapes double quotes', () => {
-    expect(shellEscapeDouble('say "hi"')).toBe('say \\"hi\\"');
+  it('quotes paths with spaces and URLs carrying cmd metacharacters', () => {
+    expect(cmdQuote('C:\\Program Files\\Whim\\copilot.exe')).toBe('"C:\\Program Files\\Whim\\copilot.exe"');
+    expect(cmdQuote('ws://127.0.0.1:1/?tkn=a&b')).toBe('"ws://127.0.0.1:1/?tkn=a&b"');
   });
 
-  it('escapes backticks and dollar signs', () => {
-    expect(shellEscapeDouble('`$HOME`')).toBe('\\`\\$HOME\\`');
+  it('refuses a double quote it cannot carry safely', () => {
+    expect(() => cmdQuote('say "hi"')).toThrow('double quotes');
   });
 });
 
@@ -96,32 +100,35 @@ describe('launchInTerminal', () => {
       platformSpy = stubPlatform('darwin');
     });
 
-    it('calls osascript with the correct AppleScript', async () => {
-      mockExecSync.mockReturnValue(Buffer.from(''));
+    it('runs the command in Terminal with every argument quoted for the shell', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from(''));
 
-      const result = await launchInTerminal(baseOptions);
+      const result = await launchInTerminal({
+        command: '/Applications/Whim Beta.app/copilot',
+        args: ['--ahp', 'ws://127.0.0.1:1/?tkn=abc'],
+        cwd: "/Users/o'neil/project",
+      });
 
-      expect(mockExecSync).toHaveBeenCalledTimes(1);
-      const cmd = mockExecSync.mock.calls[0][0] as string;
-      expect(cmd).toContain('osascript');
-      expect(cmd).toContain('Terminal');
-      expect(cmd).toContain(baseOptions.cwd);
-      expect(cmd).toContain('--resume=abc-123');
+      expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+      const [file, args] = mockExecFileSync.mock.calls[0] as [string, string[]];
+      expect(file).toBe('osascript');
+      expect(args[0]).toBe('-e');
+      expect(args[1]).toContain('tell application "Terminal"');
+      expect(args[1]).toContain(`do script "cd '/Users/o'\\\\''neil/project' && '/Applications/Whim Beta.app/copilot' '--ahp' 'ws://127.0.0.1:1/?tkn=abc'"`);
       expect(result.pid).toBe(0);
     });
 
     it('includes exit signal when signalPath is provided', async () => {
-      mockExecSync.mockReturnValue(Buffer.from(''));
+      mockExecFileSync.mockReturnValue(Buffer.from(''));
 
       await launchInTerminal({ ...baseOptions, signalPath: '/path/to/signal' });
 
-      const cmd = mockExecSync.mock.calls[0][0] as string;
-      expect(cmd).toContain('touch');
-      expect(cmd).toContain('/path/to/signal');
+      const script = (mockExecFileSync.mock.calls[0][1] as string[])[1];
+      expect(script).toContain("; touch '/path/to/signal'");
     });
 
     it('returns empty result on failure', async () => {
-      mockExecSync.mockImplementation(() => {
+      mockExecFileSync.mockImplementation(() => {
         throw new Error('osascript failed');
       });
 
@@ -138,20 +145,31 @@ describe('launchInTerminal', () => {
       platformSpy = stubPlatform('win32');
     });
 
-    it('calls powershell Start-Process and returns PID', async () => {
-      mockExecSync.mockReturnValue(Buffer.from('12345'));
+    it('starts cmd.exe through an encoded PowerShell script with quoted arguments and returns PID', async () => {
+      mockExecFileSync.mockReturnValue(Buffer.from('12345'));
 
-      const result = await launchInTerminal(baseOptions);
+      const result = await launchInTerminal({
+        command: 'C:\\Program Files\\Whim\\copilot.exe',
+        args: ['--ahp', 'ws://127.0.0.1:1/?tkn=abc', '--resume=abc-123'],
+        cwd: "C:\\Users\\Jürgen o'neil",
+        signalPath: 'C:\\Users\\o neil\\exit',
+      });
 
-      expect(mockExecSync).toHaveBeenCalledTimes(1);
-      const cmd = mockExecSync.mock.calls[0][0] as string;
-      expect(cmd).toContain('powershell');
-      expect(cmd).toContain('Start-Process cmd.exe');
+      expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+      const [file, args] = mockExecFileSync.mock.calls[0] as [string, string[]];
+      expect(file).toBe('powershell.exe');
+      expect(args.slice(0, 3)).toEqual(['-NoProfile', '-NonInteractive', '-EncodedCommand']);
+      // UTF-16 base64 keeps non-ASCII paths intact on the way to PowerShell.
+      const script = Buffer.from(args[3], 'base64').toString('utf16le');
+      expect(script).toContain(
+        `-ArgumentList '/s /k ""C:\\Program Files\\Whim\\copilot.exe" --ahp "ws://127.0.0.1:1/?tkn=abc" --resume=abc-123 & echo.>"C:\\Users\\o neil\\exit""'`,
+      );
+      expect(script).toContain("-WorkingDirectory 'C:\\Users\\Jürgen o''neil'");
       expect(result.pid).toBe(12345);
     });
 
     it('returns empty result when powershell fails', async () => {
-      mockExecSync.mockImplementation(() => {
+      mockExecFileSync.mockImplementation(() => {
         throw new Error('powershell failed');
       });
 
@@ -161,7 +179,7 @@ describe('launchInTerminal', () => {
     });
 
     it('returns empty result when output is not a number', async () => {
-      mockExecSync.mockReturnValue(Buffer.from('not-a-pid'));
+      mockExecFileSync.mockReturnValue(Buffer.from('not-a-pid'));
 
       const result = await launchInTerminal(baseOptions);
 
@@ -233,8 +251,7 @@ describe('launchInTerminal', () => {
 
       const args = mockSpawn.mock.calls[0][1] as string[];
       const shellCmd = args[args.length - 1];
-      expect(shellCmd).toContain('touch');
-      expect(shellCmd).toContain('/sig');
+      expect(shellCmd).toBe("cd '/home/user/project' && '/usr/local/bin/copilot' '--resume=abc-123' ; touch '/sig'");
     });
   });
 });

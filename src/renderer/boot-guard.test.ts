@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { bootValue, UNKNOWN_CLI_RUNTIME } from './boot-guard';
+import { bootValue } from './boot-guard';
+
+/** Not knowing the account must route to sign-in, never past it. */
+const UNKNOWN_ACCOUNT = { signedIn: false, login: null, host: null, source: null };
 
 /**
  * These cover the shape of the bug, not just the helper.
@@ -17,10 +20,10 @@ describe('bootValue', () => {
 
   it('substitutes the fallback when the read is refused', async () => {
     const warn = vi.fn();
-    const denied = () => Promise.reject(new Error('"cli:runtime-status" is not available over the web remote.'));
+    const denied = () => Promise.reject(new Error('"auth:get-state" is not available over the web remote.'));
 
-    await expect(bootValue(denied, UNKNOWN_CLI_RUNTIME, 'cli runtime status', warn))
-      .resolves.toEqual(UNKNOWN_CLI_RUNTIME);
+    await expect(bootValue(denied, UNKNOWN_ACCOUNT, 'GitHub account', warn))
+      .resolves.toEqual(UNKNOWN_ACCOUNT);
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
@@ -34,21 +37,11 @@ describe('bootValue', () => {
     const results = await Promise.all([
       bootValue(() => Promise.resolve('/work'), null, 'workspace_root', warn),
       bootValue(() => Promise.resolve('gpt-5'), null, 'model', warn),
-      bootValue(() => Promise.reject(new Error('denied')), UNKNOWN_CLI_RUNTIME, 'cli', warn),
+      bootValue(() => Promise.reject(new Error('denied')), UNKNOWN_ACCOUNT, 'account', warn),
     ]);
 
     expect(results[0]).toBe('/work');
     expect(results[1]).toBe('gpt-5');
-    expect(results[2]).toEqual(UNKNOWN_CLI_RUNTIME);
-  });
-
-  /**
-   * The fallback decides which way boot branches, so it has to describe not
-   * knowing. A truthy `target` or `compatible: true` would skip the setup flow
-   * and send the user into an interface backed by a runtime we never found.
-   */
-  it('describes an unknown runtime as unusable rather than fine', () => {
-    expect(UNKNOWN_CLI_RUNTIME.target).toBeNull();
-    expect(UNKNOWN_CLI_RUNTIME.compatible).toBe(false);
+    expect(results[2]).toEqual(UNKNOWN_ACCOUNT);
   });
 });

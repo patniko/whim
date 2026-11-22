@@ -17,11 +17,11 @@ import {
 import { generateTintColor, isValidTint, hueOf } from './lib/tint';
 import { parseFrontmatter } from '../shared/frontmatter';
 import { deriveMarkdownTitle, ensureMarkdownH1Title } from '../shared/markdown-title';
-import type { CanvasSaveResult, WindowToggleSource } from '../shared/ipc-contract';
+import type { CanvasSaveResult, CopilotAuthState, GitHubSignInMethod, GitHubSignInProgress, GitHubSignInResult, WindowToggleSource } from '../shared/ipc-contract';
 import type { ScheduleOptions } from '../shared/skill-schedule';
 import { createSchedulePicker, formatScheduleDate } from './scheduled-skills';
+import { mountGitHubAccount } from './github-account';
 import { trackSettingWrites, installSaveLifecycle, FormDrafts } from './save-lifecycle';
-import { DebouncedSave } from './debounced-save';
 import { waitForCaptureStorage } from './startup';
 import { startTiming, observeRendererTasks, getPerformanceTimings } from './performance';
 const finishShellTiming = startTiming('startup.shell');
@@ -87,16 +87,9 @@ export interface AgentPersona {
   runLocation: 'local' | 'cca' | 'cloud';  // where to execute the agent
   sandboxed?: boolean;
   emoji?: string;
-  cliRuntime?: string;
   sandboxPolicyOverride?: SandboxPolicy;
   yolo?: boolean;
   ephemeral?: boolean;
-}
-
-export interface CliRuntime {
-  id: string;
-  label: string;
-  path: string;
 }
 
 export interface CliToolDefinition {
@@ -219,18 +212,16 @@ interface WhimAPI {
   setHotkey(key: string, accelerator: string): Promise<{ ok?: boolean; error?: string }>;
   resetHotkeys(key?: string): Promise<{ ok?: boolean; hotkeys?: Record<string, string> }>;
   getToggleShortcutStatus(): Promise<{ accelerator: string; registered: boolean }>;
-  resolveCliPath(): Promise<string | null>;
-  checkCliVersion(): Promise<{ path: string | null; version: string | null; compatible: boolean; minVersion: string }>;
-  checkCliMxcCapable(): Promise<{ mxcCapable: boolean }>;
-  getCliRuntimeStatus(): Promise<{ source: string; target: string | null; version: string | null; compatible: boolean; minVersion: string }>;
-  testCliConnection(): Promise<{ ok: boolean; source: string; target: string | null; version: string | null; compatible: boolean; minVersion: string; error?: string }>;
+  getAuthState(): Promise<CopilotAuthState>;
+  signInToGitHub(method: GitHubSignInMethod): Promise<GitHubSignInResult>;
+  cancelGitHubSignIn(): Promise<{ ok: true }>;
+  signOutOfGitHub(): Promise<CopilotAuthState>;
+  onAuthChanged(callback: (state: CopilotAuthState) => void): () => void;
+  onSignInProgress(callback: (progress: GitHubSignInProgress) => void): () => void;
   listModels(): Promise<{ id: string; name?: string }[]>;
   listModelsDetailed(): Promise<{ models: { id: string; name?: string }[]; error: string | null }>;
-  discoverClis(): Promise<{ path: string; version: string | null; source: 'bundled' | 'path'; origin: string; compatible: boolean }[]>;
   listPersonas(): Promise<AgentPersona[]>;
   savePersonas(personas: AgentPersona[]): Promise<{ ok?: boolean; error?: string }>;
-  listRuntimes(): Promise<CliRuntime[]>;
-  saveRuntimes(runtimes: CliRuntime[]): Promise<{ ok?: boolean; error?: string; runtimes?: CliRuntime[] }>;
   listDiscoveredMcp(): Promise<DiscoveredMcpServer[]>;
   listCustomMcp(): Promise<CustomMcpServer[]>;
   saveCustomMcp(servers: CustomMcpServer[]): Promise<{ ok?: boolean; error?: string }>;
@@ -500,13 +491,8 @@ const welcomeWorkspaceBtn = document.getElementById('welcome-workspace-btn') as 
 const welcomeWorkspaceHint = document.getElementById('welcome-workspace-hint') as HTMLDivElement;
 const welcomeWorkspaceCheck = document.getElementById('welcome-workspace-check') as HTMLSpanElement;
 const welcomeStepWorkspace = document.getElementById('welcome-step-workspace') as HTMLDivElement;
-const welcomeCliStatus = document.getElementById('welcome-cli-status') as HTMLDivElement;
-const welcomeCliCheck = document.getElementById('welcome-cli-check') as HTMLSpanElement;
-const welcomeStepCli = document.getElementById('welcome-step-cli') as HTMLDivElement;
-const welcomeCliPath = document.getElementById('welcome-cli-path') as HTMLInputElement;
-const welcomeCliSelect = document.getElementById('welcome-cli-select') as HTMLSelectElement;
-const welcomeCliPathRow = document.getElementById('welcome-cli-path-row') as HTMLDivElement;
-const welcomeCliRefresh = document.getElementById('welcome-cli-refresh') as HTMLButtonElement;
+const welcomeStepSignIn = document.getElementById('welcome-step-signin') as HTMLDivElement;
+const welcomeSignInCheck = document.getElementById('welcome-signin-check') as HTMLSpanElement;
 const welcomeModelSelect = document.getElementById('welcome-model-select') as HTMLSelectElement;
 const welcomeModelHint = document.getElementById('welcome-model-hint') as HTMLDivElement;
 const WELCOME_MODEL_HINT = 'The AI model used for agents and space processing.';
@@ -3113,60 +3099,6 @@ if (brandLogo) {
 whimAPI.onProfilesChanged(handleProfilesChanged);
 void refreshProfiles();
 
-const CLI_CUSTOM_OPTION = '__custom__';
-
-/** Short label for a discovered CLI: "Self-updated — v1.0.75". */
-function discoveredCliLabel(cli: { version: string | null; origin: string; compatible: boolean }): string {
-  const version = cli.version ? `v${cli.version}` : 'unknown version';
-  return `${cli.origin} — ${version}${cli.compatible ? '' : ' (too old)'}`;
-}
-
-/**
- * Populate a <select> with every Copilot CLI found on the machine, plus a
- * "Custom path…" escape hatch. Returns the discovered list so callers can
- * decide what to preselect.
- */
-async function populateCliSelect(
-  select: HTMLSelectElement,
-  selectedPath: string,
-  includeCustom: boolean,
-): Promise<Array<{ path: string; version: string | null; origin: string; compatible: boolean; source: string }>> {
-  let clis: Awaited<ReturnType<typeof whimAPI.discoverClis>> = [];
-  try {
-    clis = await whimAPI.discoverClis();
-  } catch {
-    clis = [];
-  }
-  select.innerHTML = '';
-  for (const cli of clis) {
-    const opt = document.createElement('option');
-    opt.value = cli.path;
-    opt.textContent = discoveredCliLabel(cli);
-    opt.title = cli.path;
-    select.appendChild(opt);
-  }
-  if (clis.length === 0) {
-    const opt = document.createElement('option');
-    opt.value = '';
-    opt.textContent = 'No Copilot CLI found';
-    select.appendChild(opt);
-  }
-  if (includeCustom) {
-    const opt = document.createElement('option');
-    opt.value = CLI_CUSTOM_OPTION;
-    opt.textContent = 'Custom path…';
-    select.appendChild(opt);
-  }
-  if (selectedPath && clis.some(c => c.path === selectedPath)) {
-    select.value = selectedPath;
-  } else if (selectedPath && includeCustom) {
-    select.value = CLI_CUSTOM_OPTION;
-  } else if (clis.length > 0) {
-    select.value = clis[0].path;
-  }
-  return clis;
-}
-
 // ── Hotkeys tab ────────────────────────────────────────
 const HOTKEY_LABELS: Record<string, string> = {
   toggleWindow: 'Toggle Window',
@@ -4450,6 +4382,7 @@ async function openCanvas(spaceId: string, expanded = false): Promise<void> {
     onChatPaneToggle: (open: boolean) => {
       canvasChatPaneOpen = open;
     },
+    onOpenCli: (id: string) => { void openAgentInCli(id); },
   });
 
   // Load initial agent activity decorations
@@ -5129,6 +5062,12 @@ const chatView = document.getElementById('chat-view') as HTMLDivElement;
 const chatRoot = document.getElementById('chat-root') as HTMLDivElement;
 let chatOpenRequest = 0;
 
+/** Continue a worker's session in the Copilot CLI, saying why when it can't. */
+async function openAgentInCli(agentId: string): Promise<void> {
+  const result = await whimAPI.openAgentCli(agentId);
+  if (result?.error) showStatus(result.error, true);
+}
+
 async function openAgentChat(agentId: string | undefined, agentPrompt: string, agentStatus: string, agentSource?: 'sdk' | 'cli' | 'cca', spaceId?: string): Promise<void> {
   const request = ++chatOpenRequest;
   const generation = getWorkspaceGeneration();
@@ -5179,7 +5118,7 @@ async function openAgentChat(agentId: string | undefined, agentPrompt: string, a
     pendingApprovalId: approval?.requestId,
     pendingPermissionKind: approval?.permissionKind,
     onClose: () => closeAgentChat(),
-    onOpenCli: (id: string) => whimAPI.openAgentCli(id),
+    onOpenCli: (id: string) => { void openAgentInCli(id); },
     onOpenCanvas: spaceId ? (id: string) => { void openCanvas(id); } : undefined,
   });
 }
@@ -5833,7 +5772,6 @@ async function flushLocalDrafts(): Promise<void> {
     descInput.value = '';
   }
   await settingsLoading;
-  await settingsController?.flush();
   await settingWrites.flush();
   settingsDrafts.assertClean();
   const result = await saveCanvasEditor();
@@ -5847,7 +5785,7 @@ installSaveLifecycle(bridgeApi, flushLocalDrafts, error => {
 
 window.addEventListener('beforeunload', (event) => {
   if (canvasClosing) return;
-  const settingsDirty = settingsDrafts.hasDirty() || settingsController?.hasDirty();
+  const settingsDirty = settingsDrafts.hasDirty();
   if (!canvasDirty && !captureFlight && (!descInput.value.trim() || searchMode) && !settingsDirty) return;
   event.preventDefault();
   event.returnValue = '';
@@ -6369,13 +6307,12 @@ tourSkipAll?.addEventListener('click', () => void finishTour());
 
 // ── Welcome / Onboarding ────────────────────────────────
 let welcomeWorkspaceSelected = false;
-let welcomeCliReady = false;
+let welcomeSignedIn = false;
 let welcomeModelSelected = false;
-/** Installs backing the onboarding CLI picker, kept to map a path to a source. */
-let welcomeDiscoveredClis: Awaited<ReturnType<typeof populateCliSelect>> = [];
+let welcomeAccount: ReturnType<typeof mountGitHubAccount> | null = null;
 
 function updateWelcomeStartBtn(): void {
-  welcomeStartBtn.disabled = !(welcomeWorkspaceSelected && welcomeCliReady && welcomeModelSelected);
+  welcomeStartBtn.disabled = !(welcomeWorkspaceSelected && welcomeSignedIn && welcomeModelSelected);
 }
 
 async function showWelcomeView(): Promise<void> {
@@ -6383,7 +6320,7 @@ async function showWelcomeView(): Promise<void> {
   welcomeView.classList.remove('hidden');
   const savedWorkspace = await whimAPI.getSetting('workspace_root');
   welcomeWorkspaceSelected = !!savedWorkspace;
-  welcomeCliReady = false;
+  welcomeSignedIn = false;
   welcomeModelSelected = false;
 
   // Reset step states
@@ -6392,64 +6329,45 @@ async function showWelcomeView(): Promise<void> {
   welcomeWorkspaceBtn.textContent = savedWorkspace ? 'Change…' : 'Choose Folder…';
   welcomeWorkspaceCheck.classList.toggle('hidden', !savedWorkspace);
   welcomeStepWorkspace.classList.toggle('done', !!savedWorkspace);
-  welcomeCliCheck.classList.add('hidden');
-  welcomeStepCli.classList.remove('done');
-  welcomeCliStatus.textContent = 'Checking…';
-  welcomeCliStatus.style.color = '';
+  welcomeSignInCheck.classList.add('hidden');
+  welcomeStepSignIn.classList.remove('done');
   welcomeModelCheck.classList.add('hidden');
   welcomeStepModel.classList.remove('done');
   welcomeModelHint.textContent = WELCOME_MODEL_HINT;
   welcomeModelHint.style.color = '';
-  welcomeModelSelect.innerHTML = '<option value="">Loading models…</option>';
+  welcomeModelSelect.innerHTML = '<option value="">Waiting for sign-in…</option>';
   updateWelcomeStartBtn();
 
-  // Load saved CLI path override into input, and list every install found
-  const savedCliPath = await whimAPI.getSetting('cli_path');
-  welcomeCliPath.value = savedCliPath || '';
-  await populateWelcomeCliSelect(savedCliPath || '');
+  // Copilot runs inside whim, so the only setup it needs is a GitHub account.
+  // Models load once the account is known.
+  welcomeAccount ??= mountGitHubAccount(whimAPI, {
+    status: document.getElementById('welcome-signin-status') as HTMLElement,
+    signIn: document.getElementById('welcome-signin-btn') as HTMLButtonElement,
+    useCode: document.getElementById('welcome-signin-code-btn') as HTMLButtonElement,
+    cancel: document.getElementById('welcome-signin-cancel') as HTMLButtonElement,
+    code: document.getElementById('welcome-signin-code') as HTMLElement,
+    codeValue: document.getElementById('welcome-signin-code-value') as HTMLElement,
+    copyCode: document.getElementById('welcome-signin-code-copy') as HTMLButtonElement,
+  }, onWelcomeAuthState);
+  await welcomeAccount.refresh();
+}
 
-  // Report the CLI whim will actually run, then load models
-  const cliOk = await checkWelcomeCli();
-  if (cliOk) {
+function onWelcomeAuthState(state: CopilotAuthState): void {
+  const wasSignedIn = welcomeSignedIn;
+  welcomeSignedIn = state.signedIn;
+  welcomeSignInCheck.classList.toggle('hidden', !state.signedIn);
+  welcomeStepSignIn.classList.toggle('done', state.signedIn);
+  if (state.signedIn && !wasSignedIn) {
+    welcomeModelSelect.innerHTML = '<option value="">Loading models…</option>';
     void loadWelcomeModels();
-  } else {
-    welcomeModelSelect.innerHTML = '<option value="">Waiting for valid CLI…</option>';
+  } else if (!state.signedIn) {
+    welcomeModelLoadToken++;
+    welcomeModelSelected = false;
+    welcomeModelCheck.classList.add('hidden');
+    welcomeStepModel.classList.remove('done');
+    welcomeModelSelect.innerHTML = '<option value="">Waiting for sign-in…</option>';
   }
-}
-
-/**
- * Fill the onboarding CLI picker with every install discovered on the machine.
- * A fresh machine may have several (bundled, self-updated, Homebrew, npm), and
- * the auto-picked default isn't always the one that works — so the user needs
- * to be able to switch.
- */
-async function populateWelcomeCliSelect(selectedPath: string): Promise<void> {
-  welcomeDiscoveredClis = await populateCliSelect(welcomeCliSelect, selectedPath, true);
-  welcomeCliPathRow.hidden = welcomeCliSelect.value !== CLI_CUSTOM_OPTION;
-  // Nothing saved yet: adopt whichever install the picker landed on so the
-  // runtime and the displayed selection agree from the first render.
-  if (!selectedPath && welcomeDiscoveredClis.length > 0 && welcomeCliSelect.value) {
-    await applyWelcomeCliChoice(welcomeCliSelect.value);
-  }
-}
-
-/**
- * Persist a CLI choice from the onboarding picker as the effective runtime.
- * The bundled copy maps to `cli_source: 'bundled'` rather than a hard-coded
- * path, so it keeps tracking whatever ships with the app across upgrades.
- */
-async function applyWelcomeCliChoice(value: string): Promise<void> {
-  if (value === CLI_CUSTOM_OPTION) return;
-  const chosen = welcomeDiscoveredClis.find(c => c.path === value);
-  if (!value || chosen?.source === 'bundled') {
-    await whimAPI.setSetting('cli_path', '');
-    await whimAPI.setSetting('cli_source', 'bundled');
-    welcomeCliPath.value = '';
-    return;
-  }
-  welcomeCliPath.value = value;
-  await whimAPI.setSetting('cli_path', value);
-  await whimAPI.setSetting('cli_source', 'path');
+  updateWelcomeStartBtn();
 }
 
 /** Generation counter so a stale retry chain can't clobber a newer load. */
@@ -6469,12 +6387,12 @@ async function loadWelcomeModels(retries = 5, token = ++welcomeModelLoadToken): 
   if (models.length === 0) {
     welcomeModelSelected = false;
     updateWelcomeStartBtn();
-    // Surface *why* rather than a dead-end "No models available" — on a new
-    // machine this is almost always an unauthenticated or failed-to-start CLI.
+    // Surface *why* rather than a dead-end "No models available" — usually an
+    // account without Copilot access or a runtime that failed to start.
     welcomeModelSelect.innerHTML = '<option value="">No models available</option>';
     welcomeModelHint.textContent = error
       ? `Couldn't load models: ${error}`
-      : "Couldn't load models. Try another Copilot CLI above, or run `copilot` once in a terminal to sign in.";
+      : "Couldn't load models. Check that this GitHub account has Copilot access.";
     welcomeModelHint.style.color = 'var(--color-warning, #d29922)';
     return;
   }
@@ -6504,85 +6422,6 @@ function hideWelcomeView(): void {
   descInput.focus();
 }
 
-/**
- * Report the runtime whim will actually spawn. This reads `cli:runtime-status`
- * rather than the bare auto-detect result, so what onboarding shows matches
- * what the SDK connects to (they diverge whenever `cli_source` isn't 'auto').
- */
-async function checkWelcomeCli(): Promise<boolean> {
-  welcomeCliReady = false;
-  updateWelcomeStartBtn();
-  welcomeCliStatus.textContent = 'Checking…';
-  welcomeCliStatus.style.color = '';
-  welcomeCliCheck.classList.add('hidden');
-  welcomeStepCli.classList.remove('done');
-
-  const info = await whimAPI.getCliRuntimeStatus();
-
-  if (!info.target) {
-    welcomeCliStatus.textContent = 'Not found — install the Copilot CLI or pick a path below.';
-    return false;
-  }
-  if (!info.compatible) {
-    const ver = info.version || 'unknown';
-    welcomeCliStatus.textContent = `Version ${ver} selected — update to ${info.minVersion}+ required (run: copilot update)`;
-    welcomeCliStatus.style.color = 'var(--color-warning, #d29922)';
-    return false;
-  }
-  const short = info.target.length > 40 ? '…' + info.target.slice(-38) : info.target;
-  welcomeCliStatus.textContent = `Using: ${short}${info.version ? ` (v${info.version})` : ''}`;
-  welcomeCliStatus.title = info.target;
-  welcomeCliCheck.classList.remove('hidden');
-  welcomeStepCli.classList.add('done');
-  welcomeCliReady = true;
-  updateWelcomeStartBtn();
-  return true;
-}
-
-/** Re-check the CLI and reload the model list after a runtime change. */
-async function refreshWelcomeCliAndModels(): Promise<void> {
-  welcomeModelSelected = false;
-  updateWelcomeStartBtn();
-  const cliOk = await checkWelcomeCli();
-  welcomeModelSelect.innerHTML = '<option value="">Loading models…</option>';
-  welcomeModelCheck.classList.add('hidden');
-  welcomeStepModel.classList.remove('done');
-  if (cliOk) {
-    void loadWelcomeModels();
-  } else {
-    welcomeModelLoadToken++;
-    welcomeModelSelect.innerHTML = '<option value="">Waiting for valid CLI…</option>';
-  }
-}
-
-welcomeCliSelect.addEventListener('change', async () => {
-  const value = welcomeCliSelect.value;
-  welcomeCliPathRow.hidden = value !== CLI_CUSTOM_OPTION;
-  if (value === CLI_CUSTOM_OPTION) {
-    welcomeCliPath.focus();
-    return;
-  }
-  await applyWelcomeCliChoice(value);
-  await refreshWelcomeCliAndModels();
-});
-
-// Custom path entry: a non-empty path opts into the 'path' source; empty falls
-// back to the bundled CLI (the default that works without a local install).
-welcomeCliPath.addEventListener('change', async () => {
-  const val = welcomeCliPath.value.trim();
-  await whimAPI.setSetting('cli_path', val);
-  await whimAPI.setSetting('cli_source', val ? 'path' : 'bundled');
-  await refreshWelcomeCliAndModels();
-});
-
-// Refresh button re-scans for installs after the user upgrades or installs one
-welcomeCliRefresh.addEventListener('click', async () => {
-  welcomeCliSelect.innerHTML = '<option value="">Detecting…</option>';
-  const saved = (await whimAPI.getSetting('cli_path')) || '';
-  await populateWelcomeCliSelect(saved);
-  await refreshWelcomeCliAndModels();
-});
-
 welcomeWorkspaceBtn.addEventListener('click', async () => {
   const result = await whimAPI.selectWorkspace();
   if (result.selected && result.path) {
@@ -6610,7 +6449,7 @@ welcomeModelSelect.addEventListener('change', () => {
 });
 
 welcomeStartBtn.addEventListener('click', async () => {
-  if (!welcomeWorkspaceSelected || !welcomeCliReady || !welcomeModelSelected) return;
+  if (!welcomeWorkspaceSelected || !welcomeSignedIn || !welcomeModelSelected) return;
 
   // Save model selection
   const model = welcomeModelSelect.value;
@@ -7180,9 +7019,6 @@ export interface SettingsHost {
   generateTintColor: typeof generateTintColor;
   hueOf: typeof hueOf;
   applyProfileTint: typeof applyProfileTint;
-  DebouncedSave: typeof DebouncedSave;
-  CLI_CUSTOM_OPTION: string;
-  populateCliSelect: typeof populateCliSelect;
   HOTKEY_LABELS: typeof HOTKEY_LABELS;
   currentHotkeys: typeof currentHotkeys;
   DEFAULT_HOTKEYS: typeof DEFAULT_HOTKEYS;
@@ -7224,9 +7060,6 @@ function settingsHost(): SettingsHost {
     get generateTintColor() { return generateTintColor; },
     get hueOf() { return hueOf; },
     get applyProfileTint() { return applyProfileTint; },
-    get DebouncedSave() { return DebouncedSave; },
-    get CLI_CUSTOM_OPTION() { return CLI_CUSTOM_OPTION; },
-    get populateCliSelect() { return populateCliSelect; },
     get HOTKEY_LABELS() { return HOTKEY_LABELS; },
     get currentHotkeys() { return currentHotkeys; },
     set currentHotkeys(value) { currentHotkeys = value; },

@@ -79,6 +79,8 @@ const ALLOWED_EVENT_CHANNELS = new Set([
   'workspace:committed',
   'settings:font-changed',
   'workspace:git-sync-changed',
+  // Who the host is signed in as, which the welcome view can show remotely.
+  'auth:changed',
 ]);
 
 /**
@@ -104,6 +106,8 @@ export const DESKTOP_ONLY_EVENT_CHANNELS = new Set([
   // Auto-update state describes the *desktop install*. A browser cannot act on
   // it, and showing "restart to update" to a remote client would be a lie.
   'update:state-changed',
+  // Progress of a sign-in started on the desktop, which the web cannot start.
+  'auth:sign-in-progress',
 ]);
 
 const hub = new EventEmitter();

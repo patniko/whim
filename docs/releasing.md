@@ -24,7 +24,8 @@ The release workflow validates the tag, checked-out commit, version, and all
 required secret inputs before building. It then creates and inspects an unsigned
 macOS package before the existing signed macOS and Windows publish jobs run. The
 package smoke check verifies the app executable, resources, native SQLite module,
-and the platform-specific bundled Copilot runtime. The preflight publishes the
+the platform-specific bundled Copilot CLI, and the in-process Copilot SDK runtime
+(including starting an AHP host and publishing a session). The preflight publishes the
 validated commit SHA, and every build/publish job checks out that immutable SHA
 rather than resolving the tag again.
 

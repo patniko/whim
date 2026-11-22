@@ -100,49 +100,21 @@ describe('config', () => {
       expect(config.personas).toEqual([]);
     });
 
-    it('defaults cliSource to bundled for a fresh install', () => {
-      const config = loadConfig();
-      expect(config.cliSource).toBe('bundled');
-      expect(config.cliServerUrl).toBeNull();
-      expect(config.cliServerToken).toBeNull();
-    });
-
-    it("migrates an existing explicit cliPath to cliSource='path'", () => {
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ cliPath: '/usr/local/bin/copilot' }));
-      const config = loadConfig();
-      expect(config.cliSource).toBe('path');
-      expect(config.cliPath).toBe('/usr/local/bin/copilot');
-    });
-
-    it("migrates an existing auto-detect (null cliPath) install to cliSource='bundled'", () => {
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ cliPath: null, theme: 'dark' }));
-      const config = loadConfig();
-      expect(config.cliSource).toBe('bundled');
-    });
-
-    it('preserves an explicitly configured cliSource', () => {
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ cliSource: 'server', cliServerUrl: 'localhost:9001' }));
-      const config = loadConfig();
-      expect(config.cliSource).toBe('server');
-      expect(config.cliServerUrl).toBe('localhost:9001');
-    });
-
-    it('migrates the former experimental in-process opt-in to the bundled default', () => {
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify({ cliSource: 'inprocess' }));
-      const config = loadConfig();
-      expect(config.cliSource).toBe('bundled');
-    });
-
-    it('persists the separate-process stdio choice without changing custom connection settings', () => {
+    it('drops the old runtime selection, including its server token, from disk on load', () => {
       fs.writeFileSync(CONFIG_PATH, JSON.stringify({
-        cliSource: 'path', cliPath: '/custom/copilot', cliServerUrl: 'localhost:9001',
+        theme: 'dark',
+        cliSource: 'server', cliPath: '/custom/copilot', cliServerUrl: 'localhost:9001', cliServerToken: 'secret',
+        cliRuntimes: [{ id: 'rt', label: 'Dev', path: '/dev/copilot' }],
+        personas: [{ id: 'p1', handle: 'dev', instructions: 'x', model: '', runLocation: 'local', cliRuntime: 'rt' }],
       }));
-      loadConfig();
-      setConfigValue('cliSource', 'stdio');
       const config = loadConfig();
-      expect(config.cliSource).toBe('stdio');
-      expect(config.cliPath).toBe('/custom/copilot');
-      expect(config.cliServerUrl).toBe('localhost:9001');
+      for (const key of ['cliSource', 'cliPath', 'cliServerUrl', 'cliServerToken', 'cliRuntimes']) {
+        expect(config).not.toHaveProperty(key);
+      }
+      expect(config.personas[0]).not.toHaveProperty('cliRuntime');
+      const saved = fs.readFileSync(CONFIG_PATH, 'utf-8');
+      expect(saved).not.toContain('secret');
+      expect(JSON.parse(saved).theme).toBe('dark');
     });
 
     it('handles malformed JSON gracefully', () => {

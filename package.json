@@ -43,7 +43,6 @@
     ],
     "asarUnpack": [
       "node_modules/font-list/**",
-      "node_modules/@github/copilot/**",
       "node_modules/@github/copilot-*/**",
       "node_modules/@microsoft/copilot-sdk-*/**",
       "node_modules/koffi/**",
@@ -114,7 +113,6 @@
   "homepage": "https://github.com/patniko/whim#readme",
   "type": "commonjs",
   "dependencies": {
-    "@github/copilot": "1.0.78",
     "@huggingface/transformers": "^4.2.0",
     "@microsoft/copilot-sdk": "2.0.0",
     "@milkdown/kit": "^7.21.3",
@@ -141,6 +139,14 @@
     "selfsigned": "^2.4.1",
     "uuid": "^13.0.2",
     "ws": "^8.20.0"
+  },
+  "optionalDependencies": {
+    "@github/copilot-darwin-arm64": "1.0.113",
+    "@github/copilot-darwin-x64": "1.0.113",
+    "@github/copilot-linux-arm64": "1.0.113",
+    "@github/copilot-linux-x64": "1.0.113",
+    "@github/copilot-win32-arm64": "1.0.113",
+    "@github/copilot-win32-x64": "1.0.113"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.3",

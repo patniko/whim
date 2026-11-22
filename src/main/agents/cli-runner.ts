@@ -2,8 +2,9 @@ import { v4 as uuid } from 'uuid';
 import { app } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { launchSessionInTerminal } from '../session';
+import { launchCliInTerminal, launchSessionInTerminal } from '../session';
 import { getConfig } from '../config';
+import { publishSessionForCli } from '../ahp-host';
 import { AgentRegistry } from './agent-registry';
 import { AgentNotifier } from './agent-notifier';
 import { AgentPersistence } from './agent-persistence';
@@ -146,46 +147,70 @@ export function stopCliExitMonitor(): void {
   }
 }
 
-/** Open an existing agent session in a new terminal (CLI). */
+const SIGN_IN_FOR_CLI = 'Sign in to GitHub in Whim (Settings → Environment) to open sessions in the Copilot CLI.';
+
+/**
+ * Open an agent's session in the Copilot CLI bundled with Whim.
+ *
+ * A local session keeps running in Whim's runtime: Whim publishes it on its
+ * AHP host and the CLI attaches, so both show the same live conversation and
+ * either can answer a pending approval. Sessions Whim does not run — cloud
+ * sessions, which cannot be published, and sessions the CLI itself created —
+ * are resumed by the CLI directly, as before.
+ */
 export async function openAgentCli(agentId: string): Promise<{ error?: string }> {
-  const config = getConfig();
-  const workspaceRoot = config.workspace;
+  const workspaceRoot = getConfig().workspace;
   if (!workspaceRoot) return { error: 'No workspace' };
 
-  // Try live agent first, then fall back to DB
   const record = registry.get(agentId);
-  let sessionId: string;
-  let cwd: string;
-
-  if (record) {
-    sessionId = record.sessionId;
-    cwd = workspaceRoot;
-  } else {
-    // Historical agent — look up from DB
-    const persisted = (await persistence.getSession(agentId));
-    if (!persisted) return { error: 'Agent not found' };
-    sessionId = persisted.session_id;
-    cwd = persisted.working_dir || workspaceRoot;
+  const persisted = await persistence.getSession(agentId);
+  if (!record && !persisted) return { error: 'Agent not found' };
+  if (record?.ephemeral) {
+    return { error: 'Ephemeral sessions are never saved, so they cannot be opened in the Copilot CLI.' };
   }
+  if (persisted?.source === 'cca') {
+    return { error: 'Coding agent jobs run on GitHub and cannot be opened in the Copilot CLI.' };
+  }
+  const workingDir = persisted?.working_dir;
+  const cwd = workingDir && fs.existsSync(workingDir) ? workingDir : workspaceRoot;
 
   try {
-    // Release Whim's in-use lock on this session before handing it to the
-    // terminal CLI. Without this, the CLI sees Whim's lock (still alive in
-    // this process) and warns "This session may already be in use by another
-    // CLI or application." The in-memory CopilotSession is unaffected — the
-    // lock is re-acquired on the next session.* RPC.
-    try {
-      const { getCopilotClient } = await import('../ai');
-      const client = getCopilotClient();
-      await client?.rpc.sessions.releaseLock({ sessionId });
-    } catch (err) {
-      // Non-fatal: worst case the user sees the in-use warning in the CLI.
-      console.warn(`[cli-runner] Failed to release session lock for ${sessionId}:`, err);
+    const { getCopilotClient } = await import('../ai');
+    const client = getCopilotClient();
+    if (!client) return { error: 'Copilot is not running.' };
+
+    const cloud = record ? record.runLocation === 'cloud' : persisted?.run_location === 'cloud';
+    if (cloud || persisted?.source === 'cli') {
+      const sessionId = record?.sessionId ?? persisted!.session_id;
+      // Release Whim's lock so the CLI doesn't warn that the session is in use.
+      await client.rpc.sessions.releaseLock({ sessionId }).catch((err: unknown) => {
+        console.warn(`[cli-runner] Failed to release session lock for ${sessionId}:`, err);
+      });
+      await launchSessionInTerminal(sessionId, cwd);
+      return {};
     }
 
-    await launchSessionInTerminal(sessionId, cwd);
+    // The host admits only the signed-in GitHub account, so it cannot start without one.
+    if (!(await client.getAuthStatus()).isAuthenticated) return { error: SIGN_IN_FOR_CLI };
+    // Only a live session can be published: bring back one the user stopped
+    // or one from before the app restarted.
+    const { reviveAgent } = await import('./sdk-runner');
+    const revived = await reviveAgent(agentId);
+    if (!revived) return { error: 'Could not reopen this session.' };
+    if ('error' in revived) return { error: revived.error };
+    const live = revived.record;
+    if (revived.rebuilt && live.status !== 'completed') {
+      // A rebuilt session is live and idle, whatever it was saved as (stopped,
+      // failed or interrupted). Turns driven from the CLI never move Whim's
+      // status, so without this Whim would keep refusing follow-ups.
+      live.status = 'completed';
+      await persistence.updateStatus(live);
+      notifier.notifyRenderer('agent:status-changed', { agentId, status: live.status, summary: live.summary });
+    }
+    const args = await publishSessionForCli(client, workspaceRoot, live.sessionId);
+    await launchCliInTerminal(args, cwd);
     return {};
   } catch (err: any) {
-    return { error: err.message || 'Failed to open CLI' };
+    return { error: err?.message || 'Failed to open the Copilot CLI' };
   }
 }

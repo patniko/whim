@@ -18,7 +18,7 @@ const macDirectory = fs.existsSync(buildDir)
       .find((candidate) => fs.existsSync(candidate))
   : undefined;
 
-function findCopilotRuntime(resourcesDirectory, targetPlatform) {
+function findCopilotCli(resourcesDirectory, targetPlatform) {
   const unpackedApp = path.join(resourcesDirectory, 'app.asar.unpacked');
   const candidates = getCopilotPlatformEntrypoints(targetPlatform, process.arch)
     .map((entrypoint) => path.join(unpackedApp, entrypoint.appRelativePath));
@@ -27,8 +27,8 @@ function findCopilotRuntime(resourcesDirectory, targetPlatform) {
 
 const macResources = macDirectory && path.join(macDirectory, 'Contents', 'Resources');
 const winResources = path.join(buildDir, 'win-unpacked', 'resources');
-const macCopilotRuntime = macResources && findCopilotRuntime(macResources, 'darwin');
-const winCopilotRuntime = findCopilotRuntime(winResources, 'win32');
+const macCopilotCli = macResources && findCopilotCli(macResources, 'darwin');
+const winCopilotCli = findCopilotCli(winResources, 'win32');
 const macSdkRuntime = macResources && getBundledSdkRuntimePaths(path.join(macResources, 'app.asar'), 'darwin');
 const winSdkRuntime = getBundledSdkRuntimePaths(path.join(winResources, 'app.asar'), 'win32');
 const checks = {
@@ -37,7 +37,7 @@ const checks = {
     macResources && path.join(macResources, 'app.asar'),
     macResources && path.join(macResources, 'assets'),
     macResources && path.join(macResources, 'app.asar.unpacked', 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node'),
-    macCopilotRuntime,
+    macCopilotCli,
     macSdkRuntime && macSdkRuntime.executable,
     macSdkRuntime && macSdkRuntime.library,
   ],
@@ -46,7 +46,7 @@ const checks = {
     path.join(winResources, 'app.asar'),
     path.join(winResources, 'assets'),
     path.join(winResources, 'app.asar.unpacked', 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node'),
-    winCopilotRuntime,
+    winCopilotCli,
     winSdkRuntime.executable,
     winSdkRuntime.library,
   ],
@@ -61,16 +61,14 @@ if (missing.length > 0) {
   throw new Error(`Packaged application is missing:\n${missing.join('\n')}`);
 }
 
-const copilotRuntime = platform === 'mac' ? macCopilotRuntime : winCopilotRuntime;
+const copilotCli = platform === 'mac' ? macCopilotCli : winCopilotCli;
 const appExecutable = platform === 'mac'
   ? path.join(macDirectory, 'Contents', 'MacOS', 'whim')
   : path.join(buildDir, 'win-unpacked', 'whim.exe');
-const runtimeCheck = spawnSync(appExecutable, [copilotRuntime, '--version'], {
-  encoding: 'utf8',
-  env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-});
-if (runtimeCheck.status !== 0) {
-  throw new Error(`Packaged Copilot runtime failed to start:\n${runtimeCheck.stderr || runtimeCheck.error}`);
+// The bundled CLI is a native executable; terminal sessions run it directly.
+const cliCheck = spawnSync(copilotCli, ['--version'], { encoding: 'utf8' });
+if (cliCheck.status !== 0) {
+  throw new Error(`Packaged Copilot CLI failed to start:\n${cliCheck.stderr || cliCheck.error}`);
 }
 
 const appArchive = path.join(platform === 'mac' ? macResources : winResources, 'app.asar');
@@ -96,17 +94,15 @@ if (rendererCheck.status !== 0) {
   throw new Error(`Packaged renderer graph is incomplete:\n${rendererCheck.stderr || rendererCheck.error}`);
 }
 console.log(rendererCheck.stdout.trim());
-for (const transport of ['stdio', 'inprocess']) {
-  const result = spawnSync(appExecutable, [path.join(__dirname, 'smoke-sdk-runtime.js'), appArchive, transport], {
-    encoding: 'utf8',
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    timeout: 45_000,
-  });
-  if (result.status !== 0) {
-    throw new Error(`Packaged SDK ${transport} failed:\n${result.stderr || result.error}\n${result.stdout}`);
-  }
-  console.log(result.stdout.trim());
+const sdkCheck = spawnSync(appExecutable, [path.join(__dirname, 'smoke-sdk-runtime.js'), appArchive], {
+  encoding: 'utf8',
+  env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+  timeout: 45_000,
+});
+if (sdkCheck.status !== 0) {
+  throw new Error(`Packaged in-process SDK runtime failed:\n${sdkCheck.stderr || sdkCheck.error}\n${sdkCheck.stdout}`);
 }
+console.log(sdkCheck.stdout.trim());
 
-console.log(`Packaged ${platform} application contains its executable, app.asar, assets, native database module, full CLI, and SDK runtime`);
-console.log(runtimeCheck.stdout.trim());
+console.log(`Packaged ${platform} application contains its executable, app.asar, assets, native database module, Copilot CLI, and SDK runtime`);
+console.log(cliCheck.stdout.trim());

@@ -1,8 +1,8 @@
 export {
   launchInTerminal,
   shellEscape,
-  shellEscapeDouble,
   powershellEscape,
+  cmdQuote,
   type TerminalLaunchOptions,
   type TerminalLaunchResult,
 } from './terminal';

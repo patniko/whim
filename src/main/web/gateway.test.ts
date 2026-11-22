@@ -184,7 +184,7 @@ describe('web remote gateway', () => {
   });
 
   it('rejects denied channels before dispatch', async () => {
-    await expect(invokeWebRemoteCommand('settings:set', ['cli_path', '/tmp/evil'])).rejects.toMatchObject({
+    await expect(invokeWebRemoteCommand('settings:set', ['model', 'attacker-model'])).rejects.toMatchObject({
       code: 'channel_not_allowed',
       status: 403,
     } satisfies Partial<GatewayError>);
@@ -194,29 +194,6 @@ describe('web remote gateway', () => {
     await expect(invokeWebRemoteCommand('space:list', [])).resolves.toEqual([
       { id: 'space-1', description: 'Test space' },
     ]);
-  });
-
-  /**
-   * The channel is reachable so the browser's boot can branch on it, but the
-   * reply names an absolute path on the host. Redaction happens on the way
-   * out, after the desktop handler has answered, so it cannot be bypassed by
-   * reaching the handler some other way.
-   */
-  it('strips the host path from the CLI runtime status on the way out', async () => {
-    registerIpcHandler('cli:runtime-status', () => ({
-      source: 'auto',
-      target: '/Users/someone/.local/bin/copilot',
-      version: '0.9.1',
-      compatible: true,
-      minVersion: '0.8.0',
-    }));
-
-    const result = await invokeWebRemoteCommand('cli:runtime-status', []) as Record<string, unknown>;
-
-    expect(result.target).not.toContain('/Users');
-    expect(result.compatible).toBe(true);
-    expect(result.version).toBe('0.9.1');
-    expect(result.minVersion).toBe('0.8.0');
   });
 });
 
@@ -256,10 +233,9 @@ describe('classification and implementation stay in sync', () => {
     await expect(invokeWebRemoteCommand('settings:set', ['theme', 'dark'])).rejects.toThrow();
   });
 
-  it('refuses a credential even though the channel is allowed', async () => {
-    // The channel is classified `allow`; the protection is per key. If this
-    // ever passes, the CLI server token is readable by any paired browser.
-    await expect(invokeWebRemoteCommand('settings:get', ['cli_server_token']))
+  it('refuses an explicitly secret setting even though the channel is allowed', async () => {
+    // The channel is classified `allow`; the protection is per key.
+    await expect(invokeWebRemoteCommand('settings:get', ['auto_download_updates']))
       .rejects.toThrow(/not readable/i);
   });
 

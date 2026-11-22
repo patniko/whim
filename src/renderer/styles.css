@@ -914,44 +914,6 @@ body.web-remote.dark #app {
   white-space: nowrap;
 }
 
-.welcome-cli-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-}
-
-.welcome-cli-input {
-  flex: 1;
-  padding: 6px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(0, 0, 0, 0.15);
-  background: white;
-  font-size: var(--fs-label);
-  font-family: monospace;
-  outline: none;
-  transition: border-color 0.15s;
-}
-
-.welcome-cli-input:focus {
-  border-color: rgba(124, 102, 220, 0.5);
-}
-
-.welcome-cli-input::placeholder {
-  color: rgba(0, 0, 0, 0.5);
-  font-family: inherit;
-}
-
-.welcome-cli-select {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 10px;
-  border-radius: 6px;
-  border: 1px solid rgba(0, 0, 0, 0.15);
-  background: white;
-  font-size: var(--fs-label);
-}
-
 
 #welcome-model-select {
   flex: 1;
@@ -984,6 +946,51 @@ body.web-remote.dark #app {
   background: rgba(0, 0, 0, 0.1);
   color: rgba(0, 0, 0, 0.3);
   cursor: default;
+}
+
+/* GitHub sign-in (onboarding + Settings) */
+.welcome-link-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--color-accent, #0969da);
+  font-size: var(--fs-label);
+  cursor: pointer;
+}
+
+.welcome-link-btn:hover {
+  text-decoration: underline;
+}
+
+.github-device-code {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.github-device-code code {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: var(--fs-card-title);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  user-select: all;
+}
+
+.github-account-row {
+  flex-wrap: wrap;
+}
+
+.github-account-status {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-body);
+  color: var(--set-text);
+}
+
+.github-account-error,
+body.dark .github-account-error {
+  color: var(--color-warning, #d29922);
 }
 
 /* Dark mode */
@@ -1022,26 +1029,6 @@ body.dark .welcome-btn {
 
 body.dark .welcome-btn:hover {
   background: rgba(255, 255, 255, 0.12);
-}
-
-body.dark .welcome-cli-input {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.12);
-  color: inherit;
-}
-
-body.dark .welcome-cli-input:focus {
-  border-color: rgba(124, 102, 220, 0.5);
-}
-
-body.dark .welcome-cli-input::placeholder {
-  color: rgba(255, 255, 255, 0.45);
-}
-
-body.dark .welcome-cli-select {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.12);
-  color: inherit;
 }
 
 
@@ -1983,22 +1970,6 @@ body.dark .sandbox-block-banner-btn {
 
 body.dark .sandbox-block-banner-btn:hover {
   background: rgba(255, 255, 255, 0.1);
-}
-
-.cli-mxc-indicator {
-  font-weight: 500;
-}
-
-.cli-mxc-indicator.ok {
-  color: #2d8a3a;
-}
-
-.cli-mxc-indicator.warn {
-  color: #b65b00;
-}
-
-.cli-mxc-indicator.err {
-  color: #b91414;
 }
 
 .settings-group {
@@ -4397,14 +4368,6 @@ body.dark .schedule-run-btn:hover {
 
 /* ── CLI Path ───────────────────────────────────────────── */
 
-.cli-path-display {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-}
-
 .cli-path-input {
   flex: 1;
   font-size: var(--fs-label);
@@ -4426,57 +4389,6 @@ body.dark .schedule-run-btn:hover {
 
 .cli-path-input::placeholder {
   color: var(--set-text-subtle, rgba(0, 0, 0, 0.5));
-}
-
-.cli-path-clear {
-  flex-shrink: 0;
-  font-size: var(--fs-meta);
-  padding: 3px 6px;
-}
-
-.cli-path-detected {
-  font-family: 'SF Mono', 'Menlo', monospace;
-  font-size: var(--fs-caption);
-}
-
-.cli-source-select {
-  flex: 1;
-  font-size: var(--fs-label);
-  color: rgba(0, 0, 0, 0.9);
-  background: rgba(0, 0, 0, 0.03);
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: var(--btn-radius);
-  padding: 4px 8px;
-  min-width: 0;
-}
-
-.cli-source-field[hidden] {
-  display: none;
-}
-
-.cli-runtime-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.cli-runtime-status {
-  font-family: 'SF Mono', 'Menlo', monospace;
-  font-size: var(--fs-caption);
-  color: rgba(0, 0, 0, 0.6);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-body.dark .cli-source-select {
-  color: rgba(255, 255, 255, 0.9);
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.08);
-}
-
-body.dark .cli-runtime-status {
-  color: rgba(255, 255, 255, 0.5);
 }
 
 /* ── Agent Personas ──────────────────────────────────────── */

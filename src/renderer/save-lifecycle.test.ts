@@ -2,7 +2,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EditorFlushRequest, EditorFlushResult } from '../shared/ipc-contract';
 import { FormDrafts, installSaveLifecycle, trackSettingWrites } from './save-lifecycle';
-import { DebouncedSave } from './debounced-save';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -53,45 +52,13 @@ describe('durable renderer lifecycle', () => {
 
   it('explicitly cancels only the selected failed settings operation', async () => {
     const fail = async () => ({ error: 'invalid' });
-    const tracked = trackSettingWrites({ savePersonas: fail, saveRuntimes: fail });
+    const tracked = trackSettingWrites({ savePersonas: fail, saveCliTools: fail });
     await tracked.api.savePersonas();
-    await tracked.api.saveRuntimes();
+    await tracked.api.saveCliTools();
     tracked.discardFailure('savePersonas');
     await expect(tracked.flush()).rejects.toThrow('failed');
-    tracked.discardFailure('saveRuntimes');
+    tracked.discardFailure('saveCliTools');
     await expect(tracked.flush()).resolves.toBeUndefined();
-  });
-
-  it('flushes a debounce and edits queued behind an in-flight write', async () => {
-    vi.useFakeTimers();
-    let value = 'first';
-    const saved: string[] = [];
-    const first = deferred<void>();
-    const write = vi.fn(async () => {
-      const snapshot = value;
-      if (write.mock.calls.length === 1) await first.promise;
-      saved.push(snapshot);
-    });
-    const draft = new DebouncedSave(write, vi.fn());
-    draft.schedule();
-    const flushing = draft.flush();
-    const simultaneous = draft.flush();
-    value = 'newer';
-    draft.schedule();
-    first.resolve();
-    await Promise.all([flushing, simultaneous]);
-    expect(saved).toEqual(['first', 'newer']);
-    await vi.advanceTimersByTimeAsync(500);
-    expect(write).toHaveBeenCalledTimes(2);
-  });
-
-  it('keeps rejected debounced content retryable', async () => {
-    const write = vi.fn().mockRejectedValueOnce(new Error('disk full')).mockResolvedValue(undefined);
-    const draft = new DebouncedSave(write, vi.fn());
-    draft.schedule();
-    await expect(draft.flush()).rejects.toThrow('disk full');
-    await draft.flush();
-    expect(write).toHaveBeenCalledTimes(2);
   });
 
   it('does not clear a settings form modified after its save snapshot', () => {

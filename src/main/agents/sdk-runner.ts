@@ -1125,14 +1125,16 @@ ${scheduledContext ? '' : cliToolsPrompt}`;
   }
 }
 
-/** Send a follow-up message to an active agent session (multi-turn chat). */
-export async function sendChatMessage(
-  agentId: string,
-  prompt: string,
-  attachments?: Array<{ type: 'file'; path: string; displayName?: string }>,
-): Promise<{ error?: string; restarted?: boolean; messageId?: string }> {
+/**
+ * The live record for an agent, bringing back one the user stopped or one that
+ * is no longer in memory because the app restarted. `rebuilt` reports whether a
+ * session had to be resumed (or restarted from its transcript). Resolves null
+ * when the session could not be brought back; a stopped record stays in place.
+ */
+export async function reviveAgent(agentId: string): Promise<
+  { record: AgentRecord; rebuilt: boolean; restarted: boolean } | { error: string } | null
+> {
   let record = registry.get(agentId);
-  let restarted = false;
 
   // Stopping an agent is not the same as one failing, but `abortAgent` records
   // it as a failure: it tears the session down and marks the record failed, so
@@ -1151,25 +1153,37 @@ export async function sendChatMessage(
     registry.delete(agentId);
     record = undefined;
   }
+  if (record) return { record, rebuilt: false, restarted: false };
 
-  if (!record) {
-    // Agent not in memory — might be historical (app restarted), or just
-    // stopped by the user. Try to re-create a session for it.
-    let result: Awaited<ReturnType<typeof resumeAgentSession>>;
-    try {
-      result = await resumeAgentSession(agentId);
-    } catch (error) {
-      if (stoppedRecord) registry.set(agentId, stoppedRecord);
-      return { error: error instanceof Error ? error.message : 'Failed to resume the agent session' };
-    }
-    if (!result) {
-      // Put the stopped record back rather than leaving the agent missing from
-      // the registry entirely — the send failed, the agent should not.
-      if (stoppedRecord) registry.set(agentId, stoppedRecord);
-      return { error: 'Agent session expired — open in CLI to resume' };
-    }
-    restarted = result === 'restarted';
-    record = registry.get(agentId)!;
+  // Agent not in memory — might be historical (app restarted), or just
+  // stopped by the user. Try to re-create a session for it.
+  let result: Awaited<ReturnType<typeof resumeAgentSession>>;
+  try {
+    result = await resumeAgentSession(agentId);
+  } catch (error) {
+    if (stoppedRecord) registry.set(agentId, stoppedRecord);
+    return { error: error instanceof Error ? error.message : 'Failed to resume the agent session' };
+  }
+  if (!result) {
+    // Put the stopped record back rather than leaving the agent missing from
+    // the registry entirely — the caller failed, the agent should not.
+    if (stoppedRecord) registry.set(agentId, stoppedRecord);
+    return null;
+  }
+  return { record: registry.get(agentId)!, rebuilt: true, restarted: result === 'restarted' };
+}
+
+/** Send a follow-up message to an active agent session (multi-turn chat). */
+export async function sendChatMessage(
+  agentId: string,
+  prompt: string,
+  attachments?: Array<{ type: 'file'; path: string; displayName?: string }>,
+): Promise<{ error?: string; restarted?: boolean; messageId?: string }> {
+  const revived = await reviveAgent(agentId);
+  if (!revived) return { error: 'Agent session expired — open in CLI to resume' };
+  if ('error' in revived) return { error: revived.error };
+  const { record, restarted } = revived;
+  if (revived.rebuilt) {
     // A session we just rebuilt is live regardless of the status it was
     // persisted with; the guard below is about records we did not rebuild.
     record.status = 'running';

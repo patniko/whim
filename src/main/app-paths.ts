@@ -20,7 +20,7 @@ export const USER_DATA_DIR_NAME = 'whim';
  * Pin `userData` to `<appData>/whim` so it no longer depends on `productName`.
  *
  * This runs as an import-time side effect because several modules
- * (config.ts, ai.ts, migration.ts, voice.ts, cli-electron-shim.ts) resolve
+ * (config.ts, ai.ts, migration.ts, voice.ts) resolve
  * `app.getPath('userData')` at module-load time. The build is CommonJS, so
  * importing this module *first* in main.ts guarantees the path is pinned before
  * any of those modules are evaluated.
